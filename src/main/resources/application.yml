@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: hpds-etl
+  main:
+    # Jobs are CLI-driven, not a long-running server. Keep the context lean.
+    web-application-type: none
+    banner-mode: "off"
+  datasource:
+    url: ${RDS_URL:jdbc:postgresql://localhost:5432/hpds}
+    username: ${RDS_USERNAME:hpds}
+    password: ${RDS_PASSWORD:hpds}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:8}
+      # Do NOT fail context startup when the DB is unreachable. Jobs that don't
+      # touch the DB must still be able to run; DB-backed jobs surface the failure
+      # as an INFRASTRUCTURE_ERROR exit code when they actually connect.
+      initialization-fail-timeout: -1
+  sql:
+    init:
+      # Schema is owned/managed externally (Flyway/DBA). Never auto-run against RDS.
+      mode: never
+
+etl:
+  reports:
+    # Where per-run validation/summary JSON reports are written. Jenkins archives this dir.
+    dir: ${ETL_REPORTS_DIR:./reports}
+  # In-process pipelines for local/CI use (--pipeline=<name>). In production prefer
+  # Jenkins stages so you get per-stage retry/notification/scheduling for free.
+  pipelines:
+    migrate-all:
+      - participants-migration
+  aws:
+    region: ${AWS_REGION:us-east-1}
+    s3:
+      # Blank in prod (uses real S3). Overridden to a LocalStack URL in tests.
+      endpoint-override: ${AWS_S3_ENDPOINT:}
+
+logging:
+  level:
+    edu.harvard.hms.dbmi.avillach.hpds: ${LOG_LEVEL:INFO}

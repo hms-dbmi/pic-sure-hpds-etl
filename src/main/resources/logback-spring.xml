@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Console logging tuned for Jenkins: everything goes to stdout so the Jenkins
+  console captures it. The MDC keys `job` and `runId` are populated by JobLauncher
+  so every line can be traced back to a specific job run.
+-->
+<configuration>
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{job:-no-job}/%X{runId:-no-run}] %logger{36} - %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+    <logger name="edu.harvard.hms.dbmi.avillach.hpds" level="INFO"/>
+</configuration>
