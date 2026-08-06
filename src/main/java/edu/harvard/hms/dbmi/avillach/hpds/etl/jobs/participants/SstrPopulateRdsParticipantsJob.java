@@ -1,4 +1,4 @@
-package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.sstr;
+package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.DelimitedReader;

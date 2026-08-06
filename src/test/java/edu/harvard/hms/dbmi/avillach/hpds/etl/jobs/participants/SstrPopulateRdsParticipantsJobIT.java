@@ -1,4 +1,4 @@
-package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.sstr;
+package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
@@ -170,5 +170,28 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(result.getInputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("BAD_STUDY_ID"));
         assertThat(participants.count()).isEqualTo(0);
+    }
+
+    @Test
+    void fails_with_infrastructure_error_when_rds_schema_is_missing_a_required_column() {
+        // Simulates RDS drifting out of sync with what the job expects (schema is owned/
+        // migrated externally, per application.yml). Restored in `finally` because the
+        // Postgres container -- and therefore this schema change -- is shared across every
+        // IT test class for the life of the JVM.
+        jdbc.execute("ALTER TABLE consents DROP COLUMN consent_abbreviation");
+        try {
+            String input = JobTestSupport.tempFile("sstr.tsv", HEADER
+                    + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+
+            JobResult result = run(executor, job, input, "it-schema-drift");
+
+            assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+            // The transaction wraps purge+load, so the participant insert that preceded
+            // the failed consent insert must have rolled back too.
+            assertThat(participants.count()).isEqualTo(0);
+        } finally {
+            jdbc.execute("ALTER TABLE consents ADD COLUMN consent_abbreviation TEXT NOT NULL DEFAULT ''");
+            jdbc.execute("ALTER TABLE consents ALTER COLUMN consent_abbreviation DROP DEFAULT");
+        }
     }
 }

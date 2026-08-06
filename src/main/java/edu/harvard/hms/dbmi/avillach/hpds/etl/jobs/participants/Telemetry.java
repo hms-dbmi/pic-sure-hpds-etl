@@ -1,4 +1,4 @@
-package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.sstr;
+package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants;
 
 /**
  * One row of a subject/sample TSV mapping file, keyed by the relevant columns found in
