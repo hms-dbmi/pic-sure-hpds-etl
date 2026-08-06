@@ -158,4 +158,17 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(participants.count()).isEqualTo(0);
     }
+
+    @Test
+    void fails_validation_on_bad_study_id_format() {
+        String input = JobTestSupport.tempFile("sstr.tsv", HEADER
+                + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+
+        JobResult result = executor.run(job, Map.of("input", input, "study-id", "phs1412"), "it-bad-study-id");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("BAD_STUDY_ID"));
+        assertThat(participants.count()).isEqualTo(0);
+    }
 }

@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.ToIntFunction;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -54,6 +55,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
     static final String COL_CONSENT = "CONSENT";
     static final String COL_CONSENT_ABBREVIATION = "consent_abbreviation";
     private static final int DEFAULT_BATCH_SIZE = 1000;
+    private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
 
     private final IoResolver io;
     private final DelimitedReader delimitedReader;
@@ -93,7 +95,8 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                         ParamSpec.required("input",
                                 "dbGaP SSTR subject/sample mapping TSV, tab-delimited (local path or s3:// URI)",
                                 "/data/phs001412.sstr.txt"),
-                        ParamSpec.required("study-id", "dbGaP study id these rows belong to", "phs001412"),
+                        ParamSpec.required("study-id",
+                                "dbGaP study id these rows belong to, format phs###### (6 digits)", "phs001412"),
                         ParamSpec.optional("batch-size", "Rows per batch insert", "1000")),
                 List.of("participants/consents/samples upserted in RDS from the mapping file; "
                         + "existing consents for --study-id are purged and repopulated"));
@@ -101,6 +104,12 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
+        ctx.get("study-id").ifPresent(studyId -> {
+            if (!STUDY_ID_PATTERN.matcher(studyId).matches()) {
+                report.error("BAD_STUDY_ID",
+                        "study-id must match phs###### (6 digits), got: " + studyId, "--study-id");
+            }
+        });
         ctx.get("batch-size").ifPresent(bs -> {
             try {
                 if (Integer.parseInt(bs) <= 0) {

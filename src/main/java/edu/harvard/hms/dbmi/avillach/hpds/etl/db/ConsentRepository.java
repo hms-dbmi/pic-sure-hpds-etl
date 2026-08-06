@@ -13,16 +13,16 @@ import java.util.List;
 /**
  * Bulk access to the {@code consents} table. A participant belongs to at most one
  * consent group per study, so the upsert conflict target is {@code (hpds_uuid, study_id)}.
- * On conflict the consent_group/consent_abbreviation are refreshed to the incoming values.
+ * On conflict the consent_code/consent_abbreviation are refreshed to the incoming values.
  */
 @Repository
 public class ConsentRepository {
 
     private static final String UPSERT = """
-            INSERT INTO consents (hpds_uuid, study_id, consent_group, consent_abbreviation)
-            VALUES (:hpdsUuid, :studyId, :consentGroup, :consentAbbreviation)
+            INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation)
+            VALUES (:hpdsUuid, :studyId, :consentCode, :consentAbbreviation)
             ON CONFLICT (hpds_uuid, study_id) DO UPDATE SET
-                consent_group = EXCLUDED.consent_group,
+                consent_code = EXCLUDED.consent_code,
                 consent_abbreviation = EXCLUDED.consent_abbreviation
             """;
 
@@ -42,7 +42,7 @@ public class ConsentRepository {
                 .map(c -> new MapSqlParameterSource()
                         .addValue("hpdsUuid", c.hpdsUuid())
                         .addValue("studyId", c.studyId())
-                        .addValue("consentGroup", c.consentGroup())
+                        .addValue("consentCode", c.consentCode())
                         .addValue("consentAbbreviation", c.consentAbbreviation()))
                 .toArray(SqlParameterSource[]::new);
         try {
