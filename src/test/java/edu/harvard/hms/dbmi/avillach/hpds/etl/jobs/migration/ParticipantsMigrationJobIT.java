@@ -1,24 +1,38 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.migration;
 
+import edu.harvard.hms.dbmi.avillach.hpds.etl.config.EtlProperties;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.AbstractIntegrationTest;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.support.JobTestSupport;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Integration tests for {@link ParticipantsMigrationJob} against a real Postgres.
- * Exercises success plus each failure mode, and asserts the transactional guarantee
- * (a bad row leaves the table empty). Add a new {@code @Test} per business case found.
+ * Covers the sstr-driven path (delegating to {@link
+ * edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob}),
+ * the direct-population path (patient-mapping/consents.csv join), the
+ * open_access-1000Genomes samples exception, skipping not-ready studies, and per-study
+ * failure isolation.
+ *
+ * <p>Failure modes that don't need a live database (managed-inputs/consents.csv missing,
+ * the database being unreachable) are covered by {@link ParticipantsMigrationJobTest}
+ * instead.
  */
 class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
@@ -30,67 +44,167 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     private ParticipantRepository participants;
     @Autowired
     private JdbcTemplate jdbc;
+    @Autowired
+    private EtlProperties properties;
+
+    private Path reportsDir;
 
     @BeforeEach
-    void cleanTable() {
-        jdbc.execute("TRUNCATE TABLE participants");
+    void setUp() {
+        jdbc.execute("TRUNCATE TABLE participants, consents, samples");
+        reportsDir = Path.of(properties.getReports().getDir());
+    }
+
+    @AfterEach
+    void cleanUpMappingFiles() throws IOException {
+        if (Files.isDirectory(reportsDir)) {
+            try (var files = Files.list(reportsDir)) {
+                for (Path p : files.filter(p -> p.getFileName().toString().endsWith("_hpds_id_mapping.csv")).toList()) {
+                    Files.deleteIfExists(p);
+                }
+            }
+        }
+    }
+
+    private static String managedInputs(String... rows) {
+        StringBuilder csv = new StringBuilder("Study Abbreviated Name,Study Identifier,Data is ready to process\n");
+        for (String row : rows) {
+            csv.append(row).append('\n');
+        }
+        return writeFile("managed_inputs", csv.toString());
+    }
+
+    /** Writes each entry as a file into one shared temp directory and returns its path. */
+    private static String dataFolder(Map<String, String> filesByName) {
+        try {
+            Path dir = Files.createTempDirectory("migration-data");
+            for (Map.Entry<String, String> entry : filesByName.entrySet()) {
+                Files.writeString(dir.resolve(entry.getKey()), entry.getValue(), StandardCharsets.UTF_8);
+            }
+            return dir.toString();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static String writeFile(String namePrefix, String content) {
+        try {
+            Path file = Files.createTempDirectory(namePrefix).resolve(namePrefix + ".csv");
+            Files.writeString(file, content, StandardCharsets.UTF_8);
+            return file.toString();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private long countWhere(String table, String where, Object... args) {
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE " + where, Long.class, args);
+        return n == null ? 0 : n;
+    }
+
+    private String readMappingFile(String studyId) throws IOException {
+        return Files.readString(reportsDir.resolve(studyId + "_hpds_id_mapping.csv"));
     }
 
     @Test
-    void loads_all_rows() {
-        String input = JobTestSupport.tempFile("participants.csv",
-                "source_id,source\nphs000001,dbgap\nphs000002,dbgap\n1kg-1,1000genomes\n");
+    void sstr_driven_study_populates_rds_and_writes_mapping_file() throws IOException {
+        String managedInputsPath = managedInputs("GRU,phs001412,true");
+        String dataFolder = dataFolder(Map.of(
+                "consents.csv", "",
+                "phs001412_sstr.tsv",
+                "SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
+                        + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n",
+                "GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
 
-        JobResult result = executor.run(job, Map.of("input", input), "it-success");
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-sstr");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(result.getMetrics()).containsEntry("inserted", 3);
-        assertThat(participants.count()).isEqualTo(3);
+        assertThat(result.getMetrics()).containsEntry("succeededStudies", 1L).containsEntry("failedStudies", 0L);
+        assertThat(participants.count()).isEqualTo(1);
+        UUID newUuid = jdbc.queryForObject(
+                "SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
+                UUID.class, "phs001412.v1.p1.c1", "DBGap");
+        assertThat(countWhere("consents", "study_id = ? AND consent_code = '1' AND consent_abbreviation = 'GRU'",
+                "phs001412")).isEqualTo(1);
+
+        String mapping = readMappingFile("phs001412");
+        assertThat(mapping).isEqualTo("old_hpds_id,new_uuid,common_dbgap_id\n1001," + newUuid + ",phs001412.v1.p1.c1\n");
     }
 
     @Test
-    void is_idempotent_on_rerun() {
-        String input = JobTestSupport.tempFile("participants.csv",
-                "source_id,source\nphs000001,dbgap\nphs000002,dbgap\n");
+    void non_sstr_study_populates_directly_via_patient_mapping_and_consents_join() throws IOException {
+        String managedInputsPath = managedInputs("OTHER,other-study-01,true");
+        String dataFolder = dataFolder(Map.of(
+                "consents.csv", "\"2002\",\"other-study-01.c1\"\n",
+                "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
-        executor.run(job, Map.of("input", input), "it-first");
-        JobResult second = executor.run(job, Map.of("input", input), "it-second");
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-direct");
 
-        assertThat(second.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(second.getMetrics()).containsEntry("inserted", 0);
-        assertThat(participants.count()).isEqualTo(2);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(participants.count()).isEqualTo(1);
+        UUID newUuid = jdbc.queryForObject(
+                "SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
+                UUID.class, "SUBJ42", "other-study-01");
+        assertThat(countWhere("consents",
+                "study_id = ? AND consent_code = '1' AND consent_abbreviation = ''", "other-study-01")).isEqualTo(1);
+        assertThat(countWhere("samples", "sample_source = ?", "other-study-01")).isZero();
+
+        String mapping = readMappingFile("other-study-01");
+        assertThat(mapping).isEqualTo("old_hpds_id,new_uuid,common_dbgap_id\n2002," + newUuid + ",SUBJ42\n");
     }
 
     @Test
-    void fails_and_rolls_back_on_blank_required_field() {
-        String input = JobTestSupport.tempFile("participants.csv",
-                "source_id,source\nphs000001,dbgap\n,dbgap\n");
+    void open_access_1000_genomes_also_populates_samples() {
+        String managedInputsPath = managedInputs("open_access-1000Genomes,tg-study-01,true");
+        String dataFolder = dataFolder(Map.of(
+                "consents.csv", "\"3003\",\"tg-study-01.c1\"\n",
+                "OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
 
-        JobResult result = executor.run(job, Map.of("input", input), "it-blank");
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-1000genomes");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
-        // The whole load is one transaction, so the first good row must NOT have persisted.
-        assertThat(participants.count()).isEqualTo(0);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(countWhere("samples", "source_sample_id = ? AND sample_source = ?",
+                "SUBJ99", "tg-study-01")).isEqualTo(1);
     }
 
     @Test
-    void fails_on_missing_required_column() {
-        String input = JobTestSupport.tempFile("participants.csv",
-                "source_id,study\nphs000001,dbgap\n");
+    void study_not_marked_ready_is_skipped_entirely() {
+        // NOTSET has no data files at all -- if the job touched it, it would fail.
+        String managedInputsPath = managedInputs(
+                "OTHER,other-study-01,true",
+                "NOTSET,not-ready-study,false");
+        String dataFolder = dataFolder(Map.of(
+                "consents.csv", "\"2002\",\"other-study-01.c1\"\n",
+                "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
-        JobResult result = executor.run(job, Map.of("input", input), "it-missing-col");
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-not-ready");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
-        assertThat(participants.count()).isEqualTo(0);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 1L);
     }
 
     @Test
-    void fails_validation_on_empty_input() {
-        String input = JobTestSupport.tempFile("participants.csv", "source_id,source\n");
+    void isolates_a_failing_study_so_others_still_succeed() {
+        // MISSING has no patient mapping file on disk -- that study should fail, but
+        // OTHER (also ready, in the same run) must still be committed.
+        String managedInputsPath = managedInputs(
+                "OTHER,other-study-01,true",
+                "MISSING,missing-study-01,true");
+        String dataFolder = dataFolder(Map.of(
+                "consents.csv", "\"2002\",\"other-study-01.c1\"\n",
+                "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
-        JobResult result = executor.run(job, Map.of("input", input), "it-empty");
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-isolation");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
-        assertThat(participants.count()).isEqualTo(0);
+        assertThat(result.getMetrics()).containsEntry("succeededStudies", 1L).containsEntry("failedStudies", 1L);
+        assertThat(countWhere("participants", "source_id = ? AND source = ?", "SUBJ42", "other-study-01"))
+                .isEqualTo(1);
+        assertThat(Files.exists(reportsDir.resolve("missing-study-01_hpds_id_mapping.csv"))).isFalse();
     }
 }

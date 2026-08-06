@@ -9,6 +9,7 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
@@ -69,6 +70,22 @@ public class IoResolver {
         } catch (IOException e) {
             throw new InfrastructureException("Failed to open local input: " + path, e);
         }
+    }
+
+    /** Checks whether a location exists, without reading its content. */
+    public boolean exists(String uri) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            try {
+                s3.headObject(HeadObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build());
+                return true;
+            } catch (NoSuchKeyException e) {
+                return false;
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to check existence in S3: " + uri, e);
+            }
+        }
+        return Files.exists(toLocalPath(uri));
     }
 
     /** Writes bytes to the target location, creating parent dirs for local paths. */

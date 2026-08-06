@@ -49,7 +49,7 @@ import java.util.stream.Stream;
 @Component
 public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsParticipantsJob.Output> {
 
-    static final String SOURCE = "DBGap";
+    public static final String SOURCE = "DBGap";
     static final String COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
     static final String COL_DBGAP_SAMPLE_ID = "dbgap_sample_id";
     static final String COL_CONSENT = "CONSENT";
