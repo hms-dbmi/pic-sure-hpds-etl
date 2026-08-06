@@ -21,9 +21,10 @@ CREATE INDEX IF NOT EXISTS ix_participants_hpds_uuid ON participants (hpds_uuid)
 -- A participant never belongs to more than one consent group within the same study,
 -- so (hpds_uuid, study_id) is unique.
 CREATE TABLE IF NOT EXISTS consents (
-    hpds_uuid     UUID NOT NULL,
-    study_id      TEXT NOT NULL,
-    consent_group TEXT NOT NULL,
+    hpds_uuid            UUID NOT NULL,
+    study_id             TEXT NOT NULL,
+    consent_group        TEXT NOT NULL,
+    consent_abbreviation TEXT NOT NULL,
     CONSTRAINT uq_consents_hpds_uuid_study UNIQUE (hpds_uuid, study_id)
 );
 CREATE INDEX IF NOT EXISTS ix_consents_hpds_uuid ON consents (hpds_uuid);

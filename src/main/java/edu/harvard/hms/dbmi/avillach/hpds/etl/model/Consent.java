@@ -7,5 +7,5 @@ import java.util.UUID;
  * A participant never belongs to more than one consent group within the same study,
  * so {@code (hpdsUuid, studyId)} is unique.
  */
-public record Consent(UUID hpdsUuid, String studyId, String consentGroup) {
+public record Consent(UUID hpdsUuid, String studyId, String consentGroup, String consentAbbreviation) {
 }

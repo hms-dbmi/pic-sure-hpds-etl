@@ -13,16 +13,20 @@ import java.util.List;
 /**
  * Bulk access to the {@code consents} table. A participant belongs to at most one
  * consent group per study, so the upsert conflict target is {@code (hpds_uuid, study_id)}.
- * On conflict the consent_group is refreshed to the incoming value.
+ * On conflict the consent_group/consent_abbreviation are refreshed to the incoming values.
  */
 @Repository
 public class ConsentRepository {
 
     private static final String UPSERT = """
-            INSERT INTO consents (hpds_uuid, study_id, consent_group)
-            VALUES (:hpdsUuid, :studyId, :consentGroup)
-            ON CONFLICT (hpds_uuid, study_id) DO UPDATE SET consent_group = EXCLUDED.consent_group
+            INSERT INTO consents (hpds_uuid, study_id, consent_group, consent_abbreviation)
+            VALUES (:hpdsUuid, :studyId, :consentGroup, :consentAbbreviation)
+            ON CONFLICT (hpds_uuid, study_id) DO UPDATE SET
+                consent_group = EXCLUDED.consent_group,
+                consent_abbreviation = EXCLUDED.consent_abbreviation
             """;
+
+    private static final String DELETE_BY_STUDY = "DELETE FROM consents WHERE study_id = :studyId";
 
     private final NamedParameterJdbcTemplate jdbc;
 
@@ -38,7 +42,8 @@ public class ConsentRepository {
                 .map(c -> new MapSqlParameterSource()
                         .addValue("hpdsUuid", c.hpdsUuid())
                         .addValue("studyId", c.studyId())
-                        .addValue("consentGroup", c.consentGroup()))
+                        .addValue("consentGroup", c.consentGroup())
+                        .addValue("consentAbbreviation", c.consentAbbreviation()))
                 .toArray(SqlParameterSource[]::new);
         try {
             int[] counts = jdbc.batchUpdate(UPSERT, batch);
@@ -49,6 +54,15 @@ public class ConsentRepository {
             return affected;
         } catch (DataAccessException e) {
             throw new InfrastructureException("Batch upsert into consents failed", e);
+        }
+    }
+
+    /** Deletes every consent row for a study, e.g. to re-populate it from a fresh file. */
+    public int deleteByStudyId(String studyId) {
+        try {
+            return jdbc.update(DELETE_BY_STUDY, new MapSqlParameterSource().addValue("studyId", studyId));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Delete from consents failed", e);
         }
     }
 

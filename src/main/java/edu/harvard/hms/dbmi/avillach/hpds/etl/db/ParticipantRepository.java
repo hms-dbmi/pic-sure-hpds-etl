@@ -3,12 +3,16 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.db;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -72,6 +76,23 @@ public class ParticipantRepository {
             return found.stream().findFirst();
         } catch (DataAccessException e) {
             throw new InfrastructureException("Lookup in participants failed", e);
+        }
+    }
+
+    /** Resolves HPDS uuids for a batch of origin ids sharing the same source in one query. */
+    public Map<String, UUID> findUuids(Collection<String> sourceIds, String source) {
+        if (sourceIds.isEmpty()) {
+            return Map.of();
+        }
+        try {
+            Map<String, UUID> found = new LinkedHashMap<>();
+            jdbc.query(
+                    "SELECT source_id, hpds_uuid FROM participants WHERE source_id IN (:sourceIds) AND source = :source",
+                    new MapSqlParameterSource().addValue("sourceIds", sourceIds).addValue("source", source),
+                    (RowCallbackHandler) rs -> found.put(rs.getString("source_id"), rs.getObject("hpds_uuid", UUID.class)));
+            return found;
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Batch lookup in participants failed", e);
         }
     }
 
