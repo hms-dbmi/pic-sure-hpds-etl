@@ -17,9 +17,9 @@ import java.nio.file.Path;
  * directory so every run leaves a durable, machine-readable record of what happened,
  * what was validated, and why it failed.
  *
- * <p>Report writing must never mask the job's real outcome: if serialization fails we
- * log and continue rather than throwing, so a job that actually succeeded is not
- * reported as failed because of a disk hiccup.
+ * <p>Report writing must never mask the job's real outcome. A serialization failure is logged and
+ * swallowed rather than thrown, so a job that succeeded is not reported as failed because its
+ * report could not be written.
  */
 @Component
 public class ReportWriter {
@@ -45,7 +45,7 @@ public class ReportWriter {
             log.info("Wrote report {}", target.toAbsolutePath());
             return target;
         } catch (IOException e) {
-            // Do not fail the run because the report could not be written; just record it.
+            // Record the failure without failing the run.
             log.error("Failed to write report for job '{}' run '{}': {}",
                     result.getJobName(), result.getRunId(), e.getMessage(), e);
             return null;

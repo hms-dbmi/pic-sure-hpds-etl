@@ -5,7 +5,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 /**
  * Base for all job failures. Every EtlException carries the {@link ExitCode} the
  * process should exit with, so JobLauncher can translate a thrown exception into a
- * deterministic exit status for Jenkins without a big instanceof ladder.
+ * deterministic exit status for Jenkins without an instanceof ladder.
  *
  * <p>Prefer throwing one of the typed subclasses ({@link ConfigException},
  * {@link ValidationFailedException}, {@link DataException},

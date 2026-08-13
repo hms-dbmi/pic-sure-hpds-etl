@@ -15,7 +15,7 @@ import java.util.Map;
  * <p>Typical use inside a job:
  * <pre>{@code
  *   report.error("MISSING_COLUMN", "source_id column not found in header");
- *   if (report.hasErrors()) { ... }  // AbstractJob does this for you
+ *   if (report.hasErrors()) { ... }  // AbstractJob already performs this check
  * }</pre>
  */
 public class ValidationReport {

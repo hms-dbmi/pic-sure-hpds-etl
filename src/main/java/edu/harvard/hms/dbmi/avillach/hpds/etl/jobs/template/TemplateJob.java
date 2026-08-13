@@ -80,9 +80,8 @@ public class TemplateJob extends AbstractJob<TemplateJob.Output> {
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
-        // Required-param presence is checked automatically from expectations(). Add only
-        // the cheap, business-specific checks here. Anything requiring I/O that you would
-        // do anyway belongs in execute().
+        // Required-param presence is checked automatically from expectations(). Only cheap,
+        // business-specific checks belong here; anything needing I/O belongs in execute().
         String delimiter = ctx.get("delimiter", "comma");
         if (!delimiter.equals("comma") && !delimiter.equals("tab")) {
             report.error("BAD_DELIMITER", "delimiter must be 'comma' or 'tab', got: " + delimiter, "--delimiter");

@@ -84,7 +84,7 @@
             <artifactId>s3</artifactId>
         </dependency>
 
-        <!-- Bean-validation annotations used by expectation/param specs (optional but handy) -->
+        <!-- Bean-validation annotations used by expectation/param specs -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>

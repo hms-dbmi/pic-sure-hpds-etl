@@ -36,8 +36,8 @@ import java.util.stream.Stream;
  * unlike {@link SstrPopulateRdsParticipantsJob}, every subject in one run shares the same
  * {@code --consent-type}.
  *
- * <p>{@code source} (on {@code participants}/{@code samples}) is simply {@code --study-id}
- * verbatim -- it is not format-validated here, unlike the dbGaP study ids used elsewhere.
+ * <p>{@code source} (on {@code participants}/{@code samples}) is {@code --study-id} verbatim; it is
+ * not format-validated here, unlike the dbGaP study ids used elsewhere.
  *
  * <p>Every run first purges existing {@code consents} rows for {@code --study-id} so the
  * study's consent is fully repopulated from the given file, not merged with stale data.

@@ -18,9 +18,9 @@ import java.util.Map;
  * Runs a named, ordered list of jobs in-process, stopping at the first job that does
  * not succeed. This mirrors "job A succeeds &rarr; trigger job B" for local and CI use.
  *
- * <p>In production, prefer expressing the DAG as Jenkins stages -- that gives you
- * per-stage retries, notifications, and scheduling for free. This runner exists so the
- * same chaining can be exercised on a laptop or in a single CI step.
+ * <p>In production the DAG belongs in Jenkins stages, which provide per-stage retry,
+ * notification, and scheduling. This runner exists so the same chaining can be exercised on a
+ * workstation or in a single CI step.
  */
 @Component
 public class PipelineRunner {
@@ -50,7 +50,7 @@ public class PipelineRunner {
                     + "'. Configured pipelines: " + properties.getPipelines().keySet());
         }
 
-        // Validate every referenced job exists before running any, so we fail fast.
+        // Validate every referenced job before running any, to fail fast.
         jobNames.forEach(registry::require);
 
         log.info("Running pipeline '{}' with {} step(s): {}", pipelineName, jobNames.size(), jobNames);

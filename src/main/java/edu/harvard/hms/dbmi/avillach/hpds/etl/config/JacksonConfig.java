@@ -8,9 +8,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Provides the shared {@link ObjectMapper}. This is a non-web app (no {@code spring-web}
- * on the classpath), so Boot's Jackson auto-configuration cannot build one for us --
- * we configure it here for report serialization and JSON job inputs.
+ * Provides the shared {@link ObjectMapper}. With no {@code spring-web} on the classpath, Boot's
+ * Jackson auto-configuration does not apply, so the mapper used for report serialization and JSON
+ * job inputs is configured here.
  *
  * <p>Java time types serialize as ISO-8601 strings, not numeric timestamps, so report
  * timestamps are human-readable.

@@ -95,8 +95,8 @@ public class ParticipantRepository {
         resolved.putAll(stored);
 
         if (resolved.size() != distinct.size()) {
-            // Unreachable unless rows were deleted underneath us. Fail rather than write
-            // consents against a uuid that is not in participants.
+            // Unreachable unless rows were deleted concurrently. Fail rather than write consents
+            // against a uuid that is not in participants.
             List<String> missing = distinct.stream().filter(id -> !resolved.containsKey(id)).limit(5).toList();
             throw new InfrastructureException("Could not resolve a participant uuid for "
                     + (distinct.size() - resolved.size()) + " of " + distinct.size() + " source id(s) for source '"

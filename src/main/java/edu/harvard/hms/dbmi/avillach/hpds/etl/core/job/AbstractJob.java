@@ -12,10 +12,10 @@ import java.time.Instant;
  *
  * <pre>
  *   1. validate required params      (automatic, from expectations())
- *   2. validateInput(...)            (you implement: structural/business input checks)
- *   3. execute(...)                  (you implement: the actual extract/transform/load)
- *   4. validateOutput(...)           (you implement: assert the output is correct)
- *   5. report(...)                   (you implement, optional: attach metrics)
+ *   2. validateInput(...)            (per job: structural/business input checks)
+ *   3. execute(...)                  (per job: the extract/transform/load)
+ *   4. validateOutput(...)           (per job: assert the output is correct)
+ *   5. report(...)                   (per job, optional: attach metrics)
  * </pre>
  *
  * If step 1 or 2 finds ERROR-level issues, {@code execute} is never called and the run
