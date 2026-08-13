@@ -1,31 +1,27 @@
 // =============================================================================
 // TEMPORARY MIGRATION PIPELINE -- one-off migrations off the legacy HPDS system.
 //
-// SCOPE: this pipeline is ONLY for jobs whose Job.type() is JobType.MIGRATION. Nothing that
-// runs on an ongoing basis belongs here. Permanent ingestion lives in a separate pipeline,
-// /Jenkinsfile.permanent, so that scheduling, retention, notification, and the decision to
-// delete are independent between the two: MIGRATION jobs are expected to be deleted once
-// they have run in every environment, and this file goes with them.
+// Scope: only jobs whose Job.type() is JobType.MIGRATION. Permanent ingestion lives in
+// /Jenkinsfile.permanent so that scheduling, retention, notification, and the decision to delete
+// stay independent between the two.
 //
-// WHEN THE MIGRATION IS COMPLETE, delete:
+// When the migration is complete, delete:
 //   - this file
 //   - etl-runners/participants-migration/                (runner, Terraform, validation)
 //   - src/.../jobs/migration/ParticipantsMigrationJob    (and its tests)
 //   - the etl.pipelines.migrate-all entry in application.yml
-// and rename /Jenkinsfile.permanent to /Jenkinsfile, which will then be the only pipeline.
+// then rename /Jenkinsfile.permanent to /Jenkinsfile.
 //
-// STRUCTURE
-//   The DAG lives here, not in the JAR. Each migration job is one stage that TRIGGERS THAT
-//   JOB'S OWN PIPELINE, which owns provisioning its ephemeral runner, validating its inputs
-//   and outputs, and tearing itself down. A stage runs only if the stage above it succeeded,
-//   so ordering between migrations is expressed by stage order.
+// Structure: the DAG lives here, not in the JAR. Each migration job is one stage that triggers
+// that job's own pipeline, which owns provisioning its ephemeral runner, validating its inputs and
+// outputs, and tearing itself down. A stage runs only if the one above it succeeded, so ordering
+// between migrations is stage order.
 //
-//   Build and test run HERE, once, as the gate for the whole run: nothing is provisioned
-//   until the suites pass. The downstream jobs are therefore invoked with SKIP_TESTS=true —
-//   they rebuild the JAR (each provisions its own runner from its own workspace) but do not
-//   re-run suites this pipeline already ran on the same commit.
+// Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
+// SKIP_TESTS=true: they rebuild the JAR in their own workspace but do not re-run suites this
+// pipeline already ran on the same commit.
 //
-// EXIT CODES the stages gate on (see ExitCode.java):
+// Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
 // =============================================================================
 

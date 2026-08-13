@@ -9,17 +9,15 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Indexes every {@link Job} bean Spring created, by {@link Job#name()}. This is what makes
- * new jobs "plug and play": annotate a job with {@code @Component} (or extend the annotated
- * {@link AbstractJob} subclass) and it is automatically runnable via {@code --job=<name>} --
- * no central switch statement to edit.
+ * Indexes every {@link Job} bean Spring created, by {@link Job#name()}. Annotating a job with
+ * {@code @Component} makes it runnable via {@code --job=<name>} with no central switch statement
+ * to edit.
  *
- * <p>Jobs are also opt-in. Each job carries
+ * <p>Jobs are opt-in: each carries
  * {@code @ConditionalOnProperty("etl.jobs.<job-name>.enabled", havingValue = "true")}, so a
- * disabled job is never instantiated and therefore never reaches this registry -- the
- * enable/disable decision is made once, in {@code application.yml}, and needs no code here.
- * "Registered" consequently means "enabled in this environment", which is why
- * {@link #require(String)} cannot tell a wrong name from a disabled job and says so.
+ * disabled job is never instantiated and never reaches this registry. "Registered" therefore means
+ * "enabled in this environment", and {@link #require(String)} cannot distinguish a wrong name from
+ * a disabled job.
  */
 @Component
 public class JobRegistry {
@@ -42,8 +40,7 @@ public class JobRegistry {
     public Job require(String name) {
         Job job = jobsByName.get(name);
         if (job == null) {
-            // Naming the flag matters: a disabled job is indistinguishable from a typo here,
-            // and "unknown job" alone sends people hunting for a misspelling that isn't there.
+            // Name the flag: a disabled job is indistinguishable from a typo at this point.
             throw new ConfigException("No enabled job named '" + name + "'. Either the name is wrong, or the "
                     + "job is disabled -- jobs are opt-in via etl.jobs." + name + ".enabled=true "
                     + "(see application.yml). Currently enabled: " + names());

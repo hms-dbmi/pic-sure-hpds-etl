@@ -10,11 +10,10 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -47,9 +46,9 @@ import java.util.stream.Stream;
  * study's consent groups are fully repopulated from the given file, not merged with stale
  * data. Purge + load happen in one transaction: a bad row rolls the whole run back.
  *
- * <p>Enabled by {@code etl.jobs.sstr-populate-rds-participants.enabled=true}; without it this
- * bean is never created and {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry}
- * does not know the job exists.
+ * <p>Enabled by {@code etl.jobs.sstr-populate-rds-participants.enabled=true}; without it the bean
+ * is never created and {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry} does not
+ * know the job exists.
  */
 @Component
 @ConditionalOnProperty(name = "etl.jobs.sstr-populate-rds-participants.enabled", havingValue = "true")
@@ -168,12 +167,10 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
             }
         }
 
-        // Refuse to purge on the strength of a file that yielded no subjects. validateOutput's
-        // EMPTY_INPUT check cannot cover this: it runs after execute() returns, by which point
-        // this transaction has already committed. Without this guard a header-only or truncated
-        // file would delete the study's consent groups, repopulate nothing, commit, and then
-        // report exit 2 -- which reads like "nothing happened" while the study lost its consents.
-        // Throwing here instead rolls the transaction back and exits 3 (DATA_ERROR).
+        // Guard the purge below. validateOutput's EMPTY_INPUT check runs after execute() returns,
+        // by which point this transaction has committed -- so a header-only or truncated file
+        // would delete the study's consents, repopulate nothing, and still report exit 2.
+        // Throwing here rolls the transaction back instead.
         if (subjectIds.isEmpty()) {
             throw new DataException("Input yielded no subjects (" + rowsRead + " data row(s) read); refusing to "
                     + "purge existing consents for study " + studyId + ". Check that the file is complete.");
@@ -184,11 +181,8 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         consents.deleteByStudyId(studyId);
 
         // resolveOrCreate, not findUuids + batchUpsert: every study load shares source = "DBGap",
-        // so two studies containing the same dbgap_subject_id can be in flight at once. Both would
-        // find nothing, both would generate a uuid, and ON CONFLICT DO NOTHING would discard the
-        // loser's insert without revealing the winner's uuid -- leaving the losing run to write
-        // consents and samples against a uuid that is not in participants. resolveOrCreate always
-        // returns the stored uuid, so the consent and sample rows below cannot be orphaned.
+        // so concurrent studies can race for a shared dbgap_subject_id. It returns the uuid stored
+        // in the table, so the consent and sample rows below cannot reference an orphaned uuid.
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
         Map<String, UUID> uuidBySubject = resolution.uuidsBySourceId();
         long participantsInserted = resolution.inserted();

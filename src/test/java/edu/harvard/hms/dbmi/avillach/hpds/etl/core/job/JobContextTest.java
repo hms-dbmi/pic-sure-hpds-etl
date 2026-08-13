@@ -13,9 +13,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link JobContext#getBoolean} must not use {@link Boolean#parseBoolean}, which maps every
- * unrecognised string -- including a typo like {@code treu} -- to {@code false}. A job would then
- * quietly do the opposite of what was asked and still report success, with nothing in the report
- * or the log to say a flag had been misread.
+ * unrecognised string — a typo such as {@code treu} included — to {@code false}, leaving a job to
+ * do the opposite of what was asked and still report success.
  */
 class JobContextTest {
 
@@ -37,7 +36,7 @@ class JobContextTest {
         assertThat(JobContext.isBooleanLiteral(raw)).isTrue();
     }
 
-    /** The whole point: a misspelt flag is a misconfiguration, not a silent false. */
+    /** A misspelt flag is a misconfiguration, not a silent false. */
     @ParameterizedTest
     @ValueSource(strings = {"treu", "ture", "tru", "flase", "t", "f", "2", "enabled", "null"})
     void rejects_anything_that_is_not_a_boolean_literal(String raw) {

@@ -4,6 +4,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.TestPropertySource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -13,10 +14,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * regressions without spinning up containers. The datasource connects lazily, so no live DB
  * is needed here.
  *
- * <p>This runs against the real {@code application.yml}, so it also pins the shipped defaults
- * of {@code etl.jobs.*.enabled}. {@link JobEnablementTest} covers toggling them.
+ * <p>Runs against the real {@code application.yml}, so it also pins the shipped defaults of
+ * {@code etl.jobs.*.enabled}. {@link JobEnablementTest} covers toggling them.
  */
 @SpringBootTest
+// application.yml takes the datasource from RDS_URL/RDS_USERNAME/RDS_PASSWORD with no defaults, so
+// a context that is not given them cannot build a DataSource. Nothing here connects -- Hikari is
+// lazy -- so a syntactically valid URL is enough.
+@TestPropertySource(properties = {
+        "spring.datasource.url=jdbc:postgresql://localhost:5432/hpds",
+        "spring.datasource.username=test",
+        "spring.datasource.password=test",
+})
 class EtlApplicationTest {
 
     @Autowired
@@ -31,7 +40,7 @@ class EtlApplicationTest {
 
     @Test
     void template_job_is_disabled_by_default() {
-        // It is a copy-me demonstration; shipping it runnable would make it invocable in prod.
+        // A copy-me demonstration; shipping it enabled would make it invocable in production.
         assertThat(registry.contains("template")).isFalse();
     }
 }

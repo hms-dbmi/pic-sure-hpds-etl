@@ -18,19 +18,21 @@ Wraps [`terraform-aws-modules/ec2-instance`](https://registry.terraform.io/modul
 
 ## Relationship to bdc-etl-curation
 
-This is a **vendored, Java-specialised copy** of `terraform-modules/etl-runner` from
-[`hms-dbmi/bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation). Same shape,
-same conventions (`jenkins-s3-role`, `s3://<stack>/etl-runner/container|logs/`,
-per-pipeline `terraform/` dir driven by a `Makefile`), with four deliberate differences:
+A vendored, Java-specialised copy of `terraform-modules/etl-runner` from
+[`hms-dbmi/bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation), keeping the same
+shape and conventions: `jenkins-s3-role`, `s3://<stack>/etl-runner/container|logs/`, and a
+per-pipeline `terraform/` directory driven by a `Makefile`.
 
-| Difference | Why |
-|---|---|
-| `status.json` sentinel carrying the real exit code | The Python pipelines are monitored by grepping the log for phrases like `All studies processed`. The JAR already exits with a precise `ExitCode` (0/2/3/4/5), so the runner records it and Jenkins branches on it instead of pattern-matching prose. |
-| Reports synced to `s3://<stack>/etl-runner/reports/<module>/<run_id>/` | Every hpds-etl run writes a machine-readable `JobResult` JSON; Jenkins archives and asserts on it. |
-| `name_suffix` | The upstream module hard-codes the instance-profile name, so two concurrent runs of one pipeline collide. The SSTR sweep runs one instance per study, so names must be per-run. |
-| `job_name` / `job_params` / `rds_secret_id` inputs | This copy is specialised to the hpds-etl JAR contract (`--job=<name> --run-id=<id> --key=value`) rather than a bare `docker run`. |
+Four deliberate differences:
 
-Improvements worth porting back upstream are the sentinel and `name_suffix`.
+| Difference                                                            | Rationale                                                                                                                                                             |
+|-----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `status.json` sentinel carrying the exit code                         | The JAR exits with a precise `ExitCode` (0/2/3/4/5), so the runner records it and Jenkins branches on it. Upstream detects completion by matching log text.             |
+| Reports synced to `s3://<stack>/etl-runner/reports/<module>/<run_id>/` | Every run writes a machine-readable `JobResult` JSON that Jenkins archives and asserts on.                                                                              |
+| `name_suffix`                                                         | Upstream hard-codes the instance-profile name, so two concurrent runs of one pipeline collide. The SSTR sweep runs one instance per study, requiring per-run names.      |
+| `job_name` / `job_params` / `rds_secret_id` inputs                    | Specialised to the hpds-etl JAR contract (`--job=<name> --run-id=<id> --key=value`) rather than a bare `docker run`.                                                    |
+
+The sentinel and `name_suffix` are candidates for porting back upstream.
 
 ## Usage
 
@@ -64,44 +66,44 @@ module "etl_runner" {
 
 ## Inputs
 
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| `aws_region` | AWS region | `string` | — | yes |
-| `module_name` | Runner name; used in resource names, tags, and S3 paths | `string` | — | yes |
-| `stack_s3_bucket` | Bucket holding the image tarball, logs, and reports | `string` | — | yes |
-| `ami_owner_id` | AMI owner account id (or `aws-marketplace`) | `string` | — | yes |
-| `ami_name_pattern` | Glob selecting the most recent matching AMI | `string` | — | yes |
-| `subnet_id` | Subnet to launch in | `string` | — | yes |
-| `job_name` | Passed to the JAR as `--job` | `string` | — | yes |
-| `run_id` | Passed as `--run-id`; appears in the report filename | `string` | — | yes |
-| `rds_secret_id` | Secrets Manager id holding the RDS credentials | `string` | — | yes |
-| `job_params` | Job parameters, keys with underscores → `--kebab-case` flags | `map(string)` | `{}` | no |
-| `name_suffix` | Per-run suffix making resource names unique | `string` | `""` | no |
-| `instance_type` | EC2 instance type | `string` | `"m5.large"` | no |
-| `iam_role_name` | Pre-existing role attached as instance profile | `string` | `"jenkins-s3-role"` | no |
-| `image_name` | Docker image name loaded from the tarball | `string` | `"hpds-etl-runner"` | no |
-| `image_tar` | Tarball filename under `etl-runner/container/` | `string` | `"hpds-etl-runner.tar.gz"` | no |
-| `java_opts` | `JAVA_OPTS` for the container JVM | `string` | `"-XX:MaxRAMPercentage=75"` | no |
-| `log_level` | `LOG_LEVEL` for the hpds loggers | `string` | `"INFO"` | no |
-| `reports_s3_prefix` | Override the report prefix | `string` | `etl-runner/reports/<module>/<run_id>` | no |
-| `rds_secret_arn` | Secret ARN; only for `manage_secret_access` | `string` | `""` | no |
-| `manage_secret_access` | Attach an inline `GetSecretValue` policy to `iam_role_name` | `bool` | `false` | no |
-| `root_volume_size` | Root EBS size in GiB (`null` = AMI default) | `number` | `null` | no |
-| `root_volume_type` / `_iops` / `_throughput` | Root EBS tuning | | `gp3` / `3000` / `125` | no |
-| `user_data_template_vars` | Extra vars merged into the built-in template | `map(string)` | `{}` | no |
-| `user_data_content` | Fully rendered `user_data`, overriding the template | `string` | `null` | no |
-| `tags` | Additional tags on all resources | `map(string)` | `{}` | no |
+| Name                                         | Description                                                  | Type          | Default                                | Required |
+|----------------------------------------------|--------------------------------------------------------------|---------------|----------------------------------------|:--------:|
+| `aws_region`                                 | AWS region                                                   | `string`      | —                                      | yes      |
+| `module_name`                                | Runner name; used in resource names, tags, and S3 paths      | `string`      | —                                      | yes      |
+| `stack_s3_bucket`                            | Bucket holding the image tarball, logs, and reports          | `string`      | —                                      | yes      |
+| `ami_owner_id`                               | AMI owner account id (or `aws-marketplace`)                  | `string`      | —                                      | yes      |
+| `ami_name_pattern`                           | Glob selecting the most recent matching AMI                  | `string`      | —                                      | yes      |
+| `subnet_id`                                  | Subnet to launch in                                          | `string`      | —                                      | yes      |
+| `job_name`                                   | Passed to the JAR as `--job`                                 | `string`      | —                                      | yes      |
+| `run_id`                                     | Passed as `--run-id`; appears in the report filename         | `string`      | —                                      | yes      |
+| `rds_secret_id`                              | Secrets Manager id holding the RDS credentials               | `string`      | —                                      | yes      |
+| `job_params`                                 | Job parameters, keys with underscores → `--kebab-case` flags | `map(string)` | `{}`                                   | no       |
+| `name_suffix`                                | Per-run suffix making resource names unique                  | `string`      | `""`                                   | no       |
+| `instance_type`                              | EC2 instance type                                            | `string`      | `"m5.large"`                           | no       |
+| `iam_role_name`                              | Pre-existing role attached as instance profile               | `string`      | `"jenkins-s3-role"`                    | no       |
+| `image_name`                                 | Docker image name loaded from the tarball                    | `string`      | `"hpds-etl-runner"`                    | no       |
+| `image_tar`                                  | Tarball filename under `etl-runner/container/`               | `string`      | `"hpds-etl-runner.tar.gz"`             | no       |
+| `java_opts`                                  | `JAVA_OPTS` for the container JVM                            | `string`      | `"-XX:MaxRAMPercentage=75"`            | no       |
+| `log_level`                                  | `LOG_LEVEL` for the hpds loggers                             | `string`      | `"INFO"`                               | no       |
+| `reports_s3_prefix`                          | Override the report prefix                                   | `string`      | `etl-runner/reports/<module>/<run_id>` | no       |
+| `rds_secret_arn`                             | Secret ARN; only for `manage_secret_access`                  | `string`      | `""`                                   | no       |
+| `manage_secret_access`                       | Attach an inline `GetSecretValue` policy to `iam_role_name`  | `bool`        | `false`                                | no       |
+| `root_volume_size`                           | Root EBS size in GiB (`null` = AMI default)                  | `number`      | `null`                                 | no       |
+| `root_volume_type` / `_iops` / `_throughput` | Root EBS tuning                                              |               | `gp3` / `3000` / `125`                 | no       |
+| `user_data_template_vars`                    | Extra vars merged into the built-in template                 | `map(string)` | `{}`                                   | no       |
+| `user_data_content`                          | Fully rendered `user_data`, overriding the template          | `string`      | `null`                                 | no       |
+| `tags`                                       | Additional tags on all resources                             | `map(string)` | `{}`                                   | no       |
 
 ## Outputs
 
-| Name | Description |
-|------|-------------|
-| `instance_id` | EC2 instance id — what the monitor polls |
-| `status_s3_uri` | Completion sentinel (`status.json`) |
-| `reports_s3_uri` | Prefix the reports/CSVs are synced to |
-| `log_s3_uri` | Full runner log |
-| `run_id` | Correlation id passed to the job |
-| `instance_arn`, `instance_state`, `availability_zone`, `private_ip`, `private_dns`, `primary_network_interface_id` | Standard instance attributes |
+| Name                                                                                                               | Description                              |
+|--------------------------------------------------------------------------------------------------------------------|------------------------------------------|
+| `instance_id`                                                                                                      | EC2 instance id — what the monitor polls |
+| `status_s3_uri`                                                                                                    | Completion sentinel (`status.json`)      |
+| `reports_s3_uri`                                                                                                   | Prefix the reports/CSVs are synced to    |
+| `log_s3_uri`                                                                                                       | Full runner log                          |
+| `run_id`                                                                                                           | Correlation id passed to the job         |
+| `instance_arn`, `instance_state`, `availability_zone`, `private_ip`, `private_dns`, `primary_network_interface_id` | Standard instance attributes             |
 
 ## IAM
 
@@ -130,15 +132,17 @@ The module attaches, but does not create, `var.iam_role_name`. That role needs:
 }
 ```
 
-plus `AmazonSSMManagedInstanceCore` for Session Manager. Set `manage_secret_access = true`
-to have this module attach the Secrets Manager statement itself — off by default because
-`jenkins-s3-role` is shared with other pipelines and is normally managed centrally.
+plus `AmazonSSMManagedInstanceCore` for Session Manager.
+
+`manage_secret_access = true` makes this module attach the Secrets Manager statement itself. It
+defaults to `false` because `jenkins-s3-role` is shared with other pipelines and is managed
+centrally.
 
 The Jenkins agent additionally needs `ec2:DescribeInstances`, `ssm:SendCommand`,
 `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation`, and read/write on the stack
 bucket, on top of the usual Terraform/EC2/IAM permissions to create and destroy the runner.
 
-## Secret format
+## Secret Format
 
 `rds_secret_id` must resolve to JSON with either a ready-made JDBC URL or discrete fields:
 
@@ -153,17 +157,18 @@ bucket, on top of the usual Terraform/EC2/IAM permissions to create and destroy 
 ```
 
 The second form is what an RDS-managed secret produces, so a rotated RDS secret works
-unchanged. `engine`/`dbInstanceIdentifier` keys are ignored.
+unchanged. `engine` and `dbInstanceIdentifier` keys are ignored.
 
 ## Notes
 
-- **Exit codes** are the whole contract: `0` success, `2` validation, `3` data,
-  `4` infrastructure (retryable), `5` config, `1` unknown. Bootstrap failures before the
-  container starts report `4`; a failure resolving the secret reports `5`.
-- **`user_data` is not secret-bearing.** It contains the secret's *id*, never its value.
+- **Exit codes** are the contract: `0` success, `2` validation, `3` data, `4` infrastructure
+  (retryable), `5` config, `1` unknown. Bootstrap failures before the container starts report
+  `4`; a failure resolving the secret reports `5`.
+- **`user_data` is not secret-bearing.** It contains the secret's id, never its value.
 - **Terraform state** holds no credentials, only instance metadata.
-- **Cleanup** is the caller's job: `make clean` / `terraform destroy` in `post { always }`.
-  The instance self-terminates regardless, so a leaked state file costs nothing running.
+- **Cleanup is the caller's responsibility:** `make clean` or `terraform destroy` in
+  `post { always }`. The instance self-terminates regardless, so a leaked state file bills
+  nothing.
 
 ## References
 

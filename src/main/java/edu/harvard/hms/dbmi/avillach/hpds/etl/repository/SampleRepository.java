@@ -1,4 +1,4 @@
-package edu.harvard.hms.dbmi.avillach.hpds.etl.db;
+package edu.harvard.hms.dbmi.avillach.hpds.etl.repository;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;

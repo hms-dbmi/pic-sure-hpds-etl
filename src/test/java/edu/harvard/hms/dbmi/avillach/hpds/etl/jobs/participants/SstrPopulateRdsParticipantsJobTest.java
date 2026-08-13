@@ -10,9 +10,9 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.JobTestSupport;
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -43,9 +43,10 @@ import static org.mockito.Mockito.when;
  */
 class SstrPopulateRdsParticipantsJobTest {
 
-    private static final String VALID_FILE =
-            "SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
-                    + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n";
+    private static final String VALID_FILE = """
+        SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
+        SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
+        """;
 
     private static JobExecutor newExecutor() throws Exception {
         EtlProperties properties = new EtlProperties();
@@ -97,10 +98,9 @@ class SstrPopulateRdsParticipantsJobTest {
     }
 
     /**
-     * The purge must not happen at all when the file yielded no subjects. Asserting on the
-     * repository directly is the point: validateOutput's EMPTY_INPUT check runs after the
-     * transaction has committed, so it could report a problem while the consents were already
-     * gone. {@code verify(never())} is what pins "the delete was never even attempted".
+     * The purge must not run at all when the file yielded no subjects. {@code verify(never())} asserts
+     * the delete was never attempted, which a report assertion cannot show: validateOutput runs
+     * after the transaction has committed.
      */
     @Test
     void does_not_purge_consents_when_the_input_has_no_data_rows() throws Exception {
@@ -115,7 +115,7 @@ class SstrPopulateRdsParticipantsJobTest {
         JobResult result = newExecutor().run(job,
                 Map.of("input", input, "study-id", "phs001412"), "unit-empty-input");
 
-        // DATA_ERROR, not VALIDATION_FAILED: thrown inside the transaction so it rolls back.
+        // DATA_ERROR, not VALIDATION_FAILED: thrown inside the transaction, so it rolls back.
         assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
         assertThat(result.getErrorMessage()).contains("refusing to purge");
         verify(consents, never()).deleteByStudyId(anyString());

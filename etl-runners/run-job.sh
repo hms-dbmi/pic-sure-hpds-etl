@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# Container entrypoint. Runs exactly one hpds-etl job and exits with its ExitCode.
+# Container entrypoint. Runs one hpds-etl job and exits with its ExitCode.
 #
-# Input is taken from the environment rather than argv so that the generated EC2
-# user-data never has to quote a command line:
+# Input comes from the environment rather than argv so the generated EC2 user-data never has to
+# quote a command line:
 #
 #   ETL_JOB              required   --job=<name>
 #   ETL_RUN_ID           required   --run-id=<id>
@@ -12,10 +12,8 @@
 #   ETL_REPORTS_DIR      optional   where the JSON report is written (default /reports)
 #   JAVA_OPTS            optional   JVM flags
 #
-# Any extra arguments passed to the container are appended verbatim, so an operator can
-# still `docker run hpds-etl-runner --help`.
-#
-# Values must not contain newlines (they arrive through a docker --env-file).
+# Extra arguments passed to the container are appended verbatim, so `docker run hpds-etl-runner
+# --help` still works. Values must not contain newlines: they arrive through a docker --env-file.
 set -uo pipefail
 
 JAR=/app/hpds-etl.jar
@@ -31,8 +29,7 @@ fi
 
 ARGS=("--job=$ETL_JOB" "--run-id=$ETL_RUN_ID")
 
-# IFS='=' with two read targets splits on the FIRST '=' only, so values containing '='
-# (s3 URIs with query strings, base64) survive intact.
+# IFS='=' with two read targets splits on the first '=' only, so values containing '=' survive.
 while IFS='=' read -r name value; do
   [[ -z "$name" ]] && continue
   key="${name#ETL_PARAM_}"
@@ -58,9 +55,8 @@ case "$EXIT" in
   *) NAME=UNKNOWN ;;
 esac
 
-# Records what was actually run, next to the report the JAR wrote. The host writes the
-# authoritative status.json; this one exists so a report can be traced back to its exact
-# invocation without reading the console log.
+# Records the invocation next to the report the JAR wrote, so a report can be traced back to its
+# arguments without reading the console log. The host writes the authoritative status.json.
 cat > "$REPORTS_DIR/container-status.json" <<EOF
 {
   "job": "$ETL_JOB",

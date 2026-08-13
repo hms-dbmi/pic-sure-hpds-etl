@@ -1,30 +1,27 @@
 // =============================================================================
 // PERMANENT ETL PIPELINE -- the ongoing ingestion surface.
 //
-// SCOPE: this pipeline is ONLY for jobs whose Job.type() is JobType.PERMANENT. One-off
-// migrations off the legacy system live in a separate pipeline, /Jenkinsfile, which is
-// deleted once its migrations have run everywhere. Keeping them apart means this pipeline's
-// schedule, retention, and alerting are never disturbed by migration work, and deleting the
-// migration is a clean removal rather than an edit to the pipeline that runs every week.
+// Scope: only jobs whose Job.type() is JobType.PERMANENT. One-off migrations live in /Jenkinsfile,
+// which is deleted once its migrations have run everywhere. Keeping them apart means this
+// pipeline's schedule, retention, and alerting are never disturbed by migration work, and
+// retiring the migration is a file deletion rather than an edit here.
 //
-// When the migration is gone, rename this file to /Jenkinsfile.
+// Rename this file to /Jenkinsfile once the migration is gone.
 //
-// STRUCTURE
-//   The DAG lives here, not in the JAR. Each permanent job is one stage that TRIGGERS THAT
-//   JOB'S OWN PIPELINE, which owns provisioning its ephemeral runner, validating its inputs
-//   and outputs, and tearing itself down. A stage runs only if the stage above it succeeded.
+// Structure: the DAG lives here, not in the JAR. Each permanent job is one stage that triggers
+// that job's own pipeline, which owns provisioning its ephemeral runner, validating its inputs and
+// outputs, and tearing itself down. A stage runs only if the one above it succeeded.
 //
-//   Build and test run HERE, once, as the gate for the whole run: nothing is provisioned
-//   until the suites pass. Downstream jobs are invoked with SKIP_TESTS=true so the same
-//   commit's suites are not re-run per study.
+// Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
+// SKIP_TESTS=true so the same commit's suites are not re-run per study.
 //
-// TRIGGER MODES (both supported by the same job)
-//   STUDY_ID blank  -> sweep every study marked ready in
-//                      etl-runners/sstr-populate-rds-participants/studies.tsv
-//   STUDY_ID set    -> load exactly that study, taking its input URI from the manifest
-//                      unless INPUT overrides it. This is the path for reloading one study.
+// Trigger modes (both supported by this job):
+//   STUDY_ID blank  sweep every study marked ready in
+//                   etl-runners/sstr-populate-rds-participants/studies.tsv
+//   STUDY_ID set    load exactly that study, taking its input URI from the manifest unless INPUT
+//                   overrides it. This is the reload path.
 //
-// EXIT CODES the stages gate on (see ExitCode.java):
+// Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
 // =============================================================================
 

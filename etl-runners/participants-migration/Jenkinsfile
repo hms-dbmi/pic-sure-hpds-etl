@@ -1,41 +1,42 @@
 // =============================================================================
 // TEMPORARY -- participants-migration (JobType.MIGRATION)
 //
-// Runs ONE hpds-etl job, participants-migration, on a Terraform-provisioned ephemeral EC2
-// runner that terminates itself when the job exits. Triggered by the migration
-// orchestrator's "Migrate participants" stage (see /Jenkinsfile), and runnable standalone.
+// Runs one hpds-etl job on a Terraform-provisioned ephemeral EC2 runner that terminates itself
+// when the job exits. Triggered by the migration orchestrator's "Migrate participants" stage
+// (/Jenkinsfile); also runnable standalone.
 //
-// Delete this file, its runner directory, and ParticipantsMigrationJob once the migration
-// has run in every environment.
+// Delete this file, its runner directory, and ParticipantsMigrationJob once the migration has run
+// in every environment.
 //
-// WHAT THE JOB DOES
-//   Moves every "ready" study's participant identities off the legacy system into the
+// What the job does
+//   Moves every ready study's participant identities off the legacy system into the
 //   participants / consents / samples RDS tables. Per study:
-//     - {studyid}_sstr.tsv present -> SstrPopulateRdsParticipantsJob loads RDS, and this
-//       job only resolves legacy-hpds-id -> new-uuid pairs
-//     - otherwise -> this job populates participants/consents itself, joining
+//     - {studyid}_sstr.tsv present: SstrPopulateRdsParticipantsJob loads RDS and this job only
+//       resolves legacy-hpds-id -> new-uuid pairs
+//     - otherwise: this job populates participants/consents itself, joining
 //       {ABV}_PatientMapping.v2.csv against the shared consents.csv
-//   Studies are independent: one study's bad data fails that study only, surfaced as an
-//   output-validation error (exit 2) so the run still reports that attention is needed.
+//   One study's bad data fails that study only, reported as an output-validation error (exit 2).
 //
-// INPUTS   --managed-inputs  study list CSV        (params.MANAGED_INPUTS)
-//          --data-folder     per-study file folder (params.DATA_FOLDER)
-//          --batch-size      rows per batch insert (params.BATCH_SIZE)
-//          RDS credentials   fetched on the runner from Secrets Manager by instance role;
-//                            they never pass through Jenkins
+// Inputs
+//   --managed-inputs   study list CSV        (params.MANAGED_INPUTS)
+//   --data-folder      per-study file folder (params.DATA_FOLDER)
+//   --batch-size       rows per batch insert (params.BATCH_SIZE)
+//   RDS credentials    fetched on the runner from Secrets Manager by instance role; they never
+//                      pass through Jenkins
 //
-// OUTPUTS  RDS rows in participants / consents / samples
-//          participants-migration-<runId>.json                     the JobResult
-//          sstr-populate-rds-participants-<runId>-<study>-sstr.json per sstr-routed study
-//          <studyId>_hpds_id_mapping.csv                           per succeeded study
-//          all archived on this build and left in S3 under the runner's report prefix
+// Outputs
+//   RDS rows in participants / consents / samples
+//   participants-migration-<runId>.json                       the JobResult
+//   sstr-populate-rds-participants-<runId>-<study>-sstr.json   per sstr-routed study
+//   <studyId>_hpds_id_mapping.csv                             per succeeded study
+//   All archived on this build and left in S3 under the runner's report prefix.
 //
-// EXIT CODES (the contract this pipeline gates on -- see ExitCode.java)
-//   0 success | 2 validation (incl. a per-study failure) | 3 data | 4 infrastructure
-//   (retried once) | 5 config | 1 unknown | 124 monitor timeout
+// Exit codes (see ExitCode.java)
+//   0 success | 2 validation, including a per-study failure | 3 data | 4 infrastructure, retried
+//   once | 5 config | 1 unknown | 124 monitor timeout
 //
-// AGENT REQUIREMENTS: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq,
-// python3, and the jenkins-s3-role instance profile. Same agent the BDC ETL runners use.
+// Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, python3,
+// and the jenkins-s3-role instance profile.
 // =============================================================================
 
 pipeline {

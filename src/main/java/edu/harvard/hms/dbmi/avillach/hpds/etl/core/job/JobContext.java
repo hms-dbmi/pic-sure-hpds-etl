@@ -65,22 +65,16 @@ public final class JobContext {
     }
 
     /**
-     * Reads a boolean parameter, rejecting anything that is not recognisably a boolean.
+     * Reads a boolean parameter, rejecting anything that is not a recognised literal.
      *
-     * <p>Deliberately not {@link Boolean#parseBoolean}, which maps every unrecognised string --
-     * including {@code treu} and {@code ture} -- to {@code false}. A typo would then silently
-     * turn a flag off and the job would report success having done something other than what
-     * was asked, with nothing in the log to say so. A misspelt flag is a misconfiguration, so
-     * it fails as one.
+     * <p>Not {@link Boolean#parseBoolean}, which maps every unrecognised string — {@code treu}
+     * included — to {@code false}, silently turning a flag off while the job reports success.
      *
      * @throws ConfigException if the value is present but not one of the accepted literals
      */
     public boolean getBoolean(String key, boolean defaultValue) {
         Optional<String> raw = get(key);
-        if (raw.isEmpty()) {
-            return defaultValue;
-        }
-        return parseBoolean(key, raw.get());
+        return raw.map(s -> parseBoolean(key, s)).orElse(defaultValue);
     }
 
     /** Accepted true/false literals, matched case-insensitively and after trimming. */
@@ -89,8 +83,8 @@ public final class JobContext {
 
     /**
      * Whether a value would be accepted by {@link #getBoolean}. Lets a job's
-     * {@code validateInput} report a bad flag as a validation issue in the JSON report,
-     * instead of leaving it to surface as a thrown {@link ConfigException} later.
+     * {@code validateInput} report a bad flag in the JSON report rather than leaving it to
+     * surface as a thrown {@link ConfigException} later.
      */
     public static boolean isBooleanLiteral(String value) {
         if (value == null) {
@@ -117,12 +111,4 @@ public final class JobContext {
                 + ", got: '" + raw + "'");
     }
 
-    public int requireInt(String key) {
-        String raw = require(key);
-        try {
-            return Integer.parseInt(raw.trim());
-        } catch (NumberFormatException e) {
-            throw new ConfigException("Parameter --" + key + " must be an integer, got: " + raw);
-        }
-    }
 }

@@ -2,20 +2,18 @@
 #
 # Ephemeral hpds-etl runner bootstrap.
 #
-# Rendered by Terraform's templatefile(). Every $${...} in this file is a Terraform
-# placeholder, so bash variables are written WITHOUT braces ($VAR, not $-brace-VAR) to
-# keep the two syntaxes from colliding. If you ever need a braced bash expansion here,
-# double the dollar sign to escape it from Terraform.
+# Rendered by Terraform's templatefile(). Every $${...} here is a Terraform placeholder, so bash
+# variables are written without braces to keep the two syntaxes apart. A braced bash expansion
+# must double the dollar sign to escape it from Terraform.
 #
 # Contract with Jenkins:
 #   - all output lands in /var/log/etl-pipeline.log, uploaded to S3 on every exit path
-#   - the job's ExitCode is written to status.json, uploaded LAST as the completion
-#     sentinel: the monitor treats "status.json exists" as "the run is over, and every
-#     other artifact is already in S3"
+#   - the job's ExitCode is written to status.json, uploaded LAST as the completion sentinel: its
+#     presence means the run is over and every other artifact is already in S3
 #   - the instance always terminates -- normal completion, error, OOM kill, or spot reclaim
 #
-# xtrace is deliberately NOT enabled: this script handles RDS credentials and `set -x`
-# would echo them into the log that gets uploaded to S3.
+# xtrace is NOT enabled: this script handles RDS credentials, and `set -x` would echo them into the
+# log uploaded to S3.
 set -euo pipefail
 
 LOG=/var/log/etl-pipeline.log
@@ -32,8 +30,7 @@ exec > >(tee -a "$LOG") 2>&1
 STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 PHASE=boot
 # Pre-seeded with the code this phase's failure should report. Bootstrap problems are
-# infrastructure (4) so Jenkins retries them; the job phase overwrites this with the
-# JAR's real ExitCode.
+# infrastructure (4) so Jenkins retries them; the job phase overwrites this.
 JOB_EXIT=4
 
 say() { echo "[$(date -u +%H:%M:%S)] [${module_name}] $*"; }
@@ -124,7 +121,7 @@ SECRET_JSON=$(aws secretsmanager get-secret-value \
   --query SecretString --output text)
 
 # Accept either a ready-made JDBC url or discrete host/port/dbname fields.
-# Credentials go into --env-file, never -e: they stay out of the process table,
+# Credentials go into --env-file, never -e: this keeps them out of the process table,
 # `docker inspect`, and any command echo.
 {
   printf 'RDS_URL=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '

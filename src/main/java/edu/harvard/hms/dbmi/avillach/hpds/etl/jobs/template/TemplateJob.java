@@ -38,10 +38,10 @@ import java.util.stream.Stream;
  *   <li>{@code report()} -- attach metrics for the JSON report Jenkins archives</li>
  * </ol>
  *
- * <p>Note the sixth thing to copy: the {@link ConditionalOnProperty} below. Jobs are opt-in,
- * so a new job needs its {@code etl.jobs.<name>.enabled} flag in {@code application.yml} or
- * {@code JobRegistry} will never see it. This template ships {@code enabled: false} because it
- * is a demonstration -- it should not be runnable in a real environment.
+ * <p>Copy the {@link ConditionalOnProperty} below as well. Jobs are opt-in, so a new job needs its
+ * {@code etl.jobs.<name>.enabled} flag in {@code application.yml} or {@code JobRegistry} will never
+ * see it. This template ships disabled: it is a demonstration, not something to run in a real
+ * environment.
  */
 @Component
 @ConditionalOnProperty(name = "etl.jobs.template.enabled", havingValue = "true")

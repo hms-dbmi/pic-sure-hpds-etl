@@ -10,9 +10,9 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.JobTestSupport;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -86,8 +86,7 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
     @Test
     void fails_with_infrastructure_error_when_the_database_is_unreachable() throws Exception {
         ParticipantRepository participants = mock(ParticipantRepository.class);
-        // resolveOrCreate replaced findUuids + batchUpsert so a concurrent run cannot leave this
-        // job holding a uuid the database rejected (see ParticipantRepository#resolveOrCreate).
+        // resolveOrCreate replaced findUuids + batchUpsert; see ParticipantRepository.
         when(participants.resolveOrCreate(any(), any(), anyInt()))
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
@@ -104,10 +103,9 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
     }
 
     /**
-     * The purge must not happen at all when the file yielded no subject ids. Asserting on the
-     * repository directly is the point: validateOutput's EMPTY_INPUT check runs after the
-     * transaction has committed, so it could report a problem while the consents were already
-     * gone. {@code verify(never())} is what pins "the delete was never even attempted".
+     * The purge must not run at all when the file yielded no subject ids. {@code verify(never())} asserts
+     * the delete was never attempted, which a report assertion cannot show: validateOutput runs
+     * after the transaction has committed.
      */
     @Test
     void does_not_purge_consents_when_the_input_has_no_data_rows() throws Exception {
@@ -121,7 +119,7 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
                 Map.of("input", input, "study-id", "my-study-01", "consent-type", "single"),
                 "unit-empty-input");
 
-        // DATA_ERROR, not VALIDATION_FAILED: thrown inside the transaction so it rolls back.
+        // DATA_ERROR, not VALIDATION_FAILED: thrown inside the transaction, so it rolls back.
         assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
         assertThat(result.getErrorMessage()).contains("refusing to purge");
         verify(consents, never()).deleteByStudyId(anyString());
@@ -129,10 +127,9 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
     }
 
     /**
-     * A misspelt --subject-id-is-sample-id must fail the run, not be read as false. Left to
-     * {@link Boolean#parseBoolean}, "treu" would silently disable the samples load and the job
-     * would report SUCCESS having written no samples at all -- the operator's typo would be
-     * indistinguishable from asking for no samples.
+     * A misspelt {@code --subject-id-is-sample-id} must fail the run rather than read as false.
+     * Under {@link Boolean#parseBoolean}, "treu" would disable the samples load and the job would
+     * report SUCCESS, making the typo indistinguishable from asking for no samples.
      */
     @Test
     void rejects_a_misspelt_boolean_instead_of_silently_treating_it_as_false() throws Exception {
@@ -150,7 +147,7 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getInputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("BAD_BOOLEAN") && i.message().contains("treu"));
-        // Input validation runs before execute, so nothing was touched.
+        // Input validation runs before execute, so nothing was written.
         verify(consents, never()).deleteByStudyId(anyString());
         verify(samples, never()).batchUpsert(any());
     }

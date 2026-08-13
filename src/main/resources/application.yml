@@ -21,17 +21,15 @@ spring:
       mode: never
 
 etl:
-  # Jobs are OPT-IN. Each job class carries
+  # Jobs are opt-in. Each job class carries
   # @ConditionalOnProperty("etl.jobs.<job-name>.enabled", havingValue = "true"), so a job whose
-  # flag is absent or false is never instantiated as a bean, and JobRegistry -- which is built
-  # from the list of Job beans Spring found -- does not know it exists. `--job=<name>` for a
-  # disabled job then exits 5 (CONFIG_ERROR) rather than running it.
+  # flag is absent or false is never instantiated and never reaches JobRegistry; --job=<name>
+  # then exits 5 (CONFIG_ERROR). This file is the single list of what may run in an environment.
   #
-  # This file is therefore the single place that says what may run in an environment. Flipping
-  # a flag to false is also how a job is retired: disable it everywhere first, confirm nothing
-  # calls it, then delete the class.
+  # Flipping a flag to false is also how a job is retired: disable it everywhere, confirm
+  # nothing calls it, then delete the class.
   #
-  # <job-name> is the job's own name() value, i.e. what --job= takes.
+  # <job-name> is the job's name() value, i.e. what --job= takes.
   jobs:
     # Demonstration job for copy-me purposes only; never enable outside a local sandbox.
     template:

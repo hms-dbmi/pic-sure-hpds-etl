@@ -15,16 +15,12 @@ import org.testcontainers.utility.DockerImageName;
  * <p>Extend this and {@code @Autowired} the beans under test. Requires Docker to be
  * running -- these tests exercise the real JDBC/S3 paths, not mocks.
  *
- * <p><strong>Why the containers are started here and not with {@code @Testcontainers} /
- * {@code @Container}:</strong> that extension stops static containers when each test class
- * finishes and starts new ones -- on new random ports -- for the next class. Spring caches one
- * application context across every subclass (they share the same context configuration), so the
- * datasource URL stays pinned to the FIRST container's port and every later test class fails
- * with "Connection refused" against a container that no longer exists.
- *
- * <p>Starting them in a static initializer instead gives the intended lifetime: one set of
- * containers for the whole JVM, matching the one cached context. Testcontainers' ryuk sidecar
- * removes them when the JVM exits, so nothing is left running.
+ * <p>The containers are started in a static initializer rather than with {@code @Testcontainers}
+ * and {@code @Container}. That extension stops static containers when each test class finishes and
+ * starts replacements on new random ports, while Spring caches one context across every subclass —
+ * so the datasource URL stays pinned to the first container's port and later classes fail with
+ * "Connection refused". A static initializer gives one set of containers for the whole JVM,
+ * matching the one cached context; Testcontainers' ryuk sidecar removes them at JVM exit.
  */
 @SpringBootTest
 public abstract class AbstractIntegrationTest {
@@ -37,8 +33,8 @@ public abstract class AbstractIntegrationTest {
                     .withServices("s3");
 
     static {
-        // Sequential rather than parallel: startup is dominated by image pull on a cold cache,
-        // and a failure here should name the container that could not start.
+        // Sequential: startup is dominated by the image pull, and a failure should name the
+        // container that could not start.
         POSTGRES.start();
         LOCALSTACK.start();
     }

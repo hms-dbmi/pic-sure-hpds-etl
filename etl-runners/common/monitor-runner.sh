@@ -4,10 +4,9 @@
 # the calling Jenkins stage can branch on the ETL contract (0 success, 2 validation,
 # 3 data, 4 infrastructure/retryable, 5 config).
 #
-# Completion is decided by the status.json sentinel in S3, which the runner uploads last.
-# That is deliberately different from the log-grep approach in bdc-etl-curation: the JAR
-# already reports a precise exit code, so there is no need to pattern-match log prose, and
-# a run cannot be misread as successful because a phrase happened to appear.
+# Completion is decided by the status.json sentinel in S3, which the runner uploads last. The JAR
+# reports a precise exit code, so there is no log prose to pattern-match and a run cannot be
+# misread as successful because a phrase happened to appear.
 #
 # Usage:
 #   monitor-runner.sh <instance-id> <status-s3-uri> [log-s3-uri]
@@ -84,8 +83,8 @@ dump_log_from_s3() {
   echo "=== end log ==="
 }
 
-# Best-effort live tail through SSM. Never fatal: the sentinel is the source of truth,
-# this only gives the Jenkins console something to show while the job runs.
+# Best-effort live tail through SSM, for the Jenkins console only. Never fatal: the sentinel is
+# the source of truth.
 LAST_TAIL_HASH=""
 tail_via_ssm() {
   local cmd_id status content
@@ -124,8 +123,8 @@ tail_via_ssm() {
 # --------------------------------------------------------------------------
 log "Monitoring $INSTANCE_ID (sentinel: $STATUS_URI)"
 
-# 1. Boot. A short-lived job can finish and terminate before we ever see 'running', so
-#    a present sentinel always wins over the instance state.
+# 1. Boot. A short-lived job can finish before 'running' is ever observed, so a present sentinel
+#    always wins over the instance state.
 boot_start=$(date +%s)
 while true; do
   sentinel_present && break
@@ -174,7 +173,7 @@ while true; do
       done
       warn "Instance terminated without publishing a status sentinel"
       dump_log_from_s3
-      # No sentinel means the bootstrap died before it could report -- infrastructure.
+      # No sentinel: the bootstrap died before it could report.
       exit 4
       ;;
     running)

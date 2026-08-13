@@ -8,6 +8,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.pipeline.PipelineRunner;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
@@ -54,7 +55,7 @@ public class JobLauncher implements ApplicationRunner, ExitCodeGenerator {
     }
 
     @Override
-    public void run(ApplicationArguments args) {
+    public void run(@NonNull ApplicationArguments args) {
         try {
             String job = single(args, "job");
             String pipeline = single(args, "pipeline");
@@ -113,7 +114,7 @@ public class JobLauncher implements ApplicationRunner, ExitCodeGenerator {
         if (values == null || values.isEmpty()) {
             return null;
         }
-        return values.get(values.size() - 1);
+        return values.getLast();
     }
 
     private String newRunId() {
@@ -125,8 +126,8 @@ public class JobLauncher implements ApplicationRunner, ExitCodeGenerator {
         sb.append("\nHPDS ETL job runner\n")
           .append("  java -jar hpds-etl.jar --job=<name> [--param=value ...]\n")
           .append("  java -jar hpds-etl.jar --pipeline=<name> [--param=value ...]\n\n")
-          // Only enabled jobs exist as beans, so this lists what this environment can run --
-          // not every job in the JAR. See etl.jobs.* in application.yml.
+          // Only enabled jobs exist as beans, so this lists what this environment can run
+          // rather than every job in the JAR. See etl.jobs.* in application.yml.
           .append("Jobs enabled in this environment:\n");
         for (String name : registry.names()) {
             sb.append("  - ").append(name).append('\n');

@@ -10,11 +10,10 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -22,8 +21,6 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -54,9 +51,8 @@ import java.util.stream.Stream;
  * per subject is also written, using the subject id itself as the sample id.
  *
  * <p>Enabled by {@code etl.jobs.single-consent-data-populate-rds-participants.enabled=true};
- * without it this bean is never created and
- * {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry} does not know the job
- * exists.
+ * without it the bean is never created and
+ * {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry} does not know the job exists.
  */
 @Component
 @ConditionalOnProperty(
@@ -68,35 +64,22 @@ public class SingleConsentDataPopulateRdsParticipantsJob
     static final String CONSENT_TYPE_SINGLE = "single";
     static final String CONSENT_TYPE_PUBLIC = "public";
 
-    // ---------------------------------------------------------------------------
-    // The consent code/abbreviation each --consent-type writes to the consents table.
+    // Consent code/abbreviation written to the consents table per --consent-type. Fixed
+    // vocabulary shared with dbGaP and the rest of PIC-SURE, not labels this job chooses.
     //
-    // These are fixed vocabulary shared with dbGaP and the rest of PIC-SURE, not labels this
-    // job is free to choose, which is why they are pinned as named constants rather than
-    // inlined at the point of use:
+    //   single  A study with exactly one consent group. dbGaP numbers consent groups from 1 and
+    //           PIC-SURE composes consent identifiers as {studyId}.c{code}, so code "1" resolves
+    //           downstream as {studyId}.c1. GRU is the dbGaP abbreviation for General Research
+    //           Use, the least restrictive consent.
+    //   public  Open-access, with no dbGaP consent group. Its consent string is the bare study
+    //           id with no .c suffix, so these values encode "no consent group": a word rather
+    //           than a digit, and an empty abbreviation (the column is NOT NULL, so "", not null).
     //
-    //  - A "single" study has exactly one consent group. dbGaP numbers consent groups from 1,
-    //    and PIC-SURE composes consent identifiers as {studyId}.c{code} so code "1" is what makes this
-    //    study's participants resolve as {studyId}.c1 downstream. GRU is the standard dbGaP
-    //    abbreviation for General Research Use, the least restrictive consent, which is what a
-    //    study with one undifferentiated consent group carries.
-    //
-    //  - A "public" study is open-access and has no dbGaP consent group at all. Where a
-    //    consented study's full consent string is {studyId}.c{code} -- e.g. phs000123.c1 --
-    //    a public study has NO suffix: its consent string is the bare study id, and the
-    //    consent-group portion is empty. So these two values encode "there is no consent
-    //    group here", which is why the code is a word rather than a digit and the
-    //    abbreviation is empty (the column is NOT NULL, hence "" rather than null).
-    //
-    //
-    // PUBLIC_CONSENT_CODE and CONSENT_TYPE_PUBLIC hold the same string today but are kept
-    // separate on purpose: one is a value the CLI accepts, the other a value written to
-    // consents.consent_code. Collapsing them would tie the command-line contract to the
-    // database contract, so that changing either would silently change the other.
-    // ---------------------------------------------------------------------------
+    // PUBLIC_CONSENT_CODE and CONSENT_TYPE_PUBLIC hold the same string but stay separate: one is
+    // a value the CLI accepts, the other a value written to consents.consent_code.
     static final String SINGLE_CONSENT_CODE = "1";
     static final String SINGLE_CONSENT_ABBREVIATION = "GRU";
-    /** Canonical open-access consent values; also used by ParticipantsMigrationJob. */
+    /** Canonical open-access consent values; also used by {@code ParticipantsMigrationJob}. */
     public static final String PUBLIC_CONSENT_CODE = "public";
     public static final String PUBLIC_CONSENT_ABBREVIATION = "";
 
@@ -166,10 +149,8 @@ public class SingleConsentDataPopulateRdsParticipantsJob
                         "--consent-type");
             }
         });
-        // Caught here so a misspelt flag is reported in the JSON report before any work starts.
-        // JobContext.getBoolean would also reject it at execute time, but a validation issue names
-        // the offending value where an operator will actually see it. A silently-false 'treu' would
-        // otherwise mean the job reports success having skipped the samples rows entirely.
+        // Checked here as well as in JobContext.getBoolean so a misspelt flag is reported in the
+        // JSON report before any work starts, naming the offending value.
         ctx.get("subject-id-is-sample-id").ifPresent(raw -> {
             if (!JobContext.isBooleanLiteral(raw)) {
                 report.error("BAD_BOOLEAN",
@@ -215,12 +196,10 @@ public class SingleConsentDataPopulateRdsParticipantsJob
             }
         }
 
-        // Refuse to purge on the strength of a file that yielded no subjects. validateOutput's
-        // EMPTY_INPUT check cannot cover this: it runs after execute() returns, by which point
-        // this transaction has already committed. Without this guard a header-only or truncated
-        // file would delete the study's consent rows, repopulate nothing, commit, and then
-        // report exit 2 -- which reads like "nothing happened" while the study lost its consents.
-        // Throwing here instead rolls the transaction back and exits 3 (DATA_ERROR).
+        // Guard the purge below. validateOutput's EMPTY_INPUT check runs after execute() returns,
+        // by which point this transaction has committed -- so a header-only or truncated file
+        // would delete the study's consents, repopulate nothing, and still report exit 2.
+        // Throwing here rolls the transaction back instead.
         if (subjectIds.isEmpty()) {
             throw new DataException("Input yielded no subject ids (" + rowsRead + " data row(s) read); refusing to "
                     + "purge existing consents for study " + studyId + ". Check that the file is complete.");
@@ -230,10 +209,9 @@ public class SingleConsentDataPopulateRdsParticipantsJob
         // surrounding transaction rolls this back too if a later step fails.
         consents.deleteByStudyId(studyId);
 
-        // resolveOrCreate for the same reason as the sstr job: it returns the uuid actually stored,
-        // so a concurrent run cannot leave this one writing consents against a discarded uuid. The
-        // exposure here is narrower -- source is the study id, so only two runs of the SAME study
-        // can collide rather than any two studies -- but the failure mode is identical.
+        // resolveOrCreate returns the uuid stored in the table, so a concurrent run cannot leave
+        // this one writing consents against a discarded uuid. Here source is the study id, so only
+        // two runs of the same study can collide.
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, studyId, batchSize);
         Map<String, UUID> uuidBySubject = resolution.uuidsBySourceId();
         long participantsInserted = resolution.inserted();

@@ -3,10 +3,9 @@
 # Pre-flight checks for the participants-migration job, run on the Jenkins agent BEFORE any
 # EC2 instance is provisioned.
 #
-# ParticipantsMigrationJob discovers its per-study files by convention and treats a missing
-# or malformed file as a per-study failure at run time. Every one of those failures is
-# knowable from the input layout alone, so checking here turns a 20-minute partial
-# migration into a 20-second console message and costs no instance time.
+# ParticipantsMigrationJob discovers its per-study files by convention and treats a missing or
+# malformed file as a per-study failure at run time. Those failures are knowable from the input
+# layout alone, so checking here costs seconds instead of a partial migration.
 #
 # Environment:
 #   TF_VAR_managed_inputs_uri   required   the --managed-inputs CSV
@@ -61,9 +60,8 @@ MANIFEST=$(mktemp)
 trap 'rm -f "$MANIFEST"' EXIT
 read_uri "$MANAGED_INPUTS" > "$MANIFEST"
 
-# Parsed with python3's csv module rather than awk: the study list is a hand-maintained
-# spreadsheet export, so quoted fields containing commas are normal. python3 is already a
-# hard dependency of the BDC ETL agents.
+# Parsed with python3's csv module rather than awk: the study list is a spreadsheet export, so
+# quoted fields containing commas are normal.
 STUDIES=$(python3 - "$MANIFEST" <<'PY'
 import csv, sys
 
@@ -100,9 +98,8 @@ check "at least one study is marked ready" test "$READY_COUNT" -gt 0
 note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
 
 # --- shared consents.csv -------------------------------------------------
-# Required unconditionally: execute() reads consents.csv before it looks at a single study,
-# so a missing one aborts the ENTIRE run with a config error -- not just the studies that
-# would have used it for direct population.
+# Required unconditionally: execute() reads consents.csv before looking at any study, so a missing
+# one aborts the entire run rather than just the studies that would have used it.
 CONSENTS="$DATA_FOLDER/consents.csv"
 check "shared consents.csv exists (read before any study is processed)" uri_exists "$CONSENTS"
 
@@ -126,8 +123,7 @@ while IFS=$'\t' read -r abv sid state; do
     route="direct"
   fi
 
-  # The mapping file is required on both routes: the sstr route still needs it to emit
-  # old-hpds-id -> new-uuid pairs.
+  # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-uuid pairs.
   check "$sid ($abv, $route): ${mapping##*/}" uri_exists "$mapping"
 done <<<"$STUDIES"
 

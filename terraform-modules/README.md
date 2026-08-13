@@ -5,11 +5,11 @@ reusable unit — callers reference it via a relative `source` path.
 
 ## Modules
 
-| Module | Description |
-|--------|-------------|
+| Module                                 | Description                                                                                            |
+|----------------------------------------|--------------------------------------------------------------------------------------------------------|
 | [`etl-runner`](./etl-runner/README.md) | Self-terminating EC2 instance that runs one hpds-etl job and publishes its exit code and reports to S3 |
 
-## Usage convention
+## Usage Convention
 
 Modules are called from a runner's `terraform/` directory using a relative path:
 
@@ -25,14 +25,16 @@ Run `terraform init` after adding or changing a module source.
 ## Relationship to bdc-etl-curation
 
 `etl-runner` is a vendored copy of the module of the same name in
-[`hms-dbmi/bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation), specialised for
-the hpds-etl JAR contract. It is vendored rather than referenced across repositories so that
-`terraform init` needs no cross-repo git credentials and so this repo's Java-specific changes
-(the `status.json` exit-code sentinel, `name_suffix` for concurrent runs) do not have to land
-in the Python repo first. Both are worth porting back upstream — see the module's README for
-the full list of differences.
+[`hms-dbmi/bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation), specialised for the
+hpds-etl JAR contract.
 
-## Adding a new module
+It is vendored rather than referenced across repositories for two reasons: `terraform init` then
+needs no cross-repo git credentials, and this repository's Java-specific changes (the
+`status.json` exit-code sentinel and `name_suffix` for concurrent runs) do not have to land in the
+Python repository first. See the module's
+[README](./etl-runner/README.md) for the full list of differences.
+
+## Adding a New Module
 
 1. Create `terraform-modules/<name>/`
 2. Add `main.tf`, `variables.tf`, `outputs.tf`, and `README.md`

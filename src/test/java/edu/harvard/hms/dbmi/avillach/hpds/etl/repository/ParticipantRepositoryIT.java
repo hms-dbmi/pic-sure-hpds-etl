@@ -1,4 +1,4 @@
-package edu.harvard.hms.dbmi.avillach.hpds.etl.db;
+package edu.harvard.hms.dbmi.avillach.hpds.etl.repository;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.AbstractIntegrationTest;
@@ -13,13 +13,12 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Pins the {@link ParticipantRepository#resolveOrCreate} contract against a real Postgres,
- * deterministically -- no threads, no timing.
+ * Pins the {@link ParticipantRepository#resolveOrCreate} contract against a real Postgres, with no
+ * threads or timing involved.
  *
- * <p>The first test is the important one: it demonstrates the exact SQL semantics that make
- * {@code batchUpsert} unusable for learning a uuid, which is the whole reason
- * {@code resolveOrCreate} exists. If someone "simplifies" the job back to
- * {@code findUuids + batchUpsert}, that test is what explains why they must not.
+ * <p>{@link #batch_upsert_does_not_reveal_the_uuid_that_won_but_resolve_or_create_does()} documents
+ * the SQL semantics that make {@code batchUpsert} unusable for learning a uuid, and therefore why
+ * a job must not be simplified back to {@code findUuids + batchUpsert}.
  */
 class ParticipantRepositoryIT extends AbstractIntegrationTest {
 
@@ -41,9 +40,8 @@ class ParticipantRepositoryIT extends AbstractIntegrationTest {
     }
 
     /**
-     * The losing side of an insert race. A caller that trusts its own candidate uuid after
-     * {@code batchUpsert} is holding a uuid that is not in the table -- and would then write
-     * consents and samples against it, giving one person two identities.
+     * The losing side of an insert race: a caller trusting its own candidate uuid after
+     * {@code batchUpsert} holds a uuid that is not in the table.
      */
     @Test
     void batch_upsert_does_not_reveal_the_uuid_that_won_but_resolve_or_create_does() {

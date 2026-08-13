@@ -125,7 +125,7 @@ echo ""
 echo "  Participants per consent group:"
 jq -r '(.metrics.countsByConsentGroup // {}) | to_entries[] | "         \(.key): \(.value)"' "$REPORT"
 
-# Traceability: confirm the report belongs to the invocation we think it does.
+# Traceability: confirm the report belongs to the expected invocation.
 CONTAINER_STATUS="$REPORTS/container-status.json"
 if [[ -f "$CONTAINER_STATUS" ]]; then
   echo ""

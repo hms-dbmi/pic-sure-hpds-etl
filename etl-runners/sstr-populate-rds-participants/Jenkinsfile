@@ -1,42 +1,43 @@
 // =============================================================================
 // PERMANENT -- sstr-populate-rds-participants (JobType.PERMANENT)
 //
-// Loads ONE dbGaP study's SSTR subject/sample mapping TSV into RDS on a
-// Terraform-provisioned ephemeral EC2 runner that terminates itself when the job exits.
+// Loads one dbGaP study's SSTR subject/sample mapping TSV into RDS on a Terraform-provisioned
+// ephemeral EC2 runner that terminates itself when the job exits. Triggered per study by the
+// permanent orchestrator's "Load SSTR participants" stage (/Jenkinsfile.permanent); also runnable
+// standalone to reload a single study.
 //
-// Triggered per study by the permanent orchestrator's "Load SSTR participants" stage (see
-// /Jenkinsfile.permanent), and runnable standalone to reload a single study.
-//
-// WHAT THE JOB DOES
-//   - one participants row per distinct dbgap_subject_id (reusing the existing HPDS uuid if
-//     that subject was already loaded), source = "DBGap"
-//   - one consents row per participant, study_id = --study-id, consent/abbreviation from
-//     that subject's first row
+// What the job does
+//   - one participants row per distinct dbgap_subject_id, reusing the existing HPDS uuid if the
+//     subject was already loaded, source = "DBGap"
+//   - one consents row per participant, study_id = --study-id, consent/abbreviation from that
+//     subject's first row
 //   - one samples row per input row with a non-blank dbgap_sample_id
-//   Every run first PURGES the study's existing consents rows so the study's consent groups
-//   are repopulated from this file rather than merged with stale data. Purge and load share
-//   one transaction: a single bad row rolls the whole study back, leaving RDS untouched.
-//   That makes a re-run safe and idempotent -- and makes a truncated input file the real
-//   risk, which EXPECTED_MIN_PARTICIPANTS exists to catch.
 //
-// INPUTS   --study-id        phs###### (params.STUDY_ID)
-//          --input           the SSTR TSV, local or s3:// (params.INPUT)
-//          --batch-size      rows per batch insert (params.BATCH_SIZE)
-//          RDS credentials   fetched on the runner from Secrets Manager by instance role;
-//                            they never pass through Jenkins
+//   Every run first purges the study's existing consents rows so its consent groups are
+//   repopulated from this file rather than merged with stale data. Purge and load share one
+//   transaction: a single bad row rolls the whole study back, leaving RDS untouched. A re-run is
+//   therefore safe and idempotent, which makes a truncated input file the real risk --
+//   EXPECTED_MIN_PARTICIPANTS exists to catch it.
 //
-// OUTPUTS  RDS rows in participants / consents / samples for this study
-//          sstr-populate-rds-participants-<runId>.json   the JobResult, with rowsRead,
-//            distinctParticipants, participantsInserted, consentsWritten, samplesInserted,
-//            and countsByConsentGroup
-//          archived on this build and left in S3 under the runner's report prefix
+// Inputs
+//   --study-id     phs###### (params.STUDY_ID)
+//   --input        the SSTR TSV, local or s3:// (params.INPUT)
+//   --batch-size   rows per batch insert (params.BATCH_SIZE)
+//   RDS credentials fetched on the runner from Secrets Manager by instance role; they never pass
+//                   through Jenkins
 //
-// EXIT CODES (the contract this pipeline gates on -- see ExitCode.java)
-//   0 success | 2 validation | 3 data (bad row: whole study rolled back) | 4 infrastructure
-//   (retried once) | 5 config | 1 unknown | 124 monitor timeout
+// Outputs
+//   RDS rows in participants / consents / samples for this study
+//   sstr-populate-rds-participants-<runId>.json with rowsRead, distinctParticipants,
+//   participantsInserted, consentsWritten, samplesInserted, and countsByConsentGroup.
+//   Archived on this build and left in S3 under the runner's report prefix.
 //
-// AGENT REQUIREMENTS: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq,
-// and the jenkins-s3-role instance profile. Same agent the BDC ETL runners use.
+// Exit codes (see ExitCode.java)
+//   0 success | 2 validation | 3 data, study rolled back | 4 infrastructure, retried once |
+//   5 config | 1 unknown | 124 monitor timeout
+//
+// Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, and the
+// jenkins-s3-role instance profile.
 // =============================================================================
 
 pipeline {

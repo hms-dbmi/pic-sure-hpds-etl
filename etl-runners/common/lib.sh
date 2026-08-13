@@ -9,12 +9,11 @@
 #   note  <message>              informational line
 #   summary                      print the tally; return 0 / 10 (warnings) / 1
 #
-# The command is invoked directly (no eval), so express conditions as commands:
+# Commands are invoked directly (no eval), so express conditions as commands:
 #   check "row count is positive"  test "$ROWS" -gt 0
 #   check "status is SUCCESS"      jq -e '.status == "SUCCESS"' "$REPORT"
 #
-# Nothing aborts on the first failure: an operator gets the full picture of what is wrong
-# with a run in one console read, instead of one problem per re-run.
+# Nothing aborts on the first failure, so one console read shows every problem with a run.
 set -uo pipefail
 
 _PASS=0
@@ -61,8 +60,7 @@ summary() {
   if (( _FAIL > 0 )); then
     return 1
   elif (( _WARN > 0 )); then
-    # 10 = "correct, but worth a look". Callers map it to Jenkins UNSTABLE.
-    return 10
+    return 10   # callers map this to Jenkins UNSTABLE
   fi
   return 0
 }

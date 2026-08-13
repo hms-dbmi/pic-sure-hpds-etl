@@ -13,13 +13,12 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SingleConsentDataPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -32,7 +31,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -81,12 +79,10 @@ import java.util.stream.Stream;
  * infrastructure failure (RDS/S3 unreachable) aborts the whole run instead, since retrying
  * per-study would not help.
  *
- * <p>Enabled by {@code etl.jobs.participants-migration.enabled=true}. It also requires
- * {@code etl.jobs.sstr-populate-rds-participants.enabled=true}, because it injects
- * {@link SstrPopulateRdsParticipantsJob} to load the sstr-backed studies. Both properties are
- * on the condition so that disabling the sstr job makes this job disappear cleanly -- a
- * {@code --job=participants-migration} then fails with a config error naming the flags,
- * instead of the Spring context failing to start on a missing bean.
+ * <p>Enabled by {@code etl.jobs.participants-migration.enabled=true}, and also requires
+ * {@code etl.jobs.sstr-populate-rds-participants.enabled=true} because it injects
+ * {@link SstrPopulateRdsParticipantsJob}. Both are on the condition so disabling the sstr job
+ * removes this bean rather than breaking context startup on a missing dependency.
  */
 @Component
 @ConditionalOnProperty(
@@ -108,16 +104,14 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     private static final Pattern CONSENT_VALUE_PATTERN = Pattern.compile("^.+\\.c(\\w+)$");
 
     /**
-     * Marks a value as <em>intended</em> to name a consent group. Presence of this without a full
+     * Marks a value as intended to name a consent group. Present without a full
      * {@link #CONSENT_VALUE_PATTERN} match ({@code phs000123.c}, {@code phs000123.c1x-2}) means a
-     * malformed consented value, which is skipped and reported; absence means an open-access
-     * study, which legitimately has no consent group.
+     * malformed consented value, which is skipped and reported; absent means an open-access study,
+     * which legitimately has no consent group.
      *
-     * <p>The test is deliberately this blunt. Reading a malformed value as "public" would hand an
-     * unconsented participant an open-access consent, so anything ambiguous must fall on the
-     * skip-and-report side. The cost is that an open-access study whose id happens to contain
-     * ".c" is reported as unparseable rather than migrated -- visible and fixable, unlike the
-     * alternative.
+     * <p>Kept blunt on purpose: reading a malformed value as "public" would grant an unconsented
+     * participant an open-access consent, so ambiguous values fall on the skip-and-report side.
+     * An open-access study whose id contains ".c" is reported as unparseable rather than migrated.
      */
     private static final String CONSENT_GROUP_MARKER = ".c";
 
@@ -303,8 +297,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 subjectIds.add(pm.id());
             }
 
-            // resolveOrCreate rather than findUuids + batchUpsert: see ParticipantRepository. Here
-            // source is the study id, so the exposure is two concurrent runs of the same study.
+            // resolveOrCreate rather than findUuids + batchUpsert; see ParticipantRepository.
             Map<String, UUID> uuidBySubject =
                     participants.resolveOrCreate(subjectIds, studyId, batchSize).uuidsBySourceId();
 
@@ -317,9 +310,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             for (PatientMappingRow pm : patientMappings) {
                 String code = hpdsIdToConsentCode.get(pm.oldHpdsId());
                 if (code == null) {
-                    // Counted, not just logged: such a subject gets no consent row AND no mapping
-                    // row, so it silently does not migrate. validateOutput turns the count into a
-                    // reported warning.
+                    // Counted as well as logged: such a subject gets neither a consent row nor a
+                    // mapping row, so it does not migrate. validateOutput reports the count.
                     log.warn("Study '{}': no consent found in consents.csv for old hpds id '{}'; skipping subject '{}'",
                             studyId, pm.oldHpdsId(), pm.id());
                     skippedHpdsIds.add(pm.oldHpdsId());
@@ -360,20 +352,18 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /**
      * Reads the shared {@code consents.csv} into legacy-hpds-id &rarr; consent code.
      *
-     * <p>Two shapes of consent value are legitimate, and both must be kept:
+     * <p>Two shapes of consent value are legitimate:
      * <ul>
-     *   <li>a consented study writes the full {@code {studyId}.c{code}} form, e.g.
-     *       {@code phs000123.c1}, and the code is the suffix;</li>
-     *   <li>an open-access study has <em>no</em> consent group and therefore no suffix -- its
-     *       consent value is the bare study id. Those rows take
-     *       {@link SingleConsentDataPopulateRdsParticipantsJob#PUBLIC_CONSENT_CODE}, the same
-     *       code the permanent single-consent loader writes for a public study.</li>
+     *   <li>a consented study writes {@code {studyId}.c{code}}, e.g. {@code phs000123.c1}, and the
+     *       code is the suffix;</li>
+     *   <li>an open-access study has no consent group and therefore no suffix — its consent value
+     *       is the bare study id. Those rows take
+     *       {@link SingleConsentDataPopulateRdsParticipantsJob#PUBLIC_CONSENT_CODE}.</li>
      * </ul>
      *
-     * <p>Treating the suffix-less form as unparseable (which is what a strict
-     * {@code ^.+\.c(\w+)$} match does) silently dropped every open-access participant: no
-     * consent row, and -- because {@link #populateDirectly} skips subjects with no code -- no
-     * row in the study's mapping file either. Those studies migrated as empty.
+     * <p>A strict {@code ^.+\.c(\w+)$} match treats the suffix-less form as unparseable, which
+     * dropped every open-access participant: no consent row, and no mapping-file row either, since
+     * {@link #populateDirectly} skips subjects with no code.
      */
     private ConsentsCsv readConsentsCsv(String path) {
         Map<String, String> hpdsIdToCode = new HashMap<>();
@@ -397,9 +387,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     continue;
                 }
                 if (consentValue.contains(CONSENT_GROUP_MARKER)) {
-                    // Names a consent group but not one we can read -- a real defect, not open
-                    // access. Guessing "public" here would silently grant an unconsented
-                    // participant an open-access consent, so it stays a skip.
+                    // Names a consent group but not a readable one: a defect, not open access.
+                    // Guessing "public" would grant an unconsented participant an open-access
+                    // consent, so it stays a skip.
                     log.warn("{}: consent value '{}' for hpds id '{}' names a consent group that could not be "
                                     + "parsed; skipping", CONSENTS_FILE_NAME, consentValue, hpdsId);
                     unparseableRows++;
@@ -490,9 +480,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             if (result.success()) {
                 report.info("STUDY_MIGRATED", result.studyId() + " (" + (result.usedSstr() ? "sstr" : "direct")
                         + "): " + result.mappingRowCount() + " mapping row(s)");
-                // A subject with no consents.csv entry migrates neither a consent row nor a
-                // mapping row, so it is absent from the migration without anything failing.
-                // Reported as a warning so the run comes back UNSTABLE rather than clean.
+                // Absent from the migration without anything failing, so report it as a warning
+                // to bring the run back UNSTABLE rather than clean.
                 if (!result.skippedHpdsIdsWithNoConsent().isEmpty()) {
                     List<String> sample = result.skippedHpdsIdsWithNoConsent().stream().limit(10).toList();
                     report.warning("SUBJECTS_WITHOUT_CONSENT", result.studyId() + ": "
@@ -524,8 +513,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 .mapToLong(r -> r.skippedHpdsIdsWithNoConsent().size())
                 .sum();
         // Cast so every count in this report is a long. Jackson writes int 1 and long 1
-        // identically, so the JSON is unchanged -- it just stops one metric being the odd one out
-        // for anything reading the metrics map in-process (tests, the in-process pipeline runner).
+        // identically; this only matters to callers reading the metrics map in-process.
         builder.metric("readyStudies", (long) output.studyResults().size())
                 .metric("succeededStudies", succeeded)
                 .metric("failedStudies", failed)

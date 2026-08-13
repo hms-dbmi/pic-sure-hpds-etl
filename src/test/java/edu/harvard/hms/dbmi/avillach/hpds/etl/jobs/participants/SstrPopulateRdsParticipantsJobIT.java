@@ -3,7 +3,7 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.AbstractIntegrationTest;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.JobTestSupport;
 import org.junit.jupiter.api.BeforeEach;
@@ -139,9 +139,11 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
 
     @Test
     void fails_on_missing_required_column() {
-        String input = JobTestSupport.tempFile("sstr.tsv",
-                "SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\n"
-                        + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\n");
+        String input = JobTestSupport.tempFile("sstr.tsv", """
+            SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id
+            SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1
+            """
+        );
 
         JobResult result = run(executor, job, input, "it-missing-col");
 
@@ -150,10 +152,9 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     }
 
     /**
-     * A header-only (or truncated) file must not cost the study its consent groups. The purge
-     * is guarded before it runs, so this fails as a DATA_ERROR with the transaction rolled
-     * back -- not as a VALIDATION_FAILED after the purge has already committed, which is what
-     * would happen if the emptiness check lived only in validateOutput.
+     * A header-only or truncated file must not cost the study its consent groups. The purge is
+     * guarded before it runs, so this fails as a DATA_ERROR with the transaction rolled back rather
+     * than a VALIDATION_FAILED after the purge has committed.
      */
     @Test
     void refuses_to_purge_consents_when_input_has_no_data_rows() {
@@ -167,7 +168,7 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
         assertThat(result.getErrorMessage()).contains("refusing to purge");
         assertThat(participants.count()).isEqualTo(0);
-        // The pre-existing consent row is the whole point: it must survive.
+        // The pre-existing consent row must survive.
         assertThat(consentCountForStudy()).isEqualTo(1);
     }
 

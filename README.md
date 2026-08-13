@@ -36,24 +36,23 @@ with its own instance role, so they never pass through Jenkins.
 
 ## Pipelines
 
-Two Jenkins pipelines, separate because their lifecycles are opposites — see
-**[docs/JENKINS.md](docs/JENKINS.md)**.
+Two Jenkins pipelines, kept separate because their lifecycles are opposites. See
+**[docs/JENKINS.md](docs/JENKINS.md)** for the full architecture.
 
-| Pipeline | Scope | Lifetime |
-|---|---|---|
-| [`Jenkinsfile`](Jenkinsfile) | **only** `JobType.MIGRATION` jobs | deleted once the migration has run everywhere |
-| [`Jenkinsfile.permanent`](Jenkinsfile.permanent) | **only** `JobType.PERMANENT` jobs | ongoing |
+| Pipeline                                         | Scope                             | Lifetime                                      |
+|--------------------------------------------------|-----------------------------------|-----------------------------------------------|
+| [`Jenkinsfile`](Jenkinsfile)                     | **only** `JobType.MIGRATION` jobs | deleted once the migration has run everywhere |
+| [`Jenkinsfile.permanent`](Jenkinsfile.permanent) | **only** `JobType.PERMANENT` jobs | ongoing                                       |
 
-Each orchestrator stage triggers that job's own pipeline under
-[`etl-runners/`](etl-runners/), which provisions a **self-terminating EC2 runner** with
-Terraform, runs the JAR in a container, publishes the exit code and JSON report to S3, and
-tears itself down. Same pattern as
-[`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — shared
-`terraform-modules/etl-runner` shape, `jenkins-s3-role`, `s3://<stack>/etl-runner/…` — with
-Java in place of Python, and completion detected from a real exit code rather than by grepping
-the log.
+Each orchestrator stage triggers that job's own pipeline under [`etl-runners/`](etl-runners/),
+which provisions a self-terminating EC2 runner with Terraform, runs the JAR in a container,
+publishes the exit code and JSON report to S3, and tears itself down.
 
-## How it works
+The pattern follows [`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — the same
+`terraform-modules/etl-runner` shape, `jenkins-s3-role`, and `s3://<stack>/etl-runner/…` layout —
+with Java in place of Python.
+
+## How It Works
 
 ```
 --job=<name>  ──▶  JobLauncher  ──▶  JobExecutor  ──▶  Job.run()
@@ -72,18 +71,18 @@ the log.
 - **Pipelining** — the DAG lives in the Jenkinsfiles (one stage per job, each triggering that
   job's own runner pipeline); an in-process `PipelineRunner` mirrors it for local/CI runs.
 
-## Target schema (AWS RDS Postgres)
+## Target Schema (AWS RDS Postgres)
 
 Reference DDL: [`src/main/resources/repository/schema.sql`](src/main/resources/repository/schema.sql)
 (used to initialize the Postgres Testcontainer; **not** auto-run against RDS).
 
-| Table | Maps HPDS uuid to | Unique on |
-|-------|-------------------|-----------|
-| `participants` | origin ids (`source_id`, `source`) | `(source_id, source)` |
-| `consents` | `study_id` / `consent_code` / `consent_abbreviation` | `(hpds_uuid, study_id)` |
-| `samples` | `source_sample_id` / `sample_source` | full triple |
+| Table          | Maps HPDS uuid to                                    | Unique on               |
+|----------------|------------------------------------------------------|-------------------------|
+| `participants` | origin ids (`source_id`, `source`)                   | `(source_id, source)`   |
+| `consents`     | `study_id` / `consent_code` / `consent_abbreviation` | `(hpds_uuid, study_id)` |
+| `samples`      | `source_sample_id` / `sample_source`                 | full triple             |
 
-## Project layout
+## Project Layout
 
 ```
 etl/
@@ -123,7 +122,7 @@ etl-runners/                      one dir per job: Jenkinsfile, Makefile, terraf
 docs/JENKINS.md                   architecture, validation, AWS setup, runbook
 ```
 
-## Adding a job
+## Adding a Job
 
 See **[docs/ADDING_A_JOB.md](docs/ADDING_A_JOB.md)** — copy `TemplateJob`, fill in five
 hooks, add tests (success + every failure), add a runner and a Jenkins stage. No registry to

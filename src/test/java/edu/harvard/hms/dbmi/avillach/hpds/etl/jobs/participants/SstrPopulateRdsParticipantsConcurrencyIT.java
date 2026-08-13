@@ -22,19 +22,18 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The permanent pipeline may load several studies at once, and every study load shares
- * {@code source = "DBGap"}, so two studies containing the same {@code dbgap_subject_id} race for
- * that subject's HPDS uuid.
+ * Concurrent study loads. The permanent pipeline may load several studies at once and every load
+ * shares {@code source = "DBGap"}, so two studies containing the same {@code dbgap_subject_id} race
+ * for that subject's HPDS uuid.
  *
- * <p>Before {@link edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository#resolveOrCreate},
- * both runs would find no participant, generate different uuids, and one insert would be silently
- * discarded by {@code ON CONFLICT DO NOTHING} without reporting the winner -- leaving the losing
- * run to write consents and samples against a uuid that is not in {@code participants}. There are
- * no foreign keys back to {@code participants}, so nothing would have caught it.
+ * <p>Without
+ * {@link edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository#resolveOrCreate}, both
+ * runs find no participant, generate different uuids, and {@code ON CONFLICT DO NOTHING} discards
+ * one insert without reporting the winner, leaving the losing run to write consents and samples
+ * against a uuid that is not in {@code participants}.
  *
- * <p>{@link #every_consent_and_sample_uuid_exists_in_participants()} is the assertion that fails
- * on the old behaviour, and it holds regardless of how the interleaving actually lands, so it is
- * not dependent on winning a timing lottery.
+ * <p>{@link #every_consent_and_sample_uuid_exists_in_participants()} holds regardless of how the
+ * interleaving lands, so it does not depend on timing.
  */
 class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
 
@@ -98,10 +97,7 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
         }
     }
 
-    /**
-     * The test the review asked for: two studies loaded at once, sharing a dbgap_subject_id, must
-     * agree on that subject's HPDS uuid.
-     */
+    /** Two studies loaded at once, sharing a dbgap_subject_id, must agree on its HPDS uuid. */
     @Test
     void concurrent_study_loads_sharing_a_subject_use_the_same_hpds_uuid() throws Exception {
         String shared = "phs_shared.v1.p1.c1";
@@ -119,12 +115,11 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
                 .as("both loads should succeed, got %s: %s", r.getExitCode(), r.getErrorMessage())
                 .isTrue());
 
-        // Exactly one participant for the shared subject -- the unique constraint guarantees this
-        // much even with the bug, which is why it is not the interesting assertion on its own.
+        // The unique constraint guarantees this even without the fix, so it is not sufficient alone.
         assertThat(participantRowsFor(shared)).isEqualTo(1);
 
-        // ...and both studies wrote their consent row against that one uuid. With the old
-        // behaviour the losing run used its own discarded uuid, so this would be 1, not 2.
+        // Both studies wrote their consent row against that uuid. Without the fix the losing run
+        // used its own discarded uuid and this would be 1.
         UUID sharedUuid = storedUuid(shared);
         assertThat(consentRowsForUuid(sharedUuid))
                 .as("both studies should have a consent row for the shared subject's uuid")
@@ -138,10 +133,7 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
                 sharedUuid, STUDY_B)).isEqualTo(1);
     }
 
-    /**
-     * The referential invariant, stated directly. Holds however the race lands, so it is the
-     * regression guard that does not depend on timing.
-     */
+    /** The referential invariant, which holds however the race lands. */
     @Test
     void every_consent_and_sample_uuid_exists_in_participants() throws Exception {
         String shared1 = "phs_shared.v1.p1.c1";
@@ -169,15 +161,14 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
         assertThat(orphanedConsents).as("consents referencing a uuid with no participant").isZero();
         assertThat(orphanedSamples).as("samples referencing a uuid with no participant").isZero();
 
-        // Two subjects, one identity each, shared across both studies.
+        // Two subjects, one identity each, shared by both studies.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM participants", Long.class)).isEqualTo(2);
     }
 
     /**
-     * Both studies insert the SAME two new subjects, listed in opposite order in their files. If
-     * inserts followed file order, the two transactions would each hold the row the other needs
-     * and Postgres would break the deadlock by aborting one. resolveOrCreate inserts in sorted
-     * source-id order precisely so that cannot happen.
+     * Both studies insert the same two new subjects, listed in opposite order in their files. Were
+     * inserts issued in file order, each transaction would hold the row the other needs and
+     * Postgres would abort one; {@code resolveOrCreate} inserts in sorted source-id order.
      */
     @Test
     void opposing_insert_orders_do_not_deadlock() throws Exception {

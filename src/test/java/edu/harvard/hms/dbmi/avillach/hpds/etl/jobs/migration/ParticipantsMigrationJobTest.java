@@ -10,9 +10,9 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -122,9 +122,8 @@ class ParticipantsMigrationJobTest {
     @Test
     void fails_with_infrastructure_error_when_the_database_is_unreachable() throws Exception {
         ParticipantRepository participants = mock(ParticipantRepository.class);
-        // resolveOrCreate is the job's first DB touch on the direct-population path; it replaced
-        // findUuids + batchUpsert so a concurrent run cannot leave this job holding a uuid the
-        // database rejected (see ParticipantRepository#resolveOrCreate).
+        // resolveOrCreate is the first DB call on the direct-population path; see
+        // ParticipantRepository.
         when(participants.resolveOrCreate(any(), any(), anyInt()))
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 

@@ -3,10 +3,9 @@
 # Pre-flight checks for the sstr-populate-rds-participants job, run on the Jenkins agent
 # BEFORE any EC2 instance is provisioned.
 #
-# The job purges every existing consents row for --study-id before loading, inside the same
-# transaction. A run that fails on a missing column therefore rolls back safely -- but it
-# still costs an instance, and the failure is fully knowable from the file's header. Only
-# the first 64 KiB of the input is read here, so the check is cheap regardless of file size.
+# The job purges every existing consents row for --study-id before loading, in the same
+# transaction, so a run that fails on a missing column rolls back safely but still costs an
+# instance. Only the first 64 KiB of the input is read, so this is cheap regardless of file size.
 #
 # Environment:
 #   TF_VAR_study_id   required   phs######
@@ -73,8 +72,8 @@ if [[ -z "$HEADER" ]]; then
   exit 1
 fi
 
-# The job reads with DelimitedReader.TAB; a comma-delimited file parses as one giant column
-# and fails with a confusing "missing required column(s)" listing the whole header.
+# The job reads with DelimitedReader.TAB; a comma-delimited file parses as one column and fails
+# with a confusing "missing required column(s)" listing the whole header.
 TABS=$(awk -F'\t' '{print NF; exit}' "$HEAD_FILE")
 check "header is tab-delimited (found $TABS column(s))" test "$TABS" -gt 1
 if [[ "$TABS" -le 1 ]] && grep -q ',' <<<"$HEADER"; then
@@ -90,8 +89,8 @@ done
 DATA_ROWS=$(tail -n +2 "$HEAD_FILE" | grep -c . || true)
 check "input has data rows after the header" test "$DATA_ROWS" -gt 0
 
-# SUBJECT_ID is not required by this job, but ParticipantsMigrationJob needs it to resolve
-# legacy ids against this same file. Its absence is only a problem for the migration.
+# SUBJECT_ID is not required by this job, but ParticipantsMigrationJob needs it to resolve legacy
+# ids against the same file.
 if ! awk -F'\t' 'NR==1 { for (i=1;i<=NF;i++) if ($i=="SUBJECT_ID") found=1 } END { exit !found }' "$HEAD_FILE"; then
   note "no SUBJECT_ID column: fine for this job, but the migration cannot use this file to resolve legacy ids"
 fi

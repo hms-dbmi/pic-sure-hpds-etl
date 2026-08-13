@@ -4,7 +4,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.config.EtlProperties;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -107,10 +107,9 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     }
 
     /**
-     * An open-access study's consent value is the bare study id -- no {@code .c<code>} suffix,
-     * because it has no consent group. Those rows used to fail the strict {@code ^.+\.c(\w+)$}
-     * match and be skipped, which cost the study every consent row AND every mapping row: it
-     * migrated as empty while the run reported success.
+     * An open-access study's consent value is the bare study id, with no {@code .c<code>} suffix.
+     * Under a strict {@code ^.+\.c(\w+)$} match those rows were skipped, costing the study every
+     * consent row and every mapping row while the run still reported success.
      */
     @Test
     void open_access_study_with_no_consent_suffix_migrates_as_public() throws IOException {
@@ -138,10 +137,9 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     }
 
     /**
-     * A consent value that carries a {@code .c} marker with no usable code is a defect, not open
-     * access. Reading it as public would hand an unconsented participant an open-access consent,
-     * so it stays skipped -- but the run now reports how many were dropped instead of only
-     * logging it.
+     * A consent value carrying a {@code .c} marker with no usable code is a defect, not open access.
+     * Reading it as public would grant an unconsented participant an open-access consent, so it
+     * stays skipped — but the run reports how many were dropped rather than only logging it.
      */
     @Test
     void a_malformed_consent_value_is_reported_rather_than_read_as_public() throws IOException {
@@ -153,8 +151,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         JobResult result = executor.run(job,
                 Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-bad-consent");
 
-        // The study still "succeeds" -- it is the warnings that carry the problem, which is why
-        // they have to be in the report rather than only in the log.
+        // The study still succeeds; the warnings carry the problem, so they must be in the report.
         assertThat(result.getMetrics())
                 .containsEntry("unparseableConsentRows", 1L)
                 .containsEntry("openAccessConsentRows", 0L)
@@ -171,9 +168,10 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         String managedInputsPath = managedInputs("GRU,phs001412,true");
         String dataFolder = dataFolder(Map.of(
                 "consents.csv", "",
-                "phs001412_sstr.tsv",
-                "SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
-                        + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n",
+                "phs001412_sstr.tsv", """
+                SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
+                SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
+                """,
                 "GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
 
         JobResult result = executor.run(job,

@@ -1,4 +1,4 @@
-package edu.harvard.hms.dbmi.avillach.hpds.etl.db;
+package edu.harvard.hms.dbmi.avillach.hpds.etl.repository;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
@@ -17,19 +17,17 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Bulk-oriented access to the {@code participants} table. Uses batched upserts with
- * {@code ON CONFLICT} so re-running a migration is idempotent -- a participant that
- * already exists for a given {@code (source_id, source)} is left untouched.
+ * Bulk-oriented access to the {@code participants} table. Batched upserts with
+ * {@code ON CONFLICT} keep a re-run idempotent: a participant that already exists for a given
+ * {@code (source_id, source)} is left untouched.
  *
- * <p><strong>Use {@link #resolveOrCreate} rather than {@link #batchUpsert} whenever the uuid
- * is needed afterwards.</strong> {@code batchUpsert} alone is not safe for concurrent callers
- * that share a {@code source}: {@code ON CONFLICT DO NOTHING} silently discards the losing
- * insert without reporting the uuid that won, so a caller holding a locally generated uuid
- * would go on to write consents and samples against a uuid that is not in the table. See
- * {@link #resolveOrCreate} for the full description.
+ * <p>Use {@link #resolveOrCreate}, not {@link #batchUpsert}, whenever the uuid is needed
+ * afterwards. {@code ON CONFLICT DO NOTHING} discards a losing insert without reporting the uuid
+ * that won, so a caller holding its own candidate would write consents and samples against a
+ * uuid that is not in the table.
  *
- * <p>Any {@link DataAccessException} is rewrapped as an {@link InfrastructureException}
- * so a DB outage yields the INFRASTRUCTURE_ERROR exit code (retryable by Jenkins).
+ * <p>{@link DataAccessException} is rewrapped as {@link InfrastructureException} so a database
+ * outage yields the retryable INFRASTRUCTURE_ERROR exit code.
  */
 @Repository
 public class ParticipantRepository {
@@ -47,44 +45,25 @@ public class ParticipantRepository {
     }
 
     /**
-     * Resolves the HPDS uuid for every {@code sourceId}, creating a participant for the ones
-     * that do not exist yet, and returns the uuid that is <em>actually stored</em> for each --
-     * never a locally generated candidate that lost an insert race.
+     * Resolves the HPDS uuid for every {@code sourceId}, creating participants for the ones that
+     * do not exist yet, and returns the uuid <em>stored in the table</em> for each — never a
+     * locally generated candidate that lost an insert race.
      *
-     * <p>This exists because {@link #batchUpsert} cannot be used safely to learn a uuid when
-     * more than one job may run at once against the same {@code source} (as every SSTR study
-     * load does -- they all share {@code source = "DBGap"}). The unsafe sequence is:
+     * <p>Concurrent callers sharing a {@code source} (every SSTR study load uses
+     * {@code source = "DBGap"}) can both find a subject missing and both insert a different uuid.
+     * The unique constraint on {@code (source_id, source)} lets one win, and
+     * {@code ON CONFLICT DO NOTHING} reports the loser's insert as "0 rows" without revealing the
+     * winner. Re-reading after the insert resolves this: under {@code READ COMMITTED} (Postgres's
+     * default) a conflicting insert blocks until the concurrent writer commits or aborts, and the
+     * following {@code SELECT} takes a fresh snapshot.
      *
-     * <ol>
-     *   <li>job A and job B both look up subject X and find nothing;</li>
-     *   <li>both generate a uuid and insert; the unique constraint on
-     *       {@code (source_id, source)} lets exactly one win;</li>
-     *   <li>{@code ON CONFLICT DO NOTHING} reports the loser's insert as "0 rows" but does not
-     *       reveal the winner's uuid, so the loser still holds its own;</li>
-     *   <li>the loser writes consents and samples against a uuid with no participants row --
-     *       one person with two identities, which is the exact corruption the
-     *       {@code participants} table exists to prevent. Nothing catches it: there are no
-     *       foreign keys from {@code consents}/{@code samples} back to {@code participants}.</li>
-     * </ol>
+     * <p>Inserts are issued in sorted {@code sourceId} order so two callers inserting an
+     * overlapping set of new ids cannot deadlock on opposite acquisition orders. Callers sharing
+     * subjects still serialize on those rows until the winner's transaction commits.
      *
-     * <p>Re-reading after the insert closes this. Under {@code READ COMMITTED} (Postgres's
-     * default) the insert of a conflicting key blocks until the concurrent writer commits or
-     * aborts, and the following {@code SELECT} takes a fresh snapshot -- so by the time this
-     * method returns, every id has a row and the map holds the winner's uuid.
-     *
-     * <p>Two consequences for callers running in parallel:
-     * <ul>
-     *   <li>Inserts are issued in sorted {@code sourceId} order. Two callers inserting an
-     *       overlapping set of <em>new</em> ids in opposite orders would otherwise deadlock,
-     *       each waiting on a row the other inserted; a common order makes that impossible.</li>
-     *   <li>Callers with overlapping subjects still serialize on the shared rows for as long
-     *       as the winner's transaction stays open. That is correctness working as intended,
-     *       but it means a long transaction slows every peer that shares subjects with it.</li>
-     * </ul>
-     *
-     * @param batchSize rows per insert batch, also used to chunk the lookups so a study with
-     *                  more subjects than the JDBC parameter limit still resolves
-     * @return the stored uuid per source id, plus how many rows this call actually inserted
+     * @param batchSize rows per insert batch; also chunks the lookups so a study with more
+     *                  subjects than the JDBC parameter limit still resolves
+     * @return the stored uuid per source id, and how many rows this call inserted
      */
     public Resolution resolveOrCreate(Collection<String> sourceIds, String source, int batchSize) {
         if (sourceIds.isEmpty()) {
@@ -110,15 +89,14 @@ public class ParticipantRepository {
             inserted += batchUpsert(candidates.subList(i, Math.min(i + batchSize, candidates.size())));
         }
 
-        // The authoritative read. Only the ids we tried to insert need re-reading; the rest were
-        // already resolved from committed state above.
+        // Authoritative read. Only the attempted ids need re-reading; the rest resolved above.
         List<String> attempted = candidates.stream().map(Participant::sourceId).toList();
         Map<String, UUID> stored = findUuidsChunked(attempted, source, batchSize);
         resolved.putAll(stored);
 
         if (resolved.size() != distinct.size()) {
-            // Every id was either found or inserted, so this cannot happen unless something
-            // deleted rows underneath us. Fail loudly rather than write orphaned consents.
+            // Unreachable unless rows were deleted underneath us. Fail rather than write
+            // consents against a uuid that is not in participants.
             List<String> missing = distinct.stream().filter(id -> !resolved.containsKey(id)).limit(5).toList();
             throw new InfrastructureException("Could not resolve a participant uuid for "
                     + (distinct.size() - resolved.size()) + " of " + distinct.size() + " source id(s) for source '"
@@ -153,10 +131,9 @@ public class ParticipantRepository {
      * Inserts a batch of participants, skipping any that already exist.
      *
      * <p>Prefer {@link #resolveOrCreate} when the uuid matters afterwards: this method cannot
-     * tell you the uuid of a row that already existed, so a concurrent caller's uuid silently
-     * wins and yours is quietly discarded.
+     * report the uuid of a row that already existed.
      *
-     * @return the number of rows actually inserted (existing rows are not counted)
+     * @return the number of rows inserted; existing rows are not counted
      */
     public int batchUpsert(List<Participant> participants) {
         if (participants.isEmpty()) {
