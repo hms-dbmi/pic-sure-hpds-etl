@@ -9,6 +9,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
@@ -36,8 +37,14 @@ import java.util.stream.Stream;
  *   <li>{@code validateOutput()} -- assert the result is correct (post-condition)</li>
  *   <li>{@code report()} -- attach metrics for the JSON report Jenkins archives</li>
  * </ol>
+ *
+ * <p>Note the sixth thing to copy: the {@link ConditionalOnProperty} below. Jobs are opt-in,
+ * so a new job needs its {@code etl.jobs.<name>.enabled} flag in {@code application.yml} or
+ * {@code JobRegistry} will never see it. This template ships {@code enabled: false} because it
+ * is a demonstration -- it should not be runnable in a real environment.
  */
 @Component
+@ConditionalOnProperty(name = "etl.jobs.template.enabled", havingValue = "true")
 public class TemplateJob extends AbstractJob<TemplateJob.Output> {
 
     private final IoResolver io;

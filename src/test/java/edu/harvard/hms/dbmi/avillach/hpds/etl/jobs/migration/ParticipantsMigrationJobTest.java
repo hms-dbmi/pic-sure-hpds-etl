@@ -28,6 +28,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -121,7 +122,10 @@ class ParticipantsMigrationJobTest {
     @Test
     void fails_with_infrastructure_error_when_the_database_is_unreachable() throws Exception {
         ParticipantRepository participants = mock(ParticipantRepository.class);
-        when(participants.findUuids(any(), any()))
+        // resolveOrCreate is the job's first DB touch on the direct-population path; it replaced
+        // findUuids + batchUpsert so a concurrent run cannot leave this job holding a uuid the
+        // database rejected (see ParticipantRepository#resolveOrCreate).
+        when(participants.resolveOrCreate(any(), any(), anyInt()))
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
         ParticipantsMigrationJob job = newJob(participants, mock(ConsentRepository.class), mock(SampleRepository.class));

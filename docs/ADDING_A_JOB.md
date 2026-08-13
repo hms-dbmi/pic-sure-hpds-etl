@@ -1,9 +1,13 @@
 # Adding a new job
 
 Jobs are "plug and play": a job is any `@Component` that extends `AbstractJob<O>`. There
-is **no central registry to edit** — `JobRegistry` discovers every `Job` bean on the
-classpath and indexes it by `name()`, so a new job is runnable via
-`--job=<name>` the moment it compiles.
+is **no central registry to edit** — `JobRegistry` is built from the `Job` beans Spring found
+and indexes them by `name()`, so there is no switch statement or list of classes anywhere.
+
+Jobs are, however, **opt-in**. Each carries
+`@ConditionalOnProperty("etl.jobs.<name>.enabled", havingValue = "true")`, so a job with no
+flag is never instantiated and never reaches the registry. Wiring a new job therefore means
+one line of configuration, not one line of code.
 
 ## 1. Copy the template
 
@@ -12,6 +16,22 @@ into a new package and rename it:
 
 - **Permanent jobs** → `edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.<area>`, `type() = PERMANENT`
 - **Temporary migrations** → `...etl.jobs.migration`, `type() = MIGRATION` (delete once rolled out everywhere)
+
+Update the copied `@ConditionalOnProperty` to your job's `name()`, then add the flag under
+`etl.jobs` in [`application.yml`](../src/main/resources/application.yml):
+
+```yaml
+etl:
+  jobs:
+    my-new-job:
+      enabled: ${ETL_JOB_MY_NEW_JOB_ENABLED:true}
+```
+
+Until that flag is `true`, `--job=my-new-job` exits `5` with a message naming the flag. If
+your job **injects another job** (as `ParticipantsMigrationJob` injects
+`SstrPopulateRdsParticipantsJob`), list both flags in the condition — otherwise disabling the
+dependency stops the Spring context from starting at all, instead of just making your job
+unavailable.
 
 ## 2. Fill in the five hooks
 
@@ -47,6 +67,37 @@ Inject these instead of rolling your own:
 - **`JsonReader`** — parse JSON into domain types.
 - **`ParticipantRepository` / `ConsentRepository` / `SampleRepository`** — batched, idempotent upserts.
 - **`PlatformTransactionManager`** (via `TransactionTemplate`) — make a multi-batch load atomic.
+
+### Resolving participant uuids: use `resolveOrCreate`
+
+Call **`ParticipantRepository.resolveOrCreate(sourceIds, source, batchSize)`** whenever you need
+a participant's uuid. Do **not** hand-roll `findUuids` + `batchUpsert`:
+
+```java
+ParticipantRepository.Resolution r = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
+Map<String, UUID> uuidBySubject = r.uuidsBySourceId();   // the uuids actually in the table
+long inserted = r.inserted();                            // 0 on a reload, which is correct
+```
+
+`batchUpsert` inserts with `ON CONFLICT DO NOTHING`, which reports a losing insert as "0 rows"
+without revealing the uuid that won. A job that kept its own generated uuid would then write
+consents and samples against a uuid with no `participants` row — one person, two identities —
+and nothing would catch it, because there are no foreign keys back to `participants`. This is a
+real hazard for any job sharing a `source` with a concurrent run: every SSTR study load uses
+`source = "DBGap"`, so two studies with a subject in common race for it.
+
+`resolveOrCreate` re-reads after inserting and returns the stored uuid, and inserts in sorted id
+order so concurrent callers cannot deadlock on an overlapping set of new subjects. See
+`ParticipantRepositoryIT` for the SQL semantics and
+`SstrPopulateRdsParticipantsConcurrencyIT` for the end-to-end guarantee.
+
+### Boolean parameters
+
+`JobContext.getBoolean` rejects anything that is not a recognised literal
+(`true/yes/y/1/on`, `false/no/n/0/off`) rather than following `Boolean.parseBoolean`, which
+silently maps a typo like `treu` to `false`. Also check it in `validateInput` with
+`JobContext.isBooleanLiteral(raw)` so a bad flag appears in the JSON report before any work
+starts, rather than surfacing as a thrown exception later.
 
 ## 5. Write tests — success **and** every failure
 

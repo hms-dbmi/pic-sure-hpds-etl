@@ -231,14 +231,35 @@ soon as the data lands.
 
 **The permanent sweep:** run `hpds-etl/permanent` with `STUDY_ID` blank. Every study marked
 ready in [`studies.tsv`](../etl-runners/sstr-populate-rds-participants/studies.tsv) is loaded,
-one ephemeral runner each, sequentially. Studies are independent — the consents purge is scoped
-to one `study_id`, and each downstream build gets its own Terraform state key and AWS
+one ephemeral runner each, sequentially. A study's own work is isolated — the consents purge is
+scoped to one `study_id`, and each downstream build gets its own Terraform state key and AWS
 resource-name suffix — so `CONTINUE_ON_STUDY_FAILURE` (default on) lets one bad study fail
 without stopping the rest, and the build ends with a per-study summary table.
 
-Sequential is the default because it keeps the RDS write load predictable and the console log
-readable; because the isolation above already holds, swapping the loop in the
-`Load SSTR participants` stage for a `parallel` map is a small change if throughput matters.
+### Why parallel study loads are safe
+
+Studies are *not* fully independent, and the reason matters. Every SSTR load writes
+`participants` with `source = "DBGap"`, so two studies containing the same
+`dbgap_subject_id` are competing for that one subject's HPDS uuid — study scoping does
+nothing for them.
+
+`ParticipantRepository.resolveOrCreate` is what makes it correct: it re-reads after inserting
+and returns the uuid **actually stored**, so a run whose insert lost to a concurrent one cannot
+go on to write consents and samples against its own discarded uuid. `ON CONFLICT DO NOTHING`
+reports the loser's insert as "0 rows" without revealing the winner, and there are no foreign
+keys from `consents`/`samples` back to `participants`, so nothing else would have caught it.
+Inserts are also issued in sorted `source_id` order, so two runs inserting an overlapping set
+of new subjects cannot deadlock by acquiring them in opposite orders.
+
+`SstrPopulateRdsParticipantsConcurrencyIT` covers all three properties: shared subjects
+converge on one uuid, no consent or sample row references a uuid with no participant, and
+opposing insert orders do not deadlock.
+
+Sequential is still the default. Loads that share subjects serialize on those rows anyway (the
+loser waits for the winner's transaction to commit), so parallelism buys least exactly where
+studies overlap most — and it keeps the RDS write load predictable and the console log
+readable. Swapping the loop in the `Load SSTR participants` stage for a `parallel` map is a
+small change if throughput matters.
 
 **Reloading one study:** run `hpds-etl/permanent` (or the SSTR job directly) with `STUDY_ID`
 set. The manifest's `ready` flag is ignored in that mode — an explicit reload should not be
@@ -284,6 +305,25 @@ re-run `make destroy` with the same `STATE_KEY`.
 
 **Cost.** One instance per job run, alive only for the job, terminated by itself. Per-build
 image tarballs are removed from S3 in `post { always }`.
+
+**Turning a job off.** Jobs are opt-in: each is registered only where
+`etl.jobs.<job-name>.enabled` is `true` (see `etl.jobs` in
+[`application.yml`](../src/main/resources/application.yml)). The shipped defaults enable the
+three real jobs and disable `template`, so the pipelines work as documented with no override.
+
+To disable a job for a single run without a code change, set its environment variable in the
+runner's container environment — `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED=false`, etc. The job
+then exits `5` (`CONFIG_ERROR`) with a message naming the flag, rather than running.
+
+Two consequences worth knowing:
+
+- `participants-migration` also requires `etl.jobs.sstr-populate-rds-participants.enabled`,
+  because it injects that job to load the sstr-backed studies. Both flags are on its
+  condition, so disabling the sstr job makes the migration job disappear cleanly instead of
+  breaking Spring context startup on a missing bean.
+- This is the intended retirement path for the migration: set
+  `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED=false` everywhere and confirm nothing calls it,
+  *then* delete the job, its runner directory, and `/Jenkinsfile`.
 
 ## Known gaps
 

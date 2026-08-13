@@ -125,7 +125,9 @@ public class JobLauncher implements ApplicationRunner, ExitCodeGenerator {
         sb.append("\nHPDS ETL job runner\n")
           .append("  java -jar hpds-etl.jar --job=<name> [--param=value ...]\n")
           .append("  java -jar hpds-etl.jar --pipeline=<name> [--param=value ...]\n\n")
-          .append("Available jobs:\n");
+          // Only enabled jobs exist as beans, so this lists what this environment can run --
+          // not every job in the JAR. See etl.jobs.* in application.yml.
+          .append("Jobs enabled in this environment:\n");
         for (String name : registry.names()) {
             sb.append("  - ").append(name).append('\n');
         }

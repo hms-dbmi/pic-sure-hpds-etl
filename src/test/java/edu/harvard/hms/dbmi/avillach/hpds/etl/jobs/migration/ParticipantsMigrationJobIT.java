@@ -106,6 +106,66 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         return Files.readString(reportsDir.resolve(studyId + "_hpds_id_mapping.csv"));
     }
 
+    /**
+     * An open-access study's consent value is the bare study id -- no {@code .c<code>} suffix,
+     * because it has no consent group. Those rows used to fail the strict {@code ^.+\.c(\w+)$}
+     * match and be skipped, which cost the study every consent row AND every mapping row: it
+     * migrated as empty while the run reported success.
+     */
+    @Test
+    void open_access_study_with_no_consent_suffix_migrates_as_public() throws IOException {
+        String managedInputsPath = managedInputs("OPENSTUDY,open-study-01,true");
+        String dataFolder = dataFolder(Map.of(
+                // No ".c<code>" suffix: this is what an open-access study looks like.
+                "consents.csv", "\"3001\",\"open-study-01\"\n",
+                "OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
+
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-open-access");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics())
+                .containsEntry("succeededStudies", 1L)
+                .containsEntry("failedStudies", 0L)
+                .containsEntry("openAccessConsentRows", 1L)
+                .containsEntry("unparseableConsentRows", 0L)
+                // The subject was migrated, not skipped.
+                .containsEntry("subjectsWithoutConsent", 0L);
+
+        assertThat(countWhere("consents", "study_id = ? AND consent_code = 'public'", "open-study-01"))
+                .isEqualTo(1);
+        assertThat(readMappingFile("open-study-01")).contains("3001,");
+    }
+
+    /**
+     * A consent value that carries a {@code .c} marker with no usable code is a defect, not open
+     * access. Reading it as public would hand an unconsented participant an open-access consent,
+     * so it stays skipped -- but the run now reports how many were dropped instead of only
+     * logging it.
+     */
+    @Test
+    void a_malformed_consent_value_is_reported_rather_than_read_as_public() throws IOException {
+        String managedInputsPath = managedInputs("BADSTUDY,bad-study-01,true");
+        String dataFolder = dataFolder(Map.of(
+                "consents.csv", "\"4001\",\"bad-study-01.c\"\n",
+                "BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
+
+        JobResult result = executor.run(job,
+                Map.of("managed-inputs", managedInputsPath, "data-folder", dataFolder), "it-bad-consent");
+
+        // The study still "succeeds" -- it is the warnings that carry the problem, which is why
+        // they have to be in the report rather than only in the log.
+        assertThat(result.getMetrics())
+                .containsEntry("unparseableConsentRows", 1L)
+                .containsEntry("openAccessConsentRows", 0L)
+                .containsEntry("subjectsWithoutConsent", 1L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .anyMatch(i -> i.code().equals("UNPARSEABLE_CONSENT_VALUES"));
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(countWhere("consents", "study_id = ?", "bad-study-01")).isZero();
+    }
+
     @Test
     void sstr_driven_study_populates_rds_and_writes_mapping_file() throws IOException {
         String managedInputsPath = managedInputs("GRU,phs001412,true");

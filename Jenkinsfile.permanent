@@ -188,12 +188,22 @@ pipeline {
         stage('Load SSTR participants') {
             steps {
                 script {
-                    // Sequential on purpose. The studies are independent — the consents purge
-                    // is scoped to one study_id, and each downstream build gets its own
-                    // Terraform state key and AWS resource-name suffix — so running them
-                    // concurrently is safe, and swapping this loop for a `parallel` map is a
-                    // small change. Sequential is the default because it makes the RDS write
-                    // load predictable and the console log readable.
+                    // Sequential on purpose.
+                    //
+                    // Concurrent study loads ARE safe, but not for the reason it first appears:
+                    // the consents purge being scoped to one study_id and each build having its
+                    // own Terraform state only make the STUDY-scoped work independent. Studies
+                    // also share participants rows — every SSTR load uses source = "DBGap" — so
+                    // two studies containing the same dbgap_subject_id compete for that subject's
+                    // uuid. What makes that safe is ParticipantRepository.resolveOrCreate, which
+                    // returns the uuid actually stored rather than a locally generated candidate
+                    // that lost the insert race.
+                    //
+                    // Sequential remains the default because concurrent loads that share subjects
+                    // serialize on those rows anyway (the loser waits for the winner's transaction
+                    // to commit), so parallelism buys least where studies overlap most — and it
+                    // keeps the RDS write load predictable and the console log readable. Swapping
+                    // this loop for a `parallel` map is a small change if throughput matters.
                     def results = []
 
                     for (study in STUDIES) {

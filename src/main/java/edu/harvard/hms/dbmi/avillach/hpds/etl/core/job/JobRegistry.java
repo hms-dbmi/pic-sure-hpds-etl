@@ -9,10 +9,17 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Discovers every {@link Job} bean on the classpath and indexes it by {@link Job#name()}.
- * This is what makes new jobs "plug and play": annotate a job with {@code @Component}
- * (or extend the annotated {@link AbstractJob} subclass) and it is automatically
- * runnable via {@code --job=<name>} -- no central switch statement to edit.
+ * Indexes every {@link Job} bean Spring created, by {@link Job#name()}. This is what makes
+ * new jobs "plug and play": annotate a job with {@code @Component} (or extend the annotated
+ * {@link AbstractJob} subclass) and it is automatically runnable via {@code --job=<name>} --
+ * no central switch statement to edit.
+ *
+ * <p>Jobs are also opt-in. Each job carries
+ * {@code @ConditionalOnProperty("etl.jobs.<job-name>.enabled", havingValue = "true")}, so a
+ * disabled job is never instantiated and therefore never reaches this registry -- the
+ * enable/disable decision is made once, in {@code application.yml}, and needs no code here.
+ * "Registered" consequently means "enabled in this environment", which is why
+ * {@link #require(String)} cannot tell a wrong name from a disabled job and says so.
  */
 @Component
 public class JobRegistry {
@@ -31,11 +38,15 @@ public class JobRegistry {
         this.jobsByName = map;
     }
 
-    /** @throws ConfigException if no job with that name is registered. */
+    /** @throws ConfigException if no job with that name is enabled. */
     public Job require(String name) {
         Job job = jobsByName.get(name);
         if (job == null) {
-            throw new ConfigException("Unknown job '" + name + "'. Available jobs: " + names());
+            // Naming the flag matters: a disabled job is indistinguishable from a typo here,
+            // and "unknown job" alone sends people hunting for a misspelling that isn't there.
+            throw new ConfigException("No enabled job named '" + name + "'. Either the name is wrong, or the "
+                    + "job is disabled -- jobs are opt-in via etl.jobs." + name + ".enabled=true "
+                    + "(see application.yml). Currently enabled: " + names());
         }
         return job;
     }

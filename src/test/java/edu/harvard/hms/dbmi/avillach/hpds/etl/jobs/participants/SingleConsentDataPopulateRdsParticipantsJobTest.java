@@ -15,16 +15,24 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.db.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.db.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.JobTestSupport;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.nio.file.Files;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -78,7 +86,9 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
     @Test
     void fails_with_infrastructure_error_when_the_database_is_unreachable() throws Exception {
         ParticipantRepository participants = mock(ParticipantRepository.class);
-        when(participants.findUuids(any(), any()))
+        // resolveOrCreate replaced findUuids + batchUpsert so a concurrent run cannot leave this
+        // job holding a uuid the database rejected (see ParticipantRepository#resolveOrCreate).
+        when(participants.resolveOrCreate(any(), any(), anyInt()))
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
         SingleConsentDataPopulateRdsParticipantsJob job = newJob(
@@ -91,5 +101,87 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(result.getErrorMessage()).contains("connection refused");
+    }
+
+    /**
+     * The purge must not happen at all when the file yielded no subject ids. Asserting on the
+     * repository directly is the point: validateOutput's EMPTY_INPUT check runs after the
+     * transaction has committed, so it could report a problem while the consents were already
+     * gone. {@code verify(never())} is what pins "the delete was never even attempted".
+     */
+    @Test
+    void does_not_purge_consents_when_the_input_has_no_data_rows() throws Exception {
+        ConsentRepository consents = mock(ConsentRepository.class);
+        SingleConsentDataPopulateRdsParticipantsJob job = newJob(
+                mock(ParticipantRepository.class), consents, mock(SampleRepository.class));
+
+        String input = JobTestSupport.tempFile("subjects.csv", "subject_id\n");
+
+        JobResult result = newExecutor().run(job,
+                Map.of("input", input, "study-id", "my-study-01", "consent-type", "single"),
+                "unit-empty-input");
+
+        // DATA_ERROR, not VALIDATION_FAILED: thrown inside the transaction so it rolls back.
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("refusing to purge");
+        verify(consents, never()).deleteByStudyId(anyString());
+        verify(consents, never()).batchUpsert(any());
+    }
+
+    /**
+     * A misspelt --subject-id-is-sample-id must fail the run, not be read as false. Left to
+     * {@link Boolean#parseBoolean}, "treu" would silently disable the samples load and the job
+     * would report SUCCESS having written no samples at all -- the operator's typo would be
+     * indistinguishable from asking for no samples.
+     */
+    @Test
+    void rejects_a_misspelt_boolean_instead_of_silently_treating_it_as_false() throws Exception {
+        ConsentRepository consents = mock(ConsentRepository.class);
+        SampleRepository samples = mock(SampleRepository.class);
+        SingleConsentDataPopulateRdsParticipantsJob job = newJob(
+                mock(ParticipantRepository.class), consents, samples);
+
+        String input = JobTestSupport.tempFile("subjects.csv", VALID_FILE);
+        JobResult result = newExecutor().run(job,
+                Map.of("input", input, "study-id", "my-study-01", "consent-type", "single",
+                        "subject-id-is-sample-id", "treu"),
+                "unit-bad-boolean");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("BAD_BOOLEAN") && i.message().contains("treu"));
+        // Input validation runs before execute, so nothing was touched.
+        verify(consents, never()).deleteByStudyId(anyString());
+        verify(samples, never()).batchUpsert(any());
+    }
+
+    @Test
+    void accepts_alternative_boolean_literals_for_subject_id_is_sample_id() throws Exception {
+        assertThat(samplesWrittenWith("yes")).as("'yes' should enable the samples load").isTrue();
+        assertThat(samplesWrittenWith("off")).as("'off' should disable the samples load").isFalse();
+    }
+
+    /** Runs the job with the given flag value and reports whether any samples row was written. */
+    private boolean samplesWrittenWith(String flagValue) throws Exception {
+        ParticipantRepository participants = mock(ParticipantRepository.class);
+        when(participants.resolveOrCreate(any(), any(), anyInt())).thenAnswer(invocation -> {
+            Collection<String> ids = invocation.getArgument(0);
+            Map<String, UUID> uuids = new LinkedHashMap<>();
+            ids.forEach(id -> uuids.put(id, UUID.randomUUID()));
+            return new ParticipantRepository.Resolution(uuids, uuids.size());
+        });
+        SampleRepository samples = mock(SampleRepository.class);
+
+        SingleConsentDataPopulateRdsParticipantsJob job =
+                newJob(participants, mock(ConsentRepository.class), samples);
+
+        String input = JobTestSupport.tempFile("subjects.csv", VALID_FILE);
+        JobResult result = newExecutor().run(job,
+                Map.of("input", input, "study-id", "my-study-01", "consent-type", "single",
+                        "subject-id-is-sample-id", flagValue),
+                "unit-boolean-" + flagValue);
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        return !Mockito.mockingDetails(samples).getInvocations().isEmpty();
     }
 }

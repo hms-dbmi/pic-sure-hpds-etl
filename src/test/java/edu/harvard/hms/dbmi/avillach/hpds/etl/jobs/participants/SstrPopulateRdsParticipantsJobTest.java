@@ -26,6 +26,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -92,5 +94,31 @@ class SstrPopulateRdsParticipantsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(result.getErrorMessage()).contains("connection refused");
+    }
+
+    /**
+     * The purge must not happen at all when the file yielded no subjects. Asserting on the
+     * repository directly is the point: validateOutput's EMPTY_INPUT check runs after the
+     * transaction has committed, so it could report a problem while the consents were already
+     * gone. {@code verify(never())} is what pins "the delete was never even attempted".
+     */
+    @Test
+    void does_not_purge_consents_when_the_input_has_no_data_rows() throws Exception {
+        ConsentRepository consents = mock(ConsentRepository.class);
+        SstrPopulateRdsParticipantsJob job = newJob(
+                mock(ParticipantRepository.class), consents, mock(SampleRepository.class));
+
+        String headerOnly =
+                "SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n";
+        String input = JobTestSupport.tempFile("sstr.tsv", headerOnly);
+
+        JobResult result = newExecutor().run(job,
+                Map.of("input", input, "study-id", "phs001412"), "unit-empty-input");
+
+        // DATA_ERROR, not VALIDATION_FAILED: thrown inside the transaction so it rolls back.
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("refusing to purge");
+        verify(consents, never()).deleteByStudyId(anyString());
+        verify(consents, never()).batchUpsert(any());
     }
 }

@@ -74,7 +74,7 @@ the log.
 
 ## Target schema (AWS RDS Postgres)
 
-Reference DDL: [`src/main/resources/db/schema.sql`](src/main/resources/db/schema.sql)
+Reference DDL: [`src/main/resources/repository/schema.sql`](src/main/resources/repository/schema.sql)
 (used to initialize the Postgres Testcontainer; **not** auto-run against RDS).
 
 | Table | Maps HPDS uuid to | Unique on |
@@ -126,8 +126,10 @@ docs/JENKINS.md                   architecture, validation, AWS setup, runbook
 ## Adding a job
 
 See **[docs/ADDING_A_JOB.md](docs/ADDING_A_JOB.md)** — copy `TemplateJob`, fill in five
-hooks, add tests (success + every failure), add a runner and a Jenkins stage. No registry
-to edit.
+hooks, add tests (success + every failure), add a runner and a Jenkins stage. No registry to
+edit, but jobs are **opt-in**: a job runs only where its `etl.jobs.<name>.enabled` flag is
+`true`, so [`application.yml`](src/main/resources/application.yml) is the single list of what
+an environment may run.
 
 ## Tests
 

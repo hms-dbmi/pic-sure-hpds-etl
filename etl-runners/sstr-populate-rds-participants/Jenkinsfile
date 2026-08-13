@@ -45,9 +45,11 @@ pipeline {
     options {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
-        // Concurrency is deliberately ALLOWED: studies are independent (the purge is scoped
-        // to one study_id) and both the resource names and the Terraform state key are
-        // per-run, so the orchestrator can load several studies at once if asked to.
+        // Concurrency is deliberately ALLOWED so the orchestrator can load several studies at
+        // once. Study-scoped work is isolated (the purge is scoped to one study_id; resource
+        // names and the Terraform state key are per-run), and the cross-study hazard -- two
+        // studies racing for a shared dbgap_subject_id's uuid, since all of them use
+        // source = "DBGap" -- is handled by ParticipantRepository.resolveOrCreate.
         timeout(time: 4, unit: 'HOURS')
     }
 

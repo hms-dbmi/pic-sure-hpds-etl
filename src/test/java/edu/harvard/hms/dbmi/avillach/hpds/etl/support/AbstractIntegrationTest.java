@@ -5,30 +5,43 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.localstack.LocalStackContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Base for integration tests that need real infrastructure. Spins up (once per JVM,
- * reused across subclasses) a Postgres container initialized with the reference schema
- * and a LocalStack S3 container, then points the Spring context at both.
+ * Base for integration tests that need real infrastructure: a Postgres container initialized
+ * with the reference schema and a LocalStack S3 container, with the Spring context pointed at
+ * both.
  *
  * <p>Extend this and {@code @Autowired} the beans under test. Requires Docker to be
  * running -- these tests exercise the real JDBC/S3 paths, not mocks.
+ *
+ * <p><strong>Why the containers are started here and not with {@code @Testcontainers} /
+ * {@code @Container}:</strong> that extension stops static containers when each test class
+ * finishes and starts new ones -- on new random ports -- for the next class. Spring caches one
+ * application context across every subclass (they share the same context configuration), so the
+ * datasource URL stays pinned to the FIRST container's port and every later test class fails
+ * with "Connection refused" against a container that no longer exists.
+ *
+ * <p>Starting them in a static initializer instead gives the intended lifetime: one set of
+ * containers for the whole JVM, matching the one cached context. Testcontainers' ryuk sidecar
+ * removes them when the JVM exits, so nothing is left running.
  */
 @SpringBootTest
-@Testcontainers
 public abstract class AbstractIntegrationTest {
 
-    @Container
     protected static final PostgreSQLContainer POSTGRES =
             new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
 
-    @Container
     protected static final LocalStackContainer LOCALSTACK =
             new LocalStackContainer(DockerImageName.parse("localstack/localstack:3.4"))
                     .withServices("s3");
+
+    static {
+        // Sequential rather than parallel: startup is dominated by image pull on a cold cache,
+        // and a failure here should name the container that could not start.
+        POSTGRES.start();
+        LOCALSTACK.start();
+    }
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
@@ -37,7 +50,7 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.sql.init.mode", () -> "always");
-        registry.add("spring.sql.init.schema-locations", () -> "classpath:db/schema.sql");
+        registry.add("spring.sql.init.schema-locations", () -> "classpath:repository/schema.sql");
 
         // S3: target LocalStack. Credentials come from the default provider chain, so
         // expose LocalStack's test credentials via the standard system properties.

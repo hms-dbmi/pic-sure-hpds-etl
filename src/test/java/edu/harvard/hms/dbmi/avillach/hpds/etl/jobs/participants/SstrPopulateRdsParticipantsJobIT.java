@@ -149,14 +149,26 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(participants.count()).isEqualTo(0);
     }
 
+    /**
+     * A header-only (or truncated) file must not cost the study its consent groups. The purge
+     * is guarded before it runs, so this fails as a DATA_ERROR with the transaction rolled
+     * back -- not as a VALIDATION_FAILED after the purge has already committed, which is what
+     * would happen if the emptiness check lived only in validateOutput.
+     */
     @Test
-    void fails_validation_on_empty_input() {
+    void refuses_to_purge_consents_when_input_has_no_data_rows() {
+        UUID existing = UUID.randomUUID();
+        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (?, ?, ?, ?)", existing, STUDY_ID, "1", "GRU");
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER);
 
         JobResult result = run(executor, job, input, "it-empty");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("refusing to purge");
         assertThat(participants.count()).isEqualTo(0);
+        // The pre-existing consent row is the whole point: it must survive.
+        assertThat(consentCountForStudy()).isEqualTo(1);
     }
 
     @Test
