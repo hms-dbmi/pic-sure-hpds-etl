@@ -235,7 +235,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
             report.error("EMPTY_INPUT", "Input contained no data rows");
         }
         output.countsByConsentGroup().forEach((group, count) ->
-                report.info("CONSENT_GROUP_COUNT", group + ": " + count + " participant(s)"));
+                report.info("consent_code_COUNT", group + ": " + count + " participant(s)"));
     }
 
     @Override

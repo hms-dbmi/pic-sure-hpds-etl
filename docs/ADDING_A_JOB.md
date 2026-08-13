@@ -62,9 +62,30 @@ Every business case gets a test; every failure mode gets a test.
 
 Adding a newly-discovered edge case = one more `@Test` method.
 
-## 6. Wire it into the pipeline
+## 6. Wire it into a pipeline
 
 - **Local/CI:** add the job name to a list under `etl.pipelines.<name>` in
   `application.yml` and run `--pipeline=<name>`.
-- **Production:** add a stage to the [`Jenkinsfile`](../Jenkinsfile). The next stage runs
-  only if yours exits `0`.
+- **Production:** the job needs an **ephemeral runner** and a **stage in the right
+  orchestrator**. Which orchestrator follows directly from `type()`:
+
+  | `type()` | Orchestrator | Note |
+  |---|---|---|
+  | `PERMANENT` | [`/Jenkinsfile.permanent`](../Jenkinsfile.permanent) | the ongoing ingestion surface |
+  | `MIGRATION` | [`/Jenkinsfile`](../Jenkinsfile) | deleted with the migration |
+
+  Copy an existing runner directory and adapt it —
+  [`etl-runners/README.md`](../etl-runners/README.md) has the seven steps. The runner owns
+  provisioning, monitoring, and validating; the orchestrator stage just triggers it with
+  `build job:`, so the next stage runs only if yours exited `0`.
+
+  Two things to get right in the runner:
+
+  - **`preflight.sh`** — check what is knowable from the inputs alone, before an instance
+    exists. Every failure you can catch here costs seconds instead of a provisioned runner.
+  - **`validate.sh`** — assert *invariants*, not plausible-looking numbers. Read how the
+    repository upserts first: `ON CONFLICT DO NOTHING` returns only newly-inserted rows (so
+    the count is legitimately `0` on a re-run), while `ON CONFLICT DO UPDATE` reports every
+    row. Only the latter supports an equality assertion.
+
+  See [`docs/JENKINS.md`](JENKINS.md) for the full architecture and the exit-code contract.

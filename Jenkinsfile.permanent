@@ -1,0 +1,310 @@
+// =============================================================================
+// PERMANENT ETL PIPELINE -- the ongoing ingestion surface.
+//
+// SCOPE: this pipeline is ONLY for jobs whose Job.type() is JobType.PERMANENT. One-off
+// migrations off the legacy system live in a separate pipeline, /Jenkinsfile, which is
+// deleted once its migrations have run everywhere. Keeping them apart means this pipeline's
+// schedule, retention, and alerting are never disturbed by migration work, and deleting the
+// migration is a clean removal rather than an edit to the pipeline that runs every week.
+//
+// When the migration is gone, rename this file to /Jenkinsfile.
+//
+// STRUCTURE
+//   The DAG lives here, not in the JAR. Each permanent job is one stage that TRIGGERS THAT
+//   JOB'S OWN PIPELINE, which owns provisioning its ephemeral runner, validating its inputs
+//   and outputs, and tearing itself down. A stage runs only if the stage above it succeeded.
+//
+//   Build and test run HERE, once, as the gate for the whole run: nothing is provisioned
+//   until the suites pass. Downstream jobs are invoked with SKIP_TESTS=true so the same
+//   commit's suites are not re-run per study.
+//
+// TRIGGER MODES (both supported by the same job)
+//   STUDY_ID blank  -> sweep every study marked ready in
+//                      etl-runners/sstr-populate-rds-participants/studies.tsv
+//   STUDY_ID set    -> load exactly that study, taking its input URI from the manifest
+//                      unless INPUT overrides it. This is the path for reloading one study.
+//
+// EXIT CODES the stages gate on (see ExitCode.java):
+//   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '20'))
+        disableConcurrentBuilds()
+        timeout(time: 12, unit: 'HOURS')
+    }
+
+    // Deliberately not scheduled by default: each run writes to shared RDS tables, so a
+    // sweep should be turned on knowingly rather than inherited. Uncomment for a weekly run.
+    // triggers { cron('H 3 * * 1') }
+
+    parameters {
+        string(name: 'STUDY_ID', defaultValue: '',
+               description: 'Blank sweeps every ready study in the manifest. Set to a phs###### to load exactly one study (the reload path).')
+        string(name: 'INPUT', defaultValue: '',
+               description: 'Only used with STUDY_ID: overrides that study\'s input URI from the manifest. Required if the study is not in the manifest at all.')
+        string(name: 'STUDIES_MANIFEST',
+               defaultValue: 'etl-runners/sstr-populate-rds-participants/studies.tsv',
+               description: 'TSV of study_id, input_uri, ready, expected_consent_codes, expected_min_participants, instance_type')
+        string(name: 'BATCH_SIZE', defaultValue: '1000',
+               description: 'Rows per batch insert, passed to every permanent job')
+        string(name: 'SSTR_JOB', defaultValue: 'hpds-etl/sstr-populate-rds-participants',
+               description: 'Jenkins job that runs etl-runners/sstr-populate-rds-participants/Jenkinsfile')
+        booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
+               description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state.')
+        booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
+               description: 'Keep loading the remaining studies when one fails, then fail the build with a summary. Safe: each study is loaded in its own transaction, scoped to its own study_id.')
+        booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
+               description: 'Validate every study\'s inputs and stop, without provisioning anything')
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+    }
+
+    stages {
+
+        stage('Build') {
+            steps {
+                sh './mvnw -B clean package -DskipTests'
+            }
+        }
+
+        // The gate for the whole run: nothing is provisioned until the suites pass.
+        // `verify` runs surefire (*Test) and then failsafe (*IT, Testcontainers Postgres +
+        // LocalStack); `test` runs surefire alone. There is no supported way to run only the
+        // ITs, and the unit suites are fast, so the two modes are simply verify vs test.
+        stage('Tests') {
+            steps {
+                sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml,target/failsafe-reports/*.xml',
+                          allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Resolve studies') {
+            steps {
+                script {
+                    if (!fileExists(params.STUDIES_MANIFEST)) {
+                        error("Studies manifest not found: ${params.STUDIES_MANIFEST}")
+                    }
+
+                    // TSV, '#' comments, trailing columns optional. split('\t', -1) keeps
+                    // empty trailing fields so column positions stay stable.
+                    def manifest = readFile(file: params.STUDIES_MANIFEST).readLines()
+                        .findAll { it.trim() && !it.trim().startsWith('#') }
+                        .collect { line ->
+                            def c = line.split('\t', -1)
+                            [
+                                studyId      : (c.length > 0 ? c[0] : '').trim(),
+                                input        : (c.length > 1 ? c[1] : '').trim(),
+                                ready        : (c.length > 2 ? c[2] : '').trim().toLowerCase() in ['true', 'yes', '1'],
+                                groups       : (c.length > 3 ? c[3] : '').trim(),
+                                minSubjects  : (c.length > 4 ? c[4] : '').trim(),
+                                instanceType : (c.length > 5 ? c[5] : '').trim(),
+                            ]
+                        }
+                        .findAll { it.studyId }
+
+                    def selected
+                    if (params.STUDY_ID?.trim()) {
+                        // Single-study mode. `ready` is intentionally ignored: an explicit
+                        // request to reload one study should not be blocked by a sweep flag.
+                        def hit = manifest.find { it.studyId == params.STUDY_ID.trim() }
+                        if (hit) {
+                            if (params.INPUT?.trim()) {
+                                echo "INPUT overrides the manifest URI for ${hit.studyId}"
+                                hit.input = params.INPUT.trim()
+                            }
+                            selected = [hit]
+                        } else if (params.INPUT?.trim()) {
+                            echo "${params.STUDY_ID} is not in the manifest; using INPUT and skipping the expected-value checks"
+                            selected = [[studyId: params.STUDY_ID.trim(), input: params.INPUT.trim(),
+                                         ready: true, groups: '', minSubjects: '', instanceType: '']]
+                        } else {
+                            error("${params.STUDY_ID} is not in ${params.STUDIES_MANIFEST} and no INPUT was given. " +
+                                  'Add the study to the manifest, or pass INPUT.')
+                        }
+                    } else {
+                        selected = manifest.findAll { it.ready }
+                        if (selected.isEmpty()) {
+                            error("No studies are marked ready in ${params.STUDIES_MANIFEST}. " +
+                                  'Populate the manifest, or run one study with STUDY_ID + INPUT.')
+                        }
+                    }
+
+                    def missingInput = selected.findAll { !it.input }
+                    if (missingInput) {
+                        error("These studies have no input_uri in the manifest: ${missingInput*.studyId.join(', ')}")
+                    }
+
+                    // A duplicated study would load twice in one sweep, the second run purging
+                    // and repopulating what the first just wrote.
+                    def dupes = selected*.studyId.countBy { it }
+                                        .findAll { k, v -> v > 1 }
+                                        .keySet()
+                                        .toList()
+                    if (dupes) {
+                        error("Duplicate study id(s) in the manifest: ${dupes.join(', ')}")
+                    }
+
+                    def bad = selected.findAll { !(it.studyId ==~ /^phs\d{6}$/) }
+                    if (bad) {
+                        error("Invalid study id(s) — must match phs###### (exactly 6 digits): ${bad*.studyId.join(', ')}")
+                    }
+
+                    // No `def`: this is an intentional script-binding assignment so the next
+                    // stage can read it. Adding `def` scopes it to this block and the load
+                    // stage would see nothing.
+                    STUDIES = selected
+
+                    currentBuild.displayName = params.STUDY_ID?.trim()
+                        ? "#${env.BUILD_NUMBER} ${params.STUDY_ID}"
+                        : "#${env.BUILD_NUMBER} sweep (${selected.size()} studies)"
+
+                    echo "Studies to load (${selected.size()}):"
+                    selected.each { s ->
+                        echo "  ${s.studyId}  <- ${s.input}" +
+                             (s.groups ? "  expect groups [${s.groups}]" : '') +
+                             (s.minSubjects ? "  expect >= ${s.minSubjects} participants" : '') +
+                             (s.instanceType ? "  on ${s.instanceType}" : '')
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Permanent job stages. One per PERMANENT job, in the order they must run.
+        // ---------------------------------------------------------------------
+
+        stage('Load SSTR participants') {
+            steps {
+                script {
+                    // Sequential on purpose. The studies are independent — the consents purge
+                    // is scoped to one study_id, and each downstream build gets its own
+                    // Terraform state key and AWS resource-name suffix — so running them
+                    // concurrently is safe, and swapping this loop for a `parallel` map is a
+                    // small change. Sequential is the default because it makes the RDS write
+                    // load predictable and the console log readable.
+                    def results = []
+
+                    for (study in STUDIES) {
+                        echo "--- ${study.studyId} ---"
+                        def outcome
+                        try {
+                            def downstream = build(
+                                job: params.SSTR_JOB,
+                                wait: true,
+                                // propagate: false so one bad study does not abort the sweep;
+                                // the tally below fails the build instead.
+                                propagate: false,
+                                parameters: [
+                                    string(name: 'STUDY_ID', value: study.studyId),
+                                    string(name: 'INPUT',    value: study.input),
+                                    string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
+                                    string(name: 'EXPECTED_consent_codeS', value: study.groups),
+                                    string(name: 'EXPECTED_MIN_PARTICIPANTS', value: study.minSubjects),
+                                    string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${study.studyId}"),
+                                    string(name: 'INSTANCE_TYPE',
+                                           value: study.instanceType ?: 'm5.large'),
+                                    booleanParam(name: 'SKIP_TESTS', value: true),
+                                    booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                ])
+
+                            outcome = [studyId: study.studyId, result: downstream.result,
+                                       build: downstream.number, url: downstream.absoluteUrl]
+
+                            try {
+                                copyArtifacts(
+                                    projectName: params.SSTR_JOB,
+                                    selector: specific("${downstream.number}"),
+                                    target: "downstream-artifacts/sstr/${study.studyId}",
+                                    optional: true)
+                            } catch (err) {
+                                echo "Could not copy artifacts for ${study.studyId} (${err.message}); " +
+                                     "they remain on ${params.SSTR_JOB} #${downstream.number}."
+                            }
+                        } catch (err) {
+                            // build() itself failed (no such job, aborted, agent lost).
+                            outcome = [studyId: study.studyId, result: 'NOT_BUILT',
+                                       build: null, url: null, error: err.message]
+                            echo "${study.studyId}: could not run — ${err.message}"
+                        }
+
+                        results << outcome
+                        echo "${study.studyId}: ${outcome.result}"
+
+                        if (outcome.result != 'SUCCESS' && !params.CONTINUE_ON_STUDY_FAILURE) {
+                            echo 'CONTINUE_ON_STUDY_FAILURE is off — stopping the sweep here.'
+                            break
+                        }
+                    }
+
+                    // --- summary --------------------------------------------------
+                    def ok       = results.findAll { it.result == 'SUCCESS' }
+                    def warned   = results.findAll { it.result == 'UNSTABLE' }
+                    def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
+                    def skipped  = STUDIES.size() - results.size()
+
+                    echo ''
+                    echo '================ SSTR load summary ================'
+                    results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
+                    if (skipped > 0) {
+                        echo "  ${skipped} study/studies not attempted"
+                    }
+                    echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
+                         "${failed.size()} failed, ${skipped} not attempted"
+                    echo '=================================================='
+
+                    if (failed) {
+                        error("SSTR load failed for: ${failed*.studyId.join(', ')}. " +
+                              'Each study is loaded in its own transaction, so a failed study left RDS unchanged — ' +
+                              'fix its input and re-run just that study with STUDY_ID.')
+                    }
+                    if (warned) {
+                        unstable("Loaded with warnings: ${warned*.studyId.join(', ')}")
+                    }
+                }
+            }
+        }
+
+        // Add the next permanent job as another stage; it runs only because the one above
+        // passed. For example, the other permanent participants loader:
+        //
+        // stage('Load single-consent participants') {
+        //     steps {
+        //         script {
+        //             build job: 'hpds-etl/single-consent-data-populate-rds-participants',
+        //                   wait: true, propagate: true,
+        //                   parameters: [ /* that job's parameters */ ]
+        //         }
+        //     }
+        // }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
+        }
+        failure {
+            echo "Permanent ETL pipeline FAILED at stage '${env.STAGE_NAME}'. Each study's own build page " +
+                 'has its JSON report and runner log; the exit code there says whether this was ' +
+                 'validation (2), data (3, study rolled back), infrastructure (4, retryable), or config (5).'
+        }
+        unstable {
+            echo 'Permanent ETL pipeline completed WITH WARNINGS. Typically 0 new participants (a reload) ' +
+                 'or 0 sample rows — confirm that is expected for the studies listed above.'
+        }
+        success {
+            echo 'Permanent ETL pipeline completed. Every study loaded and passed its output validation.'
+        }
+    }
+}

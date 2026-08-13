@@ -1,0 +1,31 @@
+# Studies loaded by the permanent SSTR pipeline (/Jenkinsfile.permanent).
+#
+# TAB-separated. Lines starting with '#' and blank lines are ignored. Column order matters;
+# trailing columns may be omitted (leave the tab-separated field empty to skip one).
+#
+#   study_id                   --study-id. Must match phs###### (exactly 6 digits).
+#   input_uri                  --input. The dbGaP SSTR subject/sample mapping TSV
+#                              (tab-delimited, with dbgap_subject_id, CONSENT,
+#                              consent_abbreviation, dbgap_sample_id columns).
+#   ready                      true/yes/1 to include in a full sweep; anything else skips it.
+#                              A study is still loadable on demand via the STUDY_ID parameter
+#                              regardless of this flag.
+#   expected_consent_codes    Optional. Comma-separated CONSENT values this study must
+#                              produce. When set, the load fails if the set does not match
+#                              exactly -- this is the check that catches a file swapped for
+#                              the wrong study or a mid-release consent change.
+#   expected_min_participants  Optional. Floor on distinct participants. Catches a truncated
+#                              or partially-staged input file.
+#   instance_type              Optional. Overrides the tfvars default (m5.large) for studies
+#                              whose SSTR file needs more memory.
+#
+# Every run of a study PURGES that study's existing consents rows and repopulates them from
+# the file, in one transaction. Re-running a study is therefore safe and idempotent; running
+# it against a truncated file is not, which is what expected_min_participants guards.
+#
+# study_id	input_uri	ready	expected_consent_codes	expected_min_participants	instance_type
+#
+# Examples -- replace with the real study list before the first sweep:
+#phs001412	s3://avillach-73-bdcatalyst-etl/phs001412/rawData/phs001412.sstr.txt	true	1,2	1000
+#phs000007	s3://avillach-73-bdcatalyst-etl/phs000007/rawData/phs000007.sstr.txt	true	1	15000	r6i.xlarge
+#phs002715	s3://avillach-73-bdcatalyst-etl/phs002715/rawData/phs002715.sstr.txt	false

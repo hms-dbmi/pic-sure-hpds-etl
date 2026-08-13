@@ -30,8 +30,28 @@ java -jar target/hpds-etl.jar --pipeline=migrate-all --input=./participants.csv
 ```
 
 Configuration (DB, AWS, reports dir) is environment-driven — see
-[`application.yml`](src/main/resources/application.yml). Nothing is hard-coded; RDS
-creds and AWS credentials come from env / the Jenkins agent's IAM role.
+[`application.yml`](src/main/resources/application.yml). Nothing is hard-coded. In production
+each job runs on an ephemeral EC2 runner that fetches the RDS credentials from Secrets Manager
+with its own instance role, so they never pass through Jenkins.
+
+## Pipelines
+
+Two Jenkins pipelines, separate because their lifecycles are opposites — see
+**[docs/JENKINS.md](docs/JENKINS.md)**.
+
+| Pipeline | Scope | Lifetime |
+|---|---|---|
+| [`Jenkinsfile`](Jenkinsfile) | **only** `JobType.MIGRATION` jobs | deleted once the migration has run everywhere |
+| [`Jenkinsfile.permanent`](Jenkinsfile.permanent) | **only** `JobType.PERMANENT` jobs | ongoing |
+
+Each orchestrator stage triggers that job's own pipeline under
+[`etl-runners/`](etl-runners/), which provisions a **self-terminating EC2 runner** with
+Terraform, runs the JAR in a container, publishes the exit code and JSON report to S3, and
+tears itself down. Same pattern as
+[`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — shared
+`terraform-modules/etl-runner` shape, `jenkins-s3-role`, `s3://<stack>/etl-runner/…` — with
+Java in place of Python, and completion detected from a real exit code rather than by grepping
+the log.
 
 ## How it works
 
@@ -49,8 +69,8 @@ creds and AWS credentials come from env / the Jenkins agent's IAM role.
   `4` infrastructure, `5` config, `1` unknown.
 - **Reports** — every run writes an archivable JSON report of what was validated,
   processed, and why it failed.
-- **Pipelining** — the DAG lives in the [`Jenkinsfile`](Jenkinsfile) (one stage per job);
-  an in-process `PipelineRunner` mirrors it for local/CI runs.
+- **Pipelining** — the DAG lives in the Jenkinsfiles (one stage per job, each triggering that
+  job's own runner pipeline); an in-process `PipelineRunner` mirrors it for local/CI runs.
 
 ## Target schema (AWS RDS Postgres)
 
@@ -91,10 +111,23 @@ etl/
                                                         two + direct population, per study
 ```
 
+Everything Jenkins and AWS lives outside `src/`:
+
+```
+Jenkinsfile                       migration orchestrator (TEMPORARY)
+Jenkinsfile.permanent             permanent ETL orchestrator
+terraform-modules/etl-runner/     self-terminating EC2 runner module
+etl-runners/                      one dir per job: Jenkinsfile, Makefile, terraform/,
+                                  preflight.sh, validate.sh  (+ shared Dockerfile,
+                                  run-job.sh, common.mk, common/)
+docs/JENKINS.md                   architecture, validation, AWS setup, runbook
+```
+
 ## Adding a job
 
 See **[docs/ADDING_A_JOB.md](docs/ADDING_A_JOB.md)** — copy `TemplateJob`, fill in five
-hooks, add tests (success + every failure), wire a Jenkins stage. No registry to edit.
+hooks, add tests (success + every failure), add a runner and a Jenkins stage. No registry
+to edit.
 
 ## Tests
 

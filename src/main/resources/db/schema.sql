@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS participants (
 CREATE INDEX IF NOT EXISTS ix_participants_hpds_uuid ON participants (hpds_uuid);
 
 -- Table 2: consents
--- Maps an HPDS uuid to study_id/consent_group pairs.
+-- Maps an HPDS uuid to study_id/consent_code pairs.
 -- A participant never belongs to more than one consent group within the same study,
 -- so (hpds_uuid, study_id) is unique.
 CREATE TABLE IF NOT EXISTS consents (
