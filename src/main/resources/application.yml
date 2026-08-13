@@ -6,8 +6,8 @@ spring:
     web-application-type: none
     banner-mode: "off"
   datasource:
-    url: ${RDS_URL:jdbc:postgresql://localhost:5432/hpds}
-    username: ${RDS_USERNAME:hpds}
+    url: ${RDS_URL}
+    username: ${RDS_USERNAME}
     password: ${RDS_PASSWORD}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
