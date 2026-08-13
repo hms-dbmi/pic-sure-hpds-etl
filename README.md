@@ -7,7 +7,7 @@ input/output expectations, and exits with a meaningful code so an orchestrator
 
 ## Stack
 
-- **Java 21**, **Spring Boot 3.3**, packaged as a single fat JAR (`target/hpds-etl.jar`)
+- **Java 25**, **Spring Boot 4.1**, packaged as a single fat JAR (`target/hpds-etl.jar`)
 - **Spring `NamedParameterJdbcTemplate`** for bulk, idempotent upserts into AWS RDS Postgres
 - **AWS SDK v2 S3** + local filesystem behind one `IoResolver` (`s3://` or local paths)
 - **Jackson** for JSON and CSV/TSV
@@ -60,7 +60,7 @@ Reference DDL: [`src/main/resources/db/schema.sql`](src/main/resources/db/schema
 | Table | Maps HPDS uuid to | Unique on |
 |-------|-------------------|-----------|
 | `participants` | origin ids (`source_id`, `source`) | `(source_id, source)` |
-| `consents` | `study_id` / `consent_group` | `(hpds_uuid, study_id)` |
+| `consents` | `study_id` / `consent_code` / `consent_abbreviation` | `(hpds_uuid, study_id)` |
 | `samples` | `source_sample_id` / `sample_source` | full triple |
 
 ## Project layout
@@ -81,8 +81,14 @@ etl/
 ├─ db/                       Participant/Consent/Sample repositories (JdbcTemplate)
 ├─ model/                    Participant, Consent, Sample
 └─ jobs/
-   ├─ template/TemplateJob           COPY-ME plug-and-play example
-   └─ migration/ParticipantsMigrationJob   temporary migration example
+   ├─ template/TemplateJob                            COPY-ME plug-and-play example
+   ├─ participants/
+   │  ├─ SstrPopulateRdsParticipantsJob                permanent: dbGaP SSTR TSV → RDS
+   │  ├─ SingleConsentDataPopulateRdsParticipantsJob   permanent: subject-id CSV → RDS,
+   │  │                                                one uniform consent per run
+   │  └─ Telemetry                                     SSTR row (dbgap ids, consent)
+   └─ migration/ParticipantsMigrationJob               temporary: orchestrates the above
+                                                        two + direct population, per study
 ```
 
 ## Adding a job

@@ -3,8 +3,8 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.support;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.localstack.LocalStackContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.localstack.LocalStackContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -22,13 +22,13 @@ import org.testcontainers.utility.DockerImageName;
 public abstract class AbstractIntegrationTest {
 
     @Container
-    protected static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>(DockerImageName.parse("postgres:16-alpine"));
+    protected static final PostgreSQLContainer POSTGRES =
+            new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
 
     @Container
     protected static final LocalStackContainer LOCALSTACK =
             new LocalStackContainer(DockerImageName.parse("localstack/localstack:3.4"))
-                    .withServices(LocalStackContainer.Service.S3);
+                    .withServices("s3");
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
@@ -42,8 +42,7 @@ public abstract class AbstractIntegrationTest {
         // S3: target LocalStack. Credentials come from the default provider chain, so
         // expose LocalStack's test credentials via the standard system properties.
         registry.add("etl.aws.region", LOCALSTACK::getRegion);
-        registry.add("etl.aws.s3.endpoint-override",
-                () -> LOCALSTACK.getEndpointOverride(LocalStackContainer.Service.S3).toString());
+        registry.add("etl.aws.s3.endpoint-override", () -> LOCALSTACK.getEndpoint().toString());
         System.setProperty("aws.accessKeyId", LOCALSTACK.getAccessKey());
         System.setProperty("aws.secretAccessKey", LOCALSTACK.getSecretKey());
         System.setProperty("aws.region", LOCALSTACK.getRegion());
