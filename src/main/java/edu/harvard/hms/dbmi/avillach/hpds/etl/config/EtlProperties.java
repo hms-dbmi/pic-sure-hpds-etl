@@ -28,12 +28,17 @@ public class EtlProperties {
      */
     private Map<String, List<String>> pipelines = new LinkedHashMap<>();
 
+    @NestedConfigurationProperty
+    private ManagedInputs managedInputs = new ManagedInputs();
+
     public Reports getReports() { return reports; }
     public void setReports(Reports reports) { this.reports = reports; }
     public Aws getAws() { return aws; }
     public void setAws(Aws aws) { this.aws = aws; }
     public Map<String, List<String>> getPipelines() { return pipelines; }
     public void setPipelines(Map<String, List<String>> pipelines) { this.pipelines = pipelines; }
+    public ManagedInputs getManagedInputs() { return managedInputs; }
+    public void setManagedInputs(ManagedInputs managedInputs) { this.managedInputs = managedInputs; }
 
     public static class Reports {
         /** Directory where per-run JSON reports are written and archived by Jenkins. */
@@ -59,5 +64,11 @@ public class EtlProperties {
             public String getEndpointOverride() { return endpointOverride; }
             public void setEndpointOverride(String endpointOverride) { this.endpointOverride = endpointOverride; }
         }
+    }
+
+    public static class ManagedInputs {
+        private String uri;
+        public String getUri() { return uri; }
+        public void setUri(String uri) { this.uri = uri; }
     }
 }

@@ -110,10 +110,9 @@ PHASE=credentials
 JOB_EXIT=5
 say "Fetching RDS credentials from Secrets Manager (${rds_secret_id})"
 
-# Non-secret environment, rendered by Terraform. Quoted heredoc: values stay literal.
-cat > "$ENV_FILE" <<'ENVEOF'
-${container_env}
-ENVEOF
+# Non-secret environment, rendered by Terraform. Decoded from base64 so no heredoc
+# delimiter or embedded newline in a job param value can inject into this file.
+echo '${container_env_b64}' | base64 -d > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 SECRET_JSON=$(aws secretsmanager get-secret-value \

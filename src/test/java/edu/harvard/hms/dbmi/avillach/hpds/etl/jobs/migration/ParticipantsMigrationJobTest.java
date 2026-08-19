@@ -14,6 +14,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -58,11 +59,18 @@ class ParticipantsMigrationJobTest {
         return txManager;
     }
 
-    private static ParticipantsMigrationJob newJob(ParticipantRepository participants,
+    private static ManagedInputsService managedInputsService(String uri) {
+        EtlProperties props = new EtlProperties();
+        props.getManagedInputs().setUri(uri);
+        return new ManagedInputsService(new IoResolver(null), new DelimitedReader(), props);
+    }
+
+    private static ParticipantsMigrationJob newJob(ManagedInputsService managedInputsService,
+                                                     ParticipantRepository participants,
                                                      ConsentRepository consents,
                                                      SampleRepository samples) {
         return new ParticipantsMigrationJob(new IoResolver(null), new DelimitedReader(),
-                participants, consents, samples, noOpTransactionManager(),
+                managedInputsService, participants, consents, samples, noOpTransactionManager(),
                 mock(SstrPopulateRdsParticipantsJob.class), mock(JobExecutor.class));
     }
 
@@ -92,10 +100,11 @@ class ParticipantsMigrationJobTest {
     @Test
     void fails_with_config_error_when_managed_inputs_file_is_missing() throws Exception {
         ParticipantsMigrationJob job = newJob(
+                managedInputsService("/no/such/file/managed_inputs.csv"),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
         JobResult result = newExecutor().run(job,
-                Map.of("managed-inputs", "/no/such/file/managed_inputs.csv", "data-folder", "/no/such/folder"),
+                Map.of("data-folder", "/no/such/folder"),
                 "unit-missing-managed-inputs");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
@@ -104,19 +113,41 @@ class ParticipantsMigrationJobTest {
 
     @Test
     void fails_with_config_error_when_shared_consents_csv_is_missing() throws Exception {
-        ParticipantsMigrationJob job = newJob(
-                mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
-
         String managedInputs = tempFile("managed_inputs.csv",
                 "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+        ParticipantsMigrationJob job = newJob(
+                managedInputsService(managedInputs),
+                mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
+
         // data-folder deliberately has no consents.csv.
         String folder = dataFolder(Map.of("placeholder.txt", ""));
 
         JobResult result = newExecutor().run(job,
-                Map.of("managed-inputs", managedInputs, "data-folder", folder), "unit-missing-consents");
+                Map.of("data-folder", folder), "unit-missing-consents");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
         assertThat(result.getErrorMessage()).contains("consents.csv");
+    }
+
+    @Test
+    void fails_study_when_patient_mapping_is_empty() throws Exception {
+        String managedInputs = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+        ParticipantsMigrationJob job = newJob(
+                managedInputsService(managedInputs),
+                mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
+
+        String folder = dataFolder(Map.of(
+                "consents.csv", "\"2002\",\"study-01.c1\"\n",
+                "ABV1_PatientMapping.v2.csv", ""));
+
+        JobResult result = newExecutor().run(job,
+                Map.of("data-folder", folder), "unit-empty-patient-mapping");
+
+        assertThat(result.getMetrics()).containsEntry("failedStudies", 1L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("STUDY_FAILED")
+                        && i.message().contains("yielded no subjects"));
     }
 
     @Test
@@ -127,16 +158,18 @@ class ParticipantsMigrationJobTest {
         when(participants.resolveOrCreate(any(), any(), anyInt()))
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
-        ParticipantsMigrationJob job = newJob(participants, mock(ConsentRepository.class), mock(SampleRepository.class));
-
         String managedInputs = tempFile("managed_inputs.csv",
                 "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+        ParticipantsMigrationJob job = newJob(
+                managedInputsService(managedInputs),
+                participants, mock(ConsentRepository.class), mock(SampleRepository.class));
+
         String folder = dataFolder(Map.of(
                 "consents.csv", "\"2002\",\"study-01.c1\"\n",
                 "ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
 
         JobResult result = newExecutor().run(job,
-                Map.of("managed-inputs", managedInputs, "data-folder", folder), "unit-db-down");
+                Map.of("data-folder", folder), "unit-db-down");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(result.getErrorMessage()).contains("connection refused");

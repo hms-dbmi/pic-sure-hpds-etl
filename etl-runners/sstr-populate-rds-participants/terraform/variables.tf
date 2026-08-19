@@ -93,6 +93,11 @@ variable "study_id" {
 variable "input_uri" {
   type        = string
   description = "--input: the dbGaP SSTR subject/sample mapping TSV. Local path or s3:// URI."
+
+  validation {
+    condition     = can(regex("^(s3://[a-zA-Z0-9._+~@=/-]+|/[a-zA-Z0-9._+~@=/-]+)$", var.input_uri))
+    error_message = "input_uri must be an s3:// URI or an absolute local path containing only safe path characters."
+  }
 }
 
 variable "batch_size" {

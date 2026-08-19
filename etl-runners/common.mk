@@ -13,6 +13,7 @@
 # therefore invoke monitor-runner.sh, preflight.sh, and validate.sh directly. The `monitor`
 # and `validate` targets here are for local runs, where pass/fail is all you need.
 SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
 REPO_ROOT   := $(abspath ../..)
@@ -23,8 +24,8 @@ TFVARS      := $(TF_DIR)/$(NAME).tfvars
 BACKEND     := $(TF_DIR)/$(NAME).backend.tfvars
 
 JAR         := $(REPO_ROOT)/target/hpds-etl.jar
-IMAGE_NAME  ?= hpds-etl-runner
-IMAGE_TAR   ?= $(IMAGE_NAME).tar.gz
+IMAGE_TAR   ?= hpds-etl-runner.tar.gz
+IMAGE_NAME  := $(basename $(basename $(notdir $(IMAGE_TAR))))
 
 # Single source of truth for the bucket: the tfvars file Terraform already reads.
 STACK_S3_BUCKET ?= $(shell sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS))

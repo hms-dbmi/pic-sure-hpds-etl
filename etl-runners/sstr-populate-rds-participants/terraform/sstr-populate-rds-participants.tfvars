@@ -12,8 +12,8 @@
 
 aws_region       = "us-east-1"
 stack_s3_bucket  = "avillach-biodatacatalyst-deployments-3drb48r"
-ami_owner_id     = "aws-marketplace"
-ami_name_pattern = "*al2023*x86*64*LATEST*"
+ami_owner_id     = "amazon"
+ami_name_pattern = "al2023-ami-2023.*-x86_64"
 subnet_id        = "subnet-00a35d901a151ab01"
 
 # One Telemetry record is held per input row, so the ceiling is the largest SSTR file, not

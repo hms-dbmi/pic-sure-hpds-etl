@@ -9,6 +9,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExpectations;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.BatchOps;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
@@ -28,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.ToIntFunction;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -137,12 +138,12 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
     }
 
     private Output load(String input, String studyId, int batchSize) {
-        List<Telemetry> rows = new ArrayList<>();
         Set<String> subjectIds = new LinkedHashSet<>();
+        Map<String, Telemetry> firstRowBySubject = new LinkedHashMap<>();
+        List<String[]> samplePairs = new ArrayList<>();
         boolean headerChecked = false;
         long rowsRead = 0;
 
-        // stream.close() (below) closes the underlying InputStream via its onClose hook.
         InputStream in = io.openInput(input);
         try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.TAB)) {
             for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
@@ -151,46 +152,39 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                     headerChecked = true;
                 }
                 rowsRead++;
-                String dbgapSubjectId = trimToNull(row.get(COL_DBGAP_SUBJECT_ID));
+                String dbgapSubjectId = Strings.trimToNull(row.get(COL_DBGAP_SUBJECT_ID));
                 if (dbgapSubjectId == null) {
                     throw new DataException("Row " + rowsRead + " has a blank " + COL_DBGAP_SUBJECT_ID);
                 }
-                String consent = trimToNull(row.get(COL_CONSENT));
+                String consent = Strings.trimToNull(row.get(COL_CONSENT));
                 if (consent == null) {
                     throw new DataException("Row " + rowsRead + " has a blank " + COL_CONSENT);
                 }
-                String consentAbbreviation = trimToNull(row.get(COL_CONSENT_ABBREVIATION));
-                String dbgapSampleId = trimToNull(row.get(COL_DBGAP_SAMPLE_ID));
+                String consentAbbreviation = row.get(COL_CONSENT_ABBREVIATION);
+                consentAbbreviation = (consentAbbreviation == null || consentAbbreviation.isBlank()) ? "" : consentAbbreviation.trim();
+                String dbgapSampleId = Strings.trimToNull(row.get(COL_DBGAP_SAMPLE_ID));
+                if (dbgapSampleId == null) {
+                    throw new DataException("Row " + rowsRead + " has a blank " + COL_DBGAP_SAMPLE_ID);
+                }
 
-                rows.add(new Telemetry(dbgapSubjectId, dbgapSampleId, consent, consentAbbreviation));
                 subjectIds.add(dbgapSubjectId);
+                firstRowBySubject.putIfAbsent(dbgapSubjectId,
+                        new Telemetry(dbgapSubjectId, dbgapSampleId, consent, consentAbbreviation));
+                samplePairs.add(new String[]{dbgapSubjectId, dbgapSampleId});
             }
         }
 
-        // Guard the purge below. validateOutput's EMPTY_INPUT check runs after execute() returns,
-        // by which point this transaction has committed -- so a header-only or truncated file
-        // would delete the study's consents, repopulate nothing, and still report exit 2.
-        // Throwing here rolls the transaction back instead.
         if (subjectIds.isEmpty()) {
             throw new DataException("Input yielded no subjects (" + rowsRead + " data row(s) read); refusing to "
                     + "purge existing consents for study " + studyId + ". Check that the file is complete.");
         }
 
-        // Purge first so a fully-successful run always reflects exactly this file; the
-        // surrounding transaction rolls this back too if a later step fails.
         consents.deleteByStudyId(studyId);
 
-        // resolveOrCreate, not findUuids + batchUpsert: every study load shares source = "DBGap",
-        // so concurrent studies can race for a shared dbgap_subject_id. It returns the uuid stored
-        // in the table, so the consent and sample rows below cannot reference an orphaned uuid.
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
         Map<String, UUID> uuidBySubject = resolution.uuidsBySourceId();
         long participantsInserted = resolution.inserted();
 
-        Map<String, Telemetry> firstRowBySubject = new LinkedHashMap<>();
-        for (Telemetry row : rows) {
-            firstRowBySubject.putIfAbsent(row.dbgapSubjectId(), row);
-        }
         List<Consent> consentRows = new ArrayList<>();
         Map<String, Long> countsByConsentGroup = new LinkedHashMap<>();
         for (Telemetry row : firstRowBySubject.values()) {
@@ -198,13 +192,12 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                     row.consent(), row.consentAbbreviation()));
             countsByConsentGroup.merge(row.consent(), 1L, Long::sum);
         }
-        long consentsWritten = batchUpsertInChunks(consents::batchUpsert, consentRows, batchSize);
+        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
 
-        List<Sample> sampleRows = rows.stream()
-                .filter(row -> row.dbgapSampleId() != null)
-                .map(row -> new Sample(uuidBySubject.get(row.dbgapSubjectId()), row.dbgapSampleId(), SOURCE))
+        List<Sample> sampleRows = samplePairs.stream()
+                .map(pair -> new Sample(uuidBySubject.get(pair[0]), pair[1], SOURCE))
                 .toList();
-        long samplesInserted = batchUpsertInChunks(samples::batchUpsert, sampleRows, batchSize);
+        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
 
         log.info("Read {} row(s) for {} participant(s); {} new participant(s), {} consent row(s), "
                         + "{} sample row(s) inserted",
@@ -225,19 +218,6 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         }
     }
 
-    private static <T> long batchUpsertInChunks(ToIntFunction<List<T>> upsert, List<T> items, int batchSize) {
-        long inserted = 0;
-        for (int i = 0; i < items.size(); i += batchSize) {
-            inserted += upsert.applyAsInt(items.subList(i, Math.min(i + batchSize, items.size())));
-        }
-        return inserted;
-    }
-
-    private static String trimToNull(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        return t.isEmpty() ? null : t;
-    }
 
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {

@@ -6,9 +6,9 @@ spring:
     web-application-type: none
     banner-mode: "off"
   datasource:
-    url: ${RDS_URL}
-    username: ${RDS_USERNAME}
-    password: ${RDS_PASSWORD}
+    url: ${RDS_URL:jdbc:postgresql://unset:5432/unset}
+    username: ${RDS_USERNAME:}
+    password: ${RDS_PASSWORD:}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
       # Do NOT fail context startup when the DB is unreachable. Jobs that don't
@@ -48,6 +48,8 @@ etl:
     participants-migration:
       enabled: ${ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED:true}
 
+  managed-inputs:
+    uri: ${managed-inputs:${MANAGED_INPUTS_URI:}}
   reports:
     # Where per-run validation/summary JSON reports are written. Jenkins archives this dir.
     dir: ${ETL_REPORTS_DIR:./reports}

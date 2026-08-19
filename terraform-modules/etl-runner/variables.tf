@@ -25,12 +25,14 @@ variable "stack_s3_bucket" {
 
 variable "ami_owner_id" {
   type        = string
-  description = "AMI owner account ID (or 'aws-marketplace')."
+  default     = "amazon"
+  description = "AMI owner account ID. Use 'amazon' for official Amazon Linux AMIs."
 }
 
 variable "ami_name_pattern" {
   type        = string
-  description = "Glob pattern selecting the most recent matching AMI."
+  default     = "al2023-ami-2023.*-x86_64"
+  description = "Glob pattern selecting the most recent matching AMI. Defaults to Amazon Linux 2023 x86_64."
 }
 
 variable "instance_type" {
@@ -81,6 +83,11 @@ variable "job_params" {
     them to hyphens (study_id -> --study-id). Passing them as env vars rather than as an
     argv string keeps generated user_data free of shell-quoting hazards.
   EOT
+
+  validation {
+    condition     = alltrue([for k, v in var.job_params : !can(regex("\n", v))])
+    error_message = "job_params values must not contain newlines -- they are written as lines in a docker --env-file."
+  }
 }
 
 variable "image_name" {

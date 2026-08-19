@@ -57,11 +57,11 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void loads_participants_consents_and_samples_and_skips_blank_sample_ids() {
+    void loads_participants_consents_and_samples() {
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"
                 + "SUBJ1\tSAMP2\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s2\n"
-                + "SUBJ2\tSAMP3\t2\tHMB\tphs001412.v1.p2.c1\t\n");
+                + "SUBJ2\tSAMP3\t2\tHMB\tphs001412.v1.p2.c1\tphs001412.v1.p2.s1\n");
 
         JobResult result = run(executor, job, input, "it-success");
 
@@ -71,10 +71,24 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
                 .containsEntry("distinctParticipants", 2L)
                 .containsEntry("participantsInserted", 2L)
                 .containsEntry("consentsWritten", 2L)
-                .containsEntry("samplesInserted", 2L);
+                .containsEntry("samplesInserted", 3L);
         assertThat(participants.count()).isEqualTo(2);
         assertThat(consentCountForStudy()).isEqualTo(2);
-        assertThat(sampleCount()).isEqualTo(2);
+        assertThat(sampleCount()).isEqualTo(3);
+    }
+
+    @Test
+    void fails_and_rolls_back_on_blank_sample_id() {
+        String input = JobTestSupport.tempFile("sstr.tsv", HEADER
+                + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"
+                + "SUBJ2\tSAMP3\t2\tHMB\tphs001412.v1.p2.c1\t\n");
+
+        JobResult result = run(executor, job, input, "it-blank-sample");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("dbgap_sample_id");
+        assertThat(participants.count()).isEqualTo(0);
+        assertThat(sampleCount()).isEqualTo(0);
     }
 
     @Test
@@ -109,6 +123,20 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
                 "SELECT COUNT(*) FROM consents WHERE study_id = ? AND consent_abbreviation = ?",
                 Long.class, STUDY_ID, "STALE");
         assertThat(stale).isZero();
+    }
+
+    @Test
+    void blank_consent_abbreviation_defaults_to_empty_string() {
+        String input = JobTestSupport.tempFile("sstr.tsv", HEADER
+                + "SUBJ1\tSAMP1\t1\t\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+
+        JobResult result = run(executor, job, input, "it-blank-abbrev");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        Long count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM consents WHERE study_id = ? AND consent_abbreviation = ''",
+                Long.class, STUDY_ID);
+        assertThat(count).isEqualTo(1);
     }
 
     @Test

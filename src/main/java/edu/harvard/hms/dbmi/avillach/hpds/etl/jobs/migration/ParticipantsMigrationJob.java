@@ -12,6 +12,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExpectations;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.BatchOps;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
@@ -20,6 +22,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SingleConsentDat
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -36,7 +40,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.ToIntFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -47,8 +50,9 @@ import java.util.stream.Stream;
  * from a legacy export laid out as:
  *
  * <ul>
- *   <li>{@code --managed-inputs}: a CSV of studies with columns "Study Abbreviated Name",
- *       "Study Identifier", and "Data is ready to process".</li>
+ *   <li>{@link ManagedInputsService}: provides the study list (columns "Study Abbreviated Name",
+ *       "Study Identifier", and "Data is ready to process"), configured via
+ *       {@code etl.managed-inputs.uri} or {@code --managed-inputs=<uri>}.</li>
  *   <li>{@code --data-folder}: a folder (local or {@code s3://}) containing, for every
  *       study: an optional {@code {studyid}_sstr.tsv} (dbGaP SSTR export, tab-delimited,
  *       same shape {@link SstrPopulateRdsParticipantsJob} reads, plus a {@code SUBJECT_ID}
@@ -91,9 +95,6 @@ import java.util.stream.Stream;
         havingValue = "true")
 public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJob.Output> {
 
-    private static final String COL_ABV = "Study Abbreviated Name";
-    private static final String COL_STUDY_ID = "Study Identifier";
-    private static final String COL_IS_READY = "Data is ready to process";
     private static final String CONSENTS_FILE_NAME = "consents.csv";
     private static final String OPEN_ACCESS_1000_GENOMES_ABV = "open_access-1000Genomes";
     private static final String SSTR_COL_SUBJECT_ID = "SUBJECT_ID";
@@ -117,6 +118,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     private final IoResolver io;
     private final DelimitedReader delimitedReader;
+    private final ManagedInputsService managedInputsService;
     private final ParticipantRepository participants;
     private final ConsentRepository consents;
     private final SampleRepository samples;
@@ -126,6 +128,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     public ParticipantsMigrationJob(IoResolver io,
                                      DelimitedReader delimitedReader,
+                                     ManagedInputsService managedInputsService,
                                      ParticipantRepository participants,
                                      ConsentRepository consents,
                                      SampleRepository samples,
@@ -134,6 +137,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                      JobExecutor executor) {
         this.io = io;
         this.delimitedReader = delimitedReader;
+        this.managedInputsService = managedInputsService;
         this.participants = participants;
         this.consents = consents;
         this.samples = samples;
@@ -156,10 +160,6 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     public JobExpectations expectations() {
         return JobExpectations.of(
                 List.of(
-                        ParamSpec.required("managed-inputs",
-                                "CSV of studies with columns 'Study Abbreviated Name', 'Study Identifier', "
-                                        + "'Data is ready to process' (local path or s3:// URI)",
-                                "/data/managed_inputs.csv"),
                         ParamSpec.required("data-folder",
                                 "Folder containing {studyid}_sstr.tsv files, a shared consents.csv, and "
                                         + "{ABV}_PatientMapping.v2.csv files per study (local path or s3:// URI)",
@@ -184,11 +184,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     @Override
     protected Output execute(JobContext ctx) {
-        String managedInputsPath = ctx.require("managed-inputs");
         String dataFolder = ctx.require("data-folder");
         int batchSize = Integer.parseInt(ctx.get("batch-size", String.valueOf(DEFAULT_BATCH_SIZE)));
 
-        List<ManagedInputRow> managedInputs = readManagedInputs(managedInputsPath);
+        List<ManagedInputRow> managedInputs = managedInputsService.read();
         ConsentsCsv consentsCsv = readConsentsCsv(joinPath(dataFolder, CONSENTS_FILE_NAME));
 
         List<StudyResult> results = new ArrayList<>();
@@ -216,6 +215,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         boolean hasSstr = io.exists(sstrPath);
         String patientMappingPath = joinPath(dataFolder, row.abv().toUpperCase() + "_PatientMapping.v2.csv");
         List<PatientMappingRow> patientMappings = readPatientMapping(patientMappingPath);
+        if (patientMappings.isEmpty()) {
+            throw new DataException("Patient mapping for study " + studyId + " yielded no subjects; "
+                    + "refusing to proceed. Check that the file is complete.");
+        }
 
         if (hasSstr) {
             String runId = ctx.runId() + "-" + studyId + "-sstr";
@@ -232,10 +235,32 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             return StudyResult.success(studyId, row.abv(), true, mappingRows.size(), List.of());
         }
 
-        DirectLoad load = populateDirectly(studyId, row.abv(), patientMappings, hpdsIdToConsentCode, batchSize);
+        List<PatientMappingRow> matched = new ArrayList<>();
+        List<PatientMappingRow> unmatched = new ArrayList<>();
+        for (PatientMappingRow pm : patientMappings) {
+            if (hpdsIdToConsentCode.containsKey(pm.oldHpdsId())) {
+                matched.add(pm);
+            } else {
+                unmatched.add(pm);
+            }
+        }
+
+        List<String> skippedHpdsIds = unmatched.stream().map(PatientMappingRow::oldHpdsId).toList();
+        if (!unmatched.isEmpty()) {
+            writeUnmatchedReport(ctx, row.abv(), unmatched);
+            log.warn("Study '{}': {} of {} patient mapping row(s) had no entry in {}; written to unmatched report",
+                    studyId, unmatched.size(), patientMappings.size(), CONSENTS_FILE_NAME);
+        }
+
+        if (matched.isEmpty()) {
+            writeMappingFile(ctx, studyId, List.of());
+            return StudyResult.success(studyId, row.abv(), false, 0, skippedHpdsIds);
+        }
+
+        DirectLoad load = populateDirectly(studyId, row.abv(), matched, hpdsIdToConsentCode, batchSize);
         writeMappingFile(ctx, studyId, load.mappingRows());
         return StudyResult.success(studyId, row.abv(), false, load.mappingRows().size(),
-                load.skippedHpdsIdsWithNoConsent());
+                Stream.concat(skippedHpdsIds.stream(), load.skippedHpdsIdsWithNoConsent().stream()).toList());
     }
 
     /**
@@ -251,12 +276,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         InputStream in = io.openInput(sstrPath);
         try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.TAB)) {
             for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
-                String dbgapId = trimToNull(row.get(SSTR_COL_DBGAP_SUBJECT_ID));
+                String dbgapId = Strings.trimToNull(row.get(SSTR_COL_DBGAP_SUBJECT_ID));
                 if (dbgapId == null) {
                     continue;
                 }
                 dbgapIds.add(dbgapId);
-                String subjectId = trimToNull(row.get(SSTR_COL_SUBJECT_ID));
+                String subjectId = Strings.trimToNull(row.get(SSTR_COL_SUBJECT_ID));
                 if (subjectId != null) {
                     subjectIdToDbgapId.put(subjectId, dbgapId);
                 }
@@ -324,29 +349,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 }
                 mappingRows.add(new MappingRow(pm.oldHpdsId(), uuid, pm.id()));
             }
-            batchUpsertInChunks(consents::batchUpsert, consentRows, batchSize);
+            BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
             if (!sampleRows.isEmpty()) {
-                batchUpsertInChunks(samples::batchUpsert, sampleRows, batchSize);
+                BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
             }
             return new DirectLoad(mappingRows, skippedHpdsIds);
         });
-    }
-
-    private List<ManagedInputRow> readManagedInputs(String path) {
-        List<ManagedInputRow> rows = new ArrayList<>();
-        InputStream in = io.openInput(path);
-        try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.COMMA)) {
-            for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
-                String abv = trimToNull(row.get(COL_ABV));
-                String studyId = trimToNull(row.get(COL_STUDY_ID));
-                if (abv == null || studyId == null) {
-                    log.warn("managed-inputs: skipping row with a blank '{}' or '{}': {}", COL_ABV, COL_STUDY_ID, row);
-                    continue;
-                }
-                rows.add(new ManagedInputRow(abv, studyId, parseReady(row.get(COL_IS_READY))));
-            }
-        }
-        return rows;
     }
 
     /**
@@ -376,8 +384,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 if (row.size() < 2) {
                     continue;
                 }
-                String hpdsId = trimToNull(row.get(0));
-                String consentValue = trimToNull(row.get(1));
+                String hpdsId = Strings.trimToNull(row.get(0));
+                String consentValue = Strings.trimToNull(row.get(1));
                 if (hpdsId == null || consentValue == null) {
                     continue;
                 }
@@ -419,8 +427,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 if (row.size() < 3) {
                     throw new DataException("Patient mapping row has fewer than 3 columns: " + row);
                 }
-                String id = trimToNull(row.get(0));
-                String oldHpdsId = trimToNull(row.get(2));
+                String id = Strings.trimToNull(row.get(0));
+                String oldHpdsId = Strings.trimToNull(row.get(2));
                 if (id == null || oldHpdsId == null) {
                     throw new DataException("Patient mapping row has a blank id or hpds id: " + row);
                 }
@@ -433,8 +441,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     private void writeMappingFile(JobContext ctx, String studyId, List<MappingRow> mappingRows) {
         StringBuilder csv = new StringBuilder("old_hpds_id,new_uuid,common_dbgap_id\n");
         for (MappingRow row : mappingRows) {
-            csv.append(row.oldHpdsId()).append(',').append(row.newUuid()).append(',')
-                    .append(row.commonDbgapId()).append('\n');
+            csv.append(Strings.csvQuote(row.oldHpdsId())).append(',').append(row.newUuid()).append(',')
+                    .append(Strings.csvQuote(row.commonDbgapId())).append('\n');
         }
         try {
             Path dir = ctx.reportsDir();
@@ -445,30 +453,22 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
     }
 
+    private void writeUnmatchedReport(JobContext ctx, String abv, List<PatientMappingRow> unmatched) {
+        StringBuilder csv = new StringBuilder("id,old_hpds_id\n");
+        for (PatientMappingRow pm : unmatched) {
+            csv.append(Strings.csvQuote(pm.id())).append(',').append(Strings.csvQuote(pm.oldHpdsId())).append('\n');
+        }
+        try {
+            Path dir = ctx.reportsDir();
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve(abv + "_unmatched_mappings.csv"), csv.toString());
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to write unmatched report for " + abv, e);
+        }
+    }
+
     private static String joinPath(String folder, String fileName) {
         return folder.endsWith("/") ? folder + fileName : folder + "/" + fileName;
-    }
-
-    private static boolean parseReady(String raw) {
-        if (raw == null) {
-            return false;
-        }
-        String v = raw.trim();
-        return v.equalsIgnoreCase("true") || v.equalsIgnoreCase("yes") || v.equals("1");
-    }
-
-    private static <T> long batchUpsertInChunks(ToIntFunction<List<T>> upsert, List<T> items, int batchSize) {
-        long inserted = 0;
-        for (int i = 0; i < items.size(); i += batchSize) {
-            inserted += upsert.applyAsInt(items.subList(i, Math.min(i + batchSize, items.size())));
-        }
-        return inserted;
-    }
-
-    private static String trimToNull(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        return t.isEmpty() ? null : t;
     }
 
     @Override
@@ -524,9 +524,6 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 .metric("subjectsWithoutConsent", skipped)
                 .metric("openAccessConsentRows", output.consentsCsv().publicRows())
                 .metric("unparseableConsentRows", output.consentsCsv().unparseableRows());
-    }
-
-    private record ManagedInputRow(String abv, String studyId, boolean isReady) {
     }
 
     private record PatientMappingRow(String id, String oldHpdsId) {

@@ -9,6 +9,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExpectations;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.BatchOps;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
@@ -26,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.ToIntFunction;
 import java.util.stream.Stream;
 
 /**
@@ -222,14 +223,14 @@ public class SingleConsentDataPopulateRdsParticipantsJob
         List<Consent> consentRows = subjectIds.stream()
                 .map(id -> new Consent(uuidBySubject.get(id), studyId, consentCode, consentAbbreviation))
                 .toList();
-        long consentsWritten = batchUpsertInChunks(consents::batchUpsert, consentRows, batchSize);
+        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
 
         long samplesInserted = 0;
         if (subjectIdIsSampleId) {
             List<Sample> sampleRows = subjectIds.stream()
                     .map(id -> new Sample(uuidBySubject.get(id), id, studyId))
                     .toList();
-            samplesInserted = batchUpsertInChunks(samples::batchUpsert, sampleRows, batchSize);
+            samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
         }
 
         log.info("Read {} row(s) for {} distinct subject(s); {} new participant(s), {} consent row(s), "
@@ -244,25 +245,11 @@ public class SingleConsentDataPopulateRdsParticipantsJob
         if (row.isEmpty()) {
             throw new DataException("Row " + rowNum + " has no columns");
         }
-        String value = trimToNull(row.values().iterator().next());
+        String value = Strings.trimToNull(row.values().iterator().next());
         if (value == null) {
             throw new DataException("Row " + rowNum + " has a blank subject id");
         }
         return value;
-    }
-
-    private static <T> long batchUpsertInChunks(ToIntFunction<List<T>> upsert, List<T> items, int batchSize) {
-        long inserted = 0;
-        for (int i = 0; i < items.size(); i += batchSize) {
-            inserted += upsert.applyAsInt(items.subList(i, Math.min(i + batchSize, items.size())));
-        }
-        return inserted;
-    }
-
-    private static String trimToNull(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        return t.isEmpty() ? null : t;
     }
 
     @Override
