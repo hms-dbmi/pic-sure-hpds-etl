@@ -41,6 +41,9 @@ etl:
     single-consent-data-populate-rds-participants:
       enabled: ${ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
 
+    generate-global-all-concepts:
+      enabled: ${ETL_JOB_GENERATE_GLOBAL_ALL_CONCEPTS_ENABLED:true}
+
     # TEMPORARY migration. Set this to false once the migration has run in every environment,
     # then delete the job. NOTE: participants-migration also requires
     # sstr-populate-rds-participants to be enabled -- it injects that job to load the

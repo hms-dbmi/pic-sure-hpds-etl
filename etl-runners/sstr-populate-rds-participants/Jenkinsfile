@@ -3,7 +3,7 @@
 //
 // Loads one dbGaP study's SSTR subject/sample mapping TSV into RDS on a Terraform-provisioned
 // ephemeral EC2 runner that terminates itself when the job exits. Triggered per study by the
-// permanent orchestrator's "Load SSTR participants" stage (/Jenkinsfile.permanent); also runnable
+// permanent orchestrator's "Load SSTR participants" stage (/Jenkinsfile); also runnable
 // standalone to reload a single study.
 //
 // What the job does
@@ -102,7 +102,7 @@ pipeline {
             steps {
                 script {
                     if (!params.STUDY_ID?.trim()) {
-                        error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile.permanent) to sweep every ready study from studies.tsv.')
+                        error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile) to sweep every ready study from managed inputs.')
                     }
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// URI or local path of this study\'s SSTR TSV.')
@@ -145,7 +145,7 @@ pipeline {
             steps {
                 // `package` runs the unit suites; a failing test must stop the run before any
                 // infrastructure exists. The Testcontainers *IT suites bind on `verify` and
-                // are gated by the orchestrator (/Jenkinsfile.permanent) instead, so a
+                // are gated by the orchestrator (/Jenkinsfile) instead, so a
                 // single-study reload does not pay for Docker-backed Postgres and LocalStack.
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }

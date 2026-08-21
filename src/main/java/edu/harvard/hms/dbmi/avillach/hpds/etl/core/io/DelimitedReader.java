@@ -159,6 +159,15 @@ public class DelimitedReader {
     private static void closeQuietly(MappingIterator<?> it, InputStream in) {
         try {
             if (it != null) it.close();
+        } catch (IOException e) {
+            try {
+                if (in != null) in.close();
+            } catch (IOException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw new UncheckedIOException(e);
+        }
+        try {
             if (in != null) in.close();
         } catch (IOException e) {
             throw new UncheckedIOException(e);

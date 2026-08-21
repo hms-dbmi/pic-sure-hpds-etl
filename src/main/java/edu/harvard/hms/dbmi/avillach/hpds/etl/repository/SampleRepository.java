@@ -51,6 +51,25 @@ public class SampleRepository {
         }
     }
 
+    public List<Sample> findByStudyId(String studyId) {
+        try {
+            return jdbc.query(
+                    """
+                    SELECT DISTINCT s.hpds_uuid, s.source_sample_id, s.sample_source
+                    FROM samples s
+                    JOIN consents c ON s.hpds_uuid = c.hpds_uuid
+                    WHERE c.study_id = :studyId
+                    """,
+                    new MapSqlParameterSource().addValue("studyId", studyId),
+                    (rs, n) -> new Sample(
+                            rs.getObject("hpds_uuid", java.util.UUID.class),
+                            rs.getString("source_sample_id"),
+                            rs.getString("sample_source")));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Query samples by study_id failed", e);
+        }
+    }
+
     public long count() {
         try {
             Long n = jdbc.getJdbcTemplate().queryForObject("SELECT COUNT(*) FROM samples", Long.class);

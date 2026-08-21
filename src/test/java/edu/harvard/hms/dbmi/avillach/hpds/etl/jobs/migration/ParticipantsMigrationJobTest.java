@@ -112,21 +112,21 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
-    void fails_with_config_error_when_shared_consents_csv_is_missing() throws Exception {
+    void fails_with_config_error_when_shared_all_concepts_csv_is_missing() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
                 "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        // data-folder deliberately has no consents.csv.
+        // data-folder deliberately has no GLOBAL_allConcepts_merged.csv.
         String folder = dataFolder(Map.of("placeholder.txt", ""));
 
         JobResult result = newExecutor().run(job,
-                Map.of("data-folder", folder), "unit-missing-consents");
+                Map.of("data-folder", folder), "unit-missing-all-concepts");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
-        assertThat(result.getErrorMessage()).contains("consents.csv");
+        assertThat(result.getErrorMessage()).contains("GLOBAL_allConcepts_merged.csv");
     }
 
     @Test
@@ -138,7 +138,7 @@ class ParticipantsMigrationJobTest {
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
         String folder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
                 "ABV1_PatientMapping.v2.csv", ""));
 
         JobResult result = newExecutor().run(job,
@@ -165,7 +165,7 @@ class ParticipantsMigrationJobTest {
                 participants, mock(ConsentRepository.class), mock(SampleRepository.class));
 
         String folder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
                 "ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
 
         JobResult result = newExecutor().run(job,

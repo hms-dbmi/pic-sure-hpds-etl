@@ -1,0 +1,243 @@
+// =============================================================================
+// PERMANENT -- generate-global-all-concepts (JobType.PERMANENT)
+//
+// Generates global_AllConcepts.csv from the populated RDS database. Reads every study
+// marked ready in managed inputs, queries consents/participants/samples per study, and
+// writes one CSV with concept rows for _consents, _source_subject_id, _source_sample_id,
+// and _studies_consents.
+//
+// This job runs AFTER the database has been populated by the SSTR and single-consent
+// loaders. It is triggered by the permanent orchestrator's "Generate global AllConcepts"
+// stage (/Jenkinsfile) or can be run standalone.
+//
+// Inputs
+//   --output       where global_AllConcepts.csv is written (local path or s3:// URI)
+//   Managed inputs URI from configuration
+//   RDS credentials fetched on the runner from Secrets Manager by instance role
+//
+// Outputs
+//   global_AllConcepts.csv at the --output location
+//   generate-global-all-concepts-<runId>.json report with studiesProcessed, totalRows,
+//   rowsPerStudy, and outputUri.
+//
+// Exit codes (see ExitCode.java)
+//   0 success | 2 validation | 3 data | 4 infrastructure | 5 config | 1 unknown |
+//   124 monitor timeout
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
+        disableConcurrentBuilds()
+        timeout(time: 2, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'OUTPUT', defaultValue: '',
+               description: 'REQUIRED. --output: where global_AllConcepts.csv is written (local path or s3:// URI). Appends the filename if it ends with /.')
+        string(name: 'RUN_ID', defaultValue: '',
+               description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
+        string(name: 'INSTANCE_TYPE', defaultValue: 'm5.large',
+               description: 'Runner instance type.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
+               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false,
+               description: 'Skip the JAR test suites.')
+        booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
+               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        RUNNER_DIR = 'etl-runners/generate-global-all-concepts'
+
+        TF_VAR_output_uri    = "${params.OUTPUT}"
+        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                script {
+                    if (!params.OUTPUT?.trim()) {
+                        error('OUTPUT is required: the s3:// URI or local path for global_AllConcepts.csv.')
+                    }
+
+                    def base = (params.RUN_ID?.trim())
+                        ?: "all-concepts-${env.BUILD_NUMBER}"
+                    env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
+
+                    env.TF_VAR_name_suffix = "all-concepts-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
+
+                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_image_tar = env.IMAGE_TAR
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} all-concepts"
+                    echo "output: ${params.OUTPUT}"
+                    echo "run id: ${env.BASE_RUN_ID}"
+                }
+                sh '''
+                    set -e
+                    echo "--- tool versions ---"
+                    terraform version | head -1
+                    aws --version
+                    docker --version
+                    jq --version
+                    java -version 2>&1 | head -1
+                '''
+            }
+        }
+
+        stage('Build JAR') {
+            steps {
+                sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Pre-flight') {
+            steps {
+                script {
+                    env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
+                    }
+                }
+            }
+        }
+
+        stage('Package runner image') {
+            steps {
+                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+            }
+        }
+
+        stage('Provision, run and monitor') {
+            steps {
+                script {
+                    int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
+                    int rc = 1
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                        env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
+                                                              : "${env.BASE_RUN_ID}-r${attempt}"
+                        env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                        env.TF_VAR_name_suffix = "all-concepts-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
+                        env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/generate-global-all-concepts/${env.EFFECTIVE_RUN_ID}.tfstate"
+
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+
+                        sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
+                        env.TF_INITIALISED = 'true'
+
+                        rc = sh(returnStatus: true, script: """
+                            cd ${RUNNER_DIR}
+                            ../common/monitor-runner.sh \
+                              "\$(terraform -chdir=terraform output -raw instance_id)" \
+                              "\$(terraform -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(terraform -chdir=terraform output -raw log_s3_uri)"
+                        """)
+
+                        env.JOB_EXIT_CODE = "${rc}"
+                        if (rc != 4 || attempt == maxAttempts) {
+                            break
+                        }
+
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        sh(returnStatus: true,
+                           script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                        sleep time: 60, unit: 'SECONDS'
+                    }
+
+                    if (rc != 0) {
+                        String meaning = [
+                            1  : 'UNKNOWN (unclassified failure)',
+                            2  : 'VALIDATION_FAILED (no ready studies or empty output)',
+                            3  : 'DATA_ERROR (no concept rows generated)',
+                            4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
+                            5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
+                            124: 'TIMEOUT (runner did not finish in time)',
+                        ].get(rc, "unmapped code ${rc}")
+                        env.FAILURE_MEANING = meaning
+                        echo "Job exited ${rc}: ${meaning}"
+                    }
+                }
+            }
+        }
+
+        stage('Fetch reports') {
+            when { expression { env.TF_INITIALISED == 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+            }
+        }
+
+        stage('Validate') {
+            when { expression { env.TF_INITIALISED == 'true' } }
+            steps {
+                script {
+                    int rc = sh(returnStatus: true, script:
+                        "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
+
+                    if (env.JOB_EXIT_CODE != '0') {
+                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                    }
+                    if (rc == 10) {
+                        unstable('Validation passed with warnings')
+                    } else if (rc != 0) {
+                        error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
+                    }
+                    echo "global_AllConcepts.csv generated and validated."
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "${RUNNER_DIR}/reports/**",
+                             allowEmptyArchive: true, fingerprint: true
+            script {
+                if (env.TF_INITIALISED == 'true') {
+                    int rc = sh(returnStatus: true,
+                                script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                    if (rc != 0) {
+                        echo "WARNING: terraform destroy returned ${rc}."
+                    }
+                }
+                if (env.IMAGE_TAR) {
+                    sh(returnStatus: true, script: """
+                        aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
+                          ${RUNNER_DIR}/terraform/generate-global-all-concepts.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          --region ${AWS_REGION} || true
+                    """)
+                }
+            }
+        }
+        failure {
+            echo "generate-global-all-concepts FAILED at stage '${env.STAGE_NAME}'. " +
+                 "${env.FAILURE_MEANING ?: ''} Reports are archived on this build."
+        }
+        unstable {
+            echo 'generate-global-all-concepts completed WITH WARNINGS. ' +
+                 'Check for studies with empty consent_abbreviation values.'
+        }
+        success {
+            echo "global_AllConcepts.csv generated (run ${env.EFFECTIVE_RUN_ID})."
+        }
+    }
+}

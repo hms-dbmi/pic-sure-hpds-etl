@@ -42,6 +42,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Locale;
 import java.util.stream.Stream;
 
 /**
@@ -56,10 +57,12 @@ import java.util.stream.Stream;
  *   <li>{@code --data-folder}: a folder (local or {@code s3://}) containing, for every
  *       study: an optional {@code {studyid}_sstr.tsv} (dbGaP SSTR export, tab-delimited,
  *       same shape {@link SstrPopulateRdsParticipantsJob} reads, plus a {@code SUBJECT_ID}
- *       column), a single {@code consents.csv} shared by every study (headerless, quoted,
- *       columns: legacy hpds id, consent value formatted {@code {studyid}.c{code}}), and a
- *       headerless {@code {ABV}_PatientMapping.v2.csv} per study (uppercased abv; columns:
- *       dbgap id or the study's own subject id, abv, legacy hpds id).</li>
+ *       column), a single {@code GLOBAL_allConcepts_merged.csv} shared by every study
+ *       (headerless, all-quoted AllConcepts format: hpds_id, concept_path, numeric_value,
+ *       non_numeric_value, timestamp; consent codes are extracted from {@code µ_consentsµ}
+ *       rows and abbreviations from {@code µ_studies_consentsµ{study_id}µ{abbreviation}µ}
+ *       rows), and a headerless {@code {ABV}_PatientMapping.v2.csv} per study (uppercased
+ *       abv; columns: dbgap id or the study's own subject id, abv, legacy hpds id).</li>
  * </ul>
  *
  * <p>For each ready study: if its sstr file exists, {@link SstrPopulateRdsParticipantsJob}
@@ -67,9 +70,9 @@ import java.util.stream.Stream;
  * for the mapping file (joining the patient mapping file's id against the sstr file's
  * {@code SUBJECT_ID}/{@code dbgap_subject_id} columns, since the mapping file's id may be
  * either). Otherwise, this job populates {@code participants}/{@code consents} itself by
- * joining the patient mapping file against {@code consents.csv} (source = study id; no
- * samples, except {@code open_access-1000Genomes} where the subject id doubles as the
- * sample id).
+ * joining the patient mapping file against {@code GLOBAL_allConcepts_merged.csv}
+ * (source = study id; no samples, except {@code open_access-1000Genomes} where the subject
+ * id doubles as the sample id).
  *
  * <p>Every processed study writes {@code {studyid}_hpds_id_mapping.csv} to the reports
  * directory: {@code old_hpds_id,new_uuid,common_dbgap_id} (the latter is the best
@@ -95,7 +98,7 @@ import java.util.stream.Stream;
         havingValue = "true")
 public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJob.Output> {
 
-    private static final String CONSENTS_FILE_NAME = "consents.csv";
+    private static final String ALL_CONCEPTS_FILE_NAME = "GLOBAL_allConcepts_merged.csv";
     private static final String OPEN_ACCESS_1000_GENOMES_ABV = "open_access-1000Genomes";
     private static final String SSTR_COL_SUBJECT_ID = "SUBJECT_ID";
     private static final String SSTR_COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
@@ -103,6 +106,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     /** {@code {studyId}.c{code}} -- a consented study. Group 1 is the consent code. */
     private static final Pattern CONSENT_VALUE_PATTERN = Pattern.compile("^.+\\.c(\\w+)$");
+
+    private static final String CONCEPT_PATH_CONSENTS = "µ_consentsµ";
+    private static final String CONCEPT_PATH_STUDIES_CONSENTS_PREFIX = "µ_studies_consentsµ";
 
     /**
      * Marks a value as intended to name a consent group. Present without a full
@@ -161,8 +167,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return JobExpectations.of(
                 List.of(
                         ParamSpec.required("data-folder",
-                                "Folder containing {studyid}_sstr.tsv files, a shared consents.csv, and "
-                                        + "{ABV}_PatientMapping.v2.csv files per study (local path or s3:// URI)",
+                                "Folder containing {studyid}_sstr.tsv files, a shared "
+                                        + "GLOBAL_allConcepts_merged.csv, and {ABV}_PatientMapping.v2.csv "
+                                        + "files per study (local path or s3:// URI)",
                                 "s3://hpds-migration/2026-08-06"),
                         ParamSpec.optional("batch-size", "Rows per batch insert", "1000")),
                 List.of("participants/consents/samples upserted in RDS for every ready study; "
@@ -188,7 +195,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         int batchSize = Integer.parseInt(ctx.get("batch-size", String.valueOf(DEFAULT_BATCH_SIZE)));
 
         List<ManagedInputRow> managedInputs = managedInputsService.read();
-        ConsentsCsv consentsCsv = readConsentsCsv(joinPath(dataFolder, CONSENTS_FILE_NAME));
+        ConsentData consentData = readAllConceptsCsv(joinPath(dataFolder, ALL_CONCEPTS_FILE_NAME));
 
         List<StudyResult> results = new ArrayList<>();
         for (ManagedInputRow row : managedInputs) {
@@ -196,7 +203,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 continue;
             }
             try {
-                results.add(processStudy(row, dataFolder, consentsCsv.codeByHpdsId(), batchSize, ctx));
+                results.add(processStudy(row, dataFolder, consentData, batchSize, ctx));
             } catch (InfrastructureException e) {
                 // Retrying per-study would not help if RDS/S3 itself is unreachable.
                 throw e;
@@ -205,15 +212,15 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 results.add(StudyResult.failed(row.studyId(), row.abv(), e.getMessage()));
             }
         }
-        return new Output(results, consentsCsv);
+        return new Output(results, consentData);
     }
 
-    private StudyResult processStudy(ManagedInputRow row, String dataFolder, Map<String, String> hpdsIdToConsentCode,
+    private StudyResult processStudy(ManagedInputRow row, String dataFolder, ConsentData consentData,
                                       int batchSize, JobContext ctx) {
         String studyId = row.studyId();
         String sstrPath = joinPath(dataFolder, studyId + "_sstr.tsv");
         boolean hasSstr = io.exists(sstrPath);
-        String patientMappingPath = joinPath(dataFolder, row.abv().toUpperCase() + "_PatientMapping.v2.csv");
+        String patientMappingPath = joinPath(dataFolder, row.abv().toUpperCase(Locale.ROOT) + "_PatientMapping.v2.csv");
         List<PatientMappingRow> patientMappings = readPatientMapping(patientMappingPath);
         if (patientMappings.isEmpty()) {
             throw new DataException("Patient mapping for study " + studyId + " yielded no subjects; "
@@ -222,7 +229,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         if (hasSstr) {
             String runId = ctx.runId() + "-" + studyId + "-sstr";
-            JobResult sstrResult = executor.run(sstrJob, Map.of("input", sstrPath, "study-id", studyId), runId);
+            JobResult sstrResult = executor.run(sstrJob,
+                    Map.of("input", sstrPath, "study-id", studyId,
+                            "batch-size", String.valueOf(batchSize)),
+                    runId);
             if (!sstrResult.isSuccess()) {
                 String message = "sstr job failed for study " + studyId + ": " + sstrResult.getErrorMessage();
                 if (sstrResult.getExitCode() == ExitCode.INFRASTRUCTURE_ERROR) {
@@ -230,7 +240,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 }
                 throw new DataException(message);
             }
-            List<MappingRow> mappingRows = buildSstrMapping(studyId, sstrPath, patientMappings);
+            if (sstrResult.getExitCode() == ExitCode.SUCCESS_WITH_WARNINGS) {
+                log.warn("Study '{}': sstr sub-job completed with warnings: {}",
+                        studyId, sstrResult.getOutputValidation().getIssues());
+            }
+            List<MappingRow> mappingRows = buildSstrMapping(studyId, sstrPath, patientMappings, batchSize);
             writeMappingFile(ctx, studyId, mappingRows);
             return StudyResult.success(studyId, row.abv(), true, mappingRows.size(), List.of());
         }
@@ -238,7 +252,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         List<PatientMappingRow> matched = new ArrayList<>();
         List<PatientMappingRow> unmatched = new ArrayList<>();
         for (PatientMappingRow pm : patientMappings) {
-            if (hpdsIdToConsentCode.containsKey(pm.oldHpdsId())) {
+            if (consentData.codeByHpdsId().containsKey(pm.oldHpdsId())) {
                 matched.add(pm);
             } else {
                 unmatched.add(pm);
@@ -249,7 +263,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         if (!unmatched.isEmpty()) {
             writeUnmatchedReport(ctx, row.abv(), unmatched);
             log.warn("Study '{}': {} of {} patient mapping row(s) had no entry in {}; written to unmatched report",
-                    studyId, unmatched.size(), patientMappings.size(), CONSENTS_FILE_NAME);
+                    studyId, unmatched.size(), patientMappings.size(), ALL_CONCEPTS_FILE_NAME);
         }
 
         if (matched.isEmpty()) {
@@ -257,7 +271,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             return StudyResult.success(studyId, row.abv(), false, 0, skippedHpdsIds);
         }
 
-        DirectLoad load = populateDirectly(studyId, row.abv(), matched, hpdsIdToConsentCode, batchSize);
+        DirectLoad load = populateDirectly(studyId, row.abv(), matched, consentData, batchSize);
         writeMappingFile(ctx, studyId, load.mappingRows());
         return StudyResult.success(studyId, row.abv(), false, load.mappingRows().size(),
                 Stream.concat(skippedHpdsIds.stream(), load.skippedHpdsIdsWithNoConsent().stream()).toList());
@@ -269,7 +283,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * (which may be a dbgap id or the study's own subject id) to that same dbgap id, so the
      * mapping file can report the new uuid RDS actually assigned.
      */
-    private List<MappingRow> buildSstrMapping(String studyId, String sstrPath, List<PatientMappingRow> patientMappings) {
+    private List<MappingRow> buildSstrMapping(String studyId, String sstrPath,
+                                              List<PatientMappingRow> patientMappings, int batchSize) {
         Map<String, String> subjectIdToDbgapId = new HashMap<>();
         Set<String> dbgapIds = new LinkedHashSet<>();
 
@@ -288,7 +303,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             }
         }
 
-        Map<String, UUID> uuidByDbgapId = participants.findUuids(dbgapIds, SstrPopulateRdsParticipantsJob.SOURCE);
+        Map<String, UUID> uuidByDbgapId = participants.findUuidsChunked(
+                new ArrayList<>(dbgapIds), SstrPopulateRdsParticipantsJob.SOURCE, batchSize);
 
         List<MappingRow> rows = new ArrayList<>();
         for (PatientMappingRow pm : patientMappings) {
@@ -312,10 +328,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /**
      * For non-sstr studies: populates participants/consents (and, for
      * {@code open_access-1000Genomes}, samples) directly from the join of the patient
-     * mapping file against {@code consents.csv}, all in one transaction for this study.
+     * mapping file against {@code GLOBAL_allConcepts_merged.csv}, all in one transaction
+     * for this study.
      */
     private DirectLoad populateDirectly(String studyId, String abv, List<PatientMappingRow> patientMappings,
-                                         Map<String, String> hpdsIdToConsentCode, int batchSize) {
+                                         ConsentData consentData, int batchSize) {
         return tx.execute(status -> {
             Set<String> subjectIds = new LinkedHashSet<>();
             for (PatientMappingRow pm : patientMappings) {
@@ -333,17 +350,16 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             List<String> skippedHpdsIds = new ArrayList<>();
 
             for (PatientMappingRow pm : patientMappings) {
-                String code = hpdsIdToConsentCode.get(pm.oldHpdsId());
+                String code = consentData.codeByHpdsId().get(pm.oldHpdsId());
                 if (code == null) {
-                    // Counted as well as logged: such a subject gets neither a consent row nor a
-                    // mapping row, so it does not migrate. validateOutput reports the count.
-                    log.warn("Study '{}': no consent found in consents.csv for old hpds id '{}'; skipping subject '{}'",
-                            studyId, pm.oldHpdsId(), pm.id());
+                    log.warn("Study '{}': no consent found in {} for old hpds id '{}'; skipping subject '{}'",
+                            studyId, ALL_CONCEPTS_FILE_NAME, pm.oldHpdsId(), pm.id());
                     skippedHpdsIds.add(pm.oldHpdsId());
                     continue;
                 }
                 UUID uuid = uuidBySubject.get(pm.id());
-                consentRows.add(new Consent(uuid, studyId, code, ""));
+                String abbreviation = consentData.abbreviationByHpdsId().getOrDefault(pm.oldHpdsId(), "");
+                consentRows.add(new Consent(uuid, studyId, code, abbreviation));
                 if (populateSamples) {
                     sampleRows.add(new Sample(uuid, pm.id(), studyId));
                 }
@@ -358,7 +374,15 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     /**
-     * Reads the shared {@code consents.csv} into legacy-hpds-id &rarr; consent code.
+     * Reads the shared {@code GLOBAL_allConcepts_merged.csv} (headerless AllConcepts format:
+     * hpds_id, concept_path, numeric_value, non_numeric_value, timestamp, all quoted) and
+     * extracts:
+     * <ul>
+     *   <li>legacy-hpds-id &rarr; consent code, from {@code µ_consentsµ} rows whose
+     *       non-numeric value is {@code {studyId}.c{code}}</li>
+     *   <li>legacy-hpds-id &rarr; consent abbreviation, from individual
+     *       {@code µ_studies_consentsµ{study_id}µ{abbreviation}µ} rows</li>
+     * </ul>
      *
      * <p>Two shapes of consent value are legitimate:
      * <ul>
@@ -368,55 +392,67 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      *       is the bare study id. Those rows take
      *       {@link SingleConsentDataPopulateRdsParticipantsJob#PUBLIC_CONSENT_CODE}.</li>
      * </ul>
-     *
-     * <p>A strict {@code ^.+\.c(\w+)$} match treats the suffix-less form as unparseable, which
-     * dropped every open-access participant: no consent row, and no mapping-file row either, since
-     * {@link #populateDirectly} skips subjects with no code.
      */
-    private ConsentsCsv readConsentsCsv(String path) {
+    private ConsentData readAllConceptsCsv(String path) {
         Map<String, String> hpdsIdToCode = new HashMap<>();
+        Map<String, String> hpdsIdToAbbreviation = new HashMap<>();
         long publicRows = 0;
         long unparseableRows = 0;
+        long totalRows = 0;
 
         InputStream in = io.openInput(path);
         try (Stream<List<String>> stream = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
             for (List<String> row : (Iterable<List<String>>) stream::iterator) {
-                if (row.size() < 2) {
+                if (row.size() < 4) {
                     continue;
                 }
+                totalRows++;
                 String hpdsId = Strings.trimToNull(row.get(0));
-                String consentValue = Strings.trimToNull(row.get(1));
-                if (hpdsId == null || consentValue == null) {
+                String conceptPath = Strings.trimToNull(row.get(1));
+                String nonNumericValue = Strings.trimToNull(row.get(3));
+                if (hpdsId == null || conceptPath == null) {
                     continue;
                 }
-                Matcher m = CONSENT_VALUE_PATTERN.matcher(consentValue);
-                if (m.matches()) {
-                    hpdsIdToCode.put(hpdsId, m.group(1));
-                    continue;
+
+                if (CONCEPT_PATH_CONSENTS.equals(conceptPath)) {
+                    if (nonNumericValue == null) {
+                        continue;
+                    }
+                    Matcher m = CONSENT_VALUE_PATTERN.matcher(nonNumericValue);
+                    if (m.matches()) {
+                        hpdsIdToCode.put(hpdsId, m.group(1));
+                        continue;
+                    }
+                    if (nonNumericValue.contains(CONSENT_GROUP_MARKER)) {
+                        log.warn("{}: consent value '{}' for hpds id '{}' names a consent group that could not be "
+                                        + "parsed; skipping", ALL_CONCEPTS_FILE_NAME, nonNumericValue, hpdsId);
+                        unparseableRows++;
+                        continue;
+                    }
+                    hpdsIdToCode.put(hpdsId, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
+                    publicRows++;
+                } else if (conceptPath.startsWith(CONCEPT_PATH_STUDIES_CONSENTS_PREFIX)) {
+                    String[] parts = conceptPath.split("µ");
+                    // split drops trailing empty strings, so:
+                    // Individual consent path: ["", "_studies_consents", "{study_id}", "{abbreviation}"]
+                    // Study-level path:        ["", "_studies_consents", "{study_id}"]
+                    if (parts.length >= 4 && !parts[3].isEmpty()) {
+                        hpdsIdToAbbreviation.put(hpdsId, parts[3]);
+                    }
                 }
-                if (consentValue.contains(CONSENT_GROUP_MARKER)) {
-                    // Names a consent group but not a readable one: a defect, not open access.
-                    // Guessing "public" would grant an unconsented participant an open-access
-                    // consent, so it stays a skip.
-                    log.warn("{}: consent value '{}' for hpds id '{}' names a consent group that could not be "
-                                    + "parsed; skipping", CONSENTS_FILE_NAME, consentValue, hpdsId);
-                    unparseableRows++;
-                    continue;
-                }
-                // No '.c' suffix at all: an open-access study.
-                hpdsIdToCode.put(hpdsId, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
-                publicRows++;
             }
         }
 
+        log.info("{}: read {} row(s), extracted {} consent code(s) and {} abbreviation(s)",
+                ALL_CONCEPTS_FILE_NAME, totalRows, hpdsIdToCode.size(), hpdsIdToAbbreviation.size());
         if (publicRows > 0) {
             log.info("{}: {} row(s) had no consent-group suffix and were read as open access (code '{}')",
-                    CONSENTS_FILE_NAME, publicRows, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
+                    ALL_CONCEPTS_FILE_NAME, publicRows, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
         }
         if (unparseableRows > 0) {
-            log.warn("{}: {} row(s) were skipped as unparseable", CONSENTS_FILE_NAME, unparseableRows);
+            log.warn("{}: {} row(s) were skipped as unparseable", ALL_CONCEPTS_FILE_NAME, unparseableRows);
         }
-        return new ConsentsCsv(hpdsIdToCode, publicRows, unparseableRows);
+        return new ConsentData(hpdsIdToCode, hpdsIdToAbbreviation, publicRows, unparseableRows);
     }
 
     private List<PatientMappingRow> readPatientMapping(String path) {
@@ -486,21 +522,21 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     List<String> sample = result.skippedHpdsIdsWithNoConsent().stream().limit(10).toList();
                     report.warning("SUBJECTS_WITHOUT_CONSENT", result.studyId() + ": "
                             + result.skippedHpdsIdsWithNoConsent().size() + " subject(s) had no row in "
-                            + CONSENTS_FILE_NAME + " and were NOT migrated. First: " + sample);
+                            + ALL_CONCEPTS_FILE_NAME + " and were NOT migrated. First: " + sample);
                 }
             } else {
                 report.error("STUDY_FAILED", result.studyId() + ": " + result.errorMessage());
             }
         }
 
-        if (output.consentsCsv().unparseableRows() > 0) {
-            report.warning("UNPARSEABLE_CONSENT_VALUES", output.consentsCsv().unparseableRows()
-                    + " row(s) in " + CONSENTS_FILE_NAME + " had a consent group that could not be read; "
+        if (output.consentData().unparseableRows() > 0) {
+            report.warning("UNPARSEABLE_CONSENT_VALUES", output.consentData().unparseableRows()
+                    + " row(s) in " + ALL_CONCEPTS_FILE_NAME + " had a consent group that could not be read; "
                     + "any subject relying on them was not migrated");
         }
-        if (output.consentsCsv().publicRows() > 0) {
-            report.info("OPEN_ACCESS_CONSENT_VALUES", output.consentsCsv().publicRows()
-                    + " row(s) in " + CONSENTS_FILE_NAME + " had no consent-group suffix and were read as "
+        if (output.consentData().publicRows() > 0) {
+            report.info("OPEN_ACCESS_CONSENT_VALUES", output.consentData().publicRows()
+                    + " row(s) in " + ALL_CONCEPTS_FILE_NAME + " had no consent-group suffix and were read as "
                     + "open access (code '" + SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE + "')");
         }
     }
@@ -522,8 +558,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                         .map(StudyResult::studyId)
                         .toList())
                 .metric("subjectsWithoutConsent", skipped)
-                .metric("openAccessConsentRows", output.consentsCsv().publicRows())
-                .metric("unparseableConsentRows", output.consentsCsv().unparseableRows());
+                .metric("openAccessConsentRows", output.consentData().publicRows())
+                .metric("unparseableConsentRows", output.consentData().unparseableRows());
     }
 
     private record PatientMappingRow(String id, String oldHpdsId) {
@@ -537,13 +573,16 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     /**
-     * The parsed shared consents file.
+     * Consent data extracted from the shared {@code GLOBAL_allConcepts_merged.csv}.
      *
-     * @param codeByHpdsId    legacy hpds id to consent code
-     * @param publicRows      rows with no {@code .c} suffix, read as open access
-     * @param unparseableRows rows with a {@code .c} marker but no usable code; these were skipped
+     * @param codeByHpdsId           legacy hpds id to consent code (from {@code µ_consentsµ} rows)
+     * @param abbreviationByHpdsId   legacy hpds id to consent abbreviation (from individual
+     *                               {@code µ_studies_consentsµ} rows)
+     * @param publicRows             rows with no {@code .c} suffix, read as open access
+     * @param unparseableRows        rows with a {@code .c} marker but no usable code; these were skipped
      */
-    public record ConsentsCsv(Map<String, String> codeByHpdsId, long publicRows, long unparseableRows) {
+    public record ConsentData(Map<String, String> codeByHpdsId, Map<String, String> abbreviationByHpdsId,
+                               long publicRows, long unparseableRows) {
     }
 
     /** Outcome of migrating one study; inspected by {@link #validateOutput}/{@link #report}. */
@@ -561,6 +600,6 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     /** Immutable result of {@link #execute}; inspected by {@link #validateOutput}/{@link #report}. */
-    public record Output(List<StudyResult> studyResults, ConsentsCsv consentsCsv) {
+    public record Output(List<StudyResult> studyResults, ConsentData consentData) {
     }
 }

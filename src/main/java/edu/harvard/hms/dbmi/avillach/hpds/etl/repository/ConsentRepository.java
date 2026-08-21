@@ -66,6 +66,21 @@ public class ConsentRepository {
         }
     }
 
+    public List<Consent> findByStudyId(String studyId) {
+        try {
+            return jdbc.query(
+                    "SELECT hpds_uuid, study_id, consent_code, consent_abbreviation FROM consents WHERE study_id = :studyId",
+                    new MapSqlParameterSource().addValue("studyId", studyId),
+                    (rs, n) -> new Consent(
+                            rs.getObject("hpds_uuid", java.util.UUID.class),
+                            rs.getString("study_id"),
+                            rs.getString("consent_code"),
+                            rs.getString("consent_abbreviation")));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Query consents by study_id failed", e);
+        }
+    }
+
     public long count() {
         try {
             Long n = jdbc.getJdbcTemplate().queryForObject("SELECT COUNT(*) FROM consents", Long.class);

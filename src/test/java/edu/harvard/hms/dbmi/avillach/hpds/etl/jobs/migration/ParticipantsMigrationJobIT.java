@@ -120,8 +120,8 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     void open_access_study_with_no_consent_suffix_migrates_as_public() throws IOException {
         managedInputs("OPENSTUDY,open-study-01,true");
         String dataFolder = dataFolder(Map.of(
-                // No ".c<code>" suffix: this is what an open-access study looks like.
-                "consents.csv", "\"3001\",\"open-study-01\"\n",
+                // No ".c<code>" suffix in the _consents value: this is what an open-access study looks like.
+                "GLOBAL_allConcepts_merged.csv", "\"3001\",\"µ_consentsµ\",\"\",\"open-study-01\",\"0\"\n",
                 "OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
 
         JobResult result = executor.run(job,
@@ -150,7 +150,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     void a_malformed_consent_value_is_reported_rather_than_read_as_public() throws IOException {
         managedInputs("BADSTUDY,bad-study-01,true");
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "\"4001\",\"bad-study-01.c\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"4001\",\"µ_consentsµ\",\"\",\"bad-study-01.c\",\"0\"\n",
                 "BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
 
         JobResult result = executor.run(job,
@@ -172,7 +172,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     void sstr_driven_study_populates_rds_and_writes_mapping_file() throws IOException {
         managedInputs("GRU,phs001412,true");
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "",
+                "GLOBAL_allConcepts_merged.csv", "",
                 "phs001412_sstr.tsv", """
                 SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
                 SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
@@ -196,10 +196,13 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void non_sstr_study_populates_directly_via_patient_mapping_and_consents_join() throws IOException {
+    void non_sstr_study_populates_directly_with_abbreviation_from_all_concepts() throws IOException {
         managedInputs("OTHER,other-study-01,true");
+        String allConcepts = "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n"
+                + "\"2002\",\"µ_studies_consentsµother-study-01µ\",\"\",\"TRUE\",\"0\"\n"
+                + "\"2002\",\"µ_studies_consentsµother-study-01µGRU-IRBµ\",\"\",\"TRUE\",\"0\"\n";
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"other-study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", allConcepts,
                 "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
@@ -211,7 +214,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
                 UUID.class, "SUBJ42", "other-study-01");
         assertThat(countWhere("consents",
-                "study_id = ? AND consent_code = '1' AND consent_abbreviation = ''", "other-study-01")).isEqualTo(1);
+                "study_id = ? AND consent_code = '1' AND consent_abbreviation = 'GRU-IRB'", "other-study-01")).isEqualTo(1);
         assertThat(countWhere("samples", "sample_source = ?", "other-study-01")).isZero();
 
         String mapping = readMappingFile("other-study-01");
@@ -222,7 +225,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     void open_access_1000_genomes_also_populates_samples() {
         managedInputs("open_access-1000Genomes,tg-study-01,true");
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "\"3003\",\"tg-study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"3003\",\"µ_consentsµ\",\"\",\"tg-study-01.c1\",\"0\"\n",
                 "OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
 
         JobResult result = executor.run(job,
@@ -237,7 +240,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     void unmatched_patient_mappings_are_filtered_and_reported() throws IOException {
         managedInputs("MIXED,mixed-study-01,true");
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"mixed-study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"mixed-study-01.c1\",\"0\"\n",
                 "MIXED_PatientMapping.v2.csv",
                 "SUBJ1,MIXED,2002\n" + "SUBJ2,MIXED,9999\n" + "SUBJ3,MIXED,8888\n"));
 
@@ -266,7 +269,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "OTHER,other-study-01,true",
                 "NOTSET,not-ready-study,false");
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"other-study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
                 "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
@@ -284,7 +287,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "OTHER,other-study-01,true",
                 "MISSING,missing-study-01,true");
         String dataFolder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"other-study-01.c1\"\n",
+                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
                 "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,

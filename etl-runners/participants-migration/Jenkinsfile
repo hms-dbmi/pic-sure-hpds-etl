@@ -3,7 +3,7 @@
 //
 // Runs one hpds-etl job on a Terraform-provisioned ephemeral EC2 runner that terminates itself
 // when the job exits. Triggered by the migration orchestrator's "Migrate participants" stage
-// (/Jenkinsfile); also runnable standalone.
+// (/Jenkinsfile.migration); also runnable standalone.
 //
 // Delete this file, its runner directory, and ParticipantsMigrationJob once the migration has run
 // in every environment.
@@ -14,7 +14,7 @@
 //     - {studyid}_sstr.tsv present: SstrPopulateRdsParticipantsJob loads RDS and this job only
 //       resolves legacy-hpds-id -> new-uuid pairs
 //     - otherwise: this job populates participants/consents itself, joining
-//       {ABV}_PatientMapping.v2.csv against the shared consents.csv
+//       {ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).
 //
 // Inputs
@@ -57,13 +57,13 @@ pipeline {
                description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
         string(name: 'DATA_FOLDER',
                defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/current',
-               description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared consents.csv')
+               description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG. Appears in the report filename and the S3 report prefix.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
-               description: 'Runner instance type. Memory-bound: a study mapping file and consents.csv are joined in memory.')
+               description: 'Runner instance type. Memory-bound: a study mapping file and GLOBAL_allConcepts_merged.csv are joined in memory.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
