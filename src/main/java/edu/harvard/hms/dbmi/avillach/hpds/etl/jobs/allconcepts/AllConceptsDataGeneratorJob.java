@@ -88,8 +88,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                         ParamSpec.optional("skip-analysis",
                                 "Skip data type re-analysis and use mapping types as-is (default: false)",
                                 "false")),
-                List.of("One {study_id}.c{consent_code}_allConcepts.csv per consent group, "
-                        + "written to --output"));
+                List.of("One {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv "
+                        + "per consent group"));
     }
 
     @Override
@@ -196,7 +196,9 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 continue;
             }
 
-            String outputFile = outputDir + studyId + ".c" + consentCode + "_allConcepts.csv";
+            String consentLabel = "c" + consentCode;
+            String outputFile = outputDir + studyId + "/" + consentLabel + "/"
+                    + studyId + "_allConcepts_" + consentLabel + ".csv";
             byte[] csv = builder.build();
             io.writeOutput(outputFile, csv);
             rowsPerConsent.put("c" + consentCode, (long) builder.size());

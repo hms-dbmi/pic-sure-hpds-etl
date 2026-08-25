@@ -70,6 +70,8 @@ etl:
     migrate-all:
       - participants-migration
       - split-allconcepts
+      - generate-global-all-concepts
+      - create-vcf-indexes
   aws:
     region: ${AWS_REGION:us-east-1}
     s3:

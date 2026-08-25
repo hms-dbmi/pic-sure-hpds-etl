@@ -50,6 +50,14 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/split-allconcepts/Jenkinsfile')
         string(name: 'SPLIT_OUTPUT', defaultValue: './output',
                description: 'Output directory for split allConcepts files (local path or s3:// URI)')
+        string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'hpds-etl/generate-global-all-concepts',
+               description: 'Jenkins job that runs the generate-global-all-concepts runner')
+        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
+               description: 'Output location for global_AllConcepts.csv (local path or s3:// URI)')
+        string(name: 'VCF_INDEXES_JOB', defaultValue: 'hpds-etl/create-vcf-indexes',
+               description: 'Jenkins job that runs the create-vcf-indexes runner')
+        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
+               description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
@@ -288,6 +296,78 @@ pipeline {
                     }
                     if (warned) {
                         unstable("Split AllConcepts completed with warnings: ${warned*.studyId.join(', ')}")
+                    }
+                }
+            }
+        }
+
+        stage('Generate global AllConcepts') {
+            steps {
+                script {
+                    echo 'Generating global_AllConcepts.csv from migrated data...'
+
+                    def conceptParams = [
+                        string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
+                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                        booleanParam(name: 'SKIP_TESTS', value: true),
+                    ]
+                    if (params.MANAGED_INPUTS?.trim()) {
+                        conceptParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
+                    }
+
+                    def downstream = build(
+                        job: params.ALL_CONCEPTS_JOB,
+                        wait: true,
+                        propagate: true,
+                        parameters: conceptParams)
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.ALL_CONCEPTS_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/all-concepts',
+                            optional: true)
+                    } catch (err) {
+                        echo "Could not copy artifacts for all-concepts (${err.message}); " +
+                             "they remain on ${params.ALL_CONCEPTS_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
+
+        stage('Create VCF indexes') {
+            steps {
+                script {
+                    echo 'Creating VCF indexes from migrated genomic data...'
+
+                    def vcfParams = [
+                        string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
+                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
+                        booleanParam(name: 'SKIP_TESTS', value: true),
+                    ]
+                    if (params.MANAGED_INPUTS?.trim()) {
+                        vcfParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
+                    }
+
+                    def downstream = build(
+                        job: params.VCF_INDEXES_JOB,
+                        wait: true,
+                        propagate: true,
+                        parameters: vcfParams)
+
+                    if (downstream.result == 'UNSTABLE') {
+                        unstable('Create VCF indexes completed with warnings')
+                    }
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.VCF_INDEXES_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/vcf-indexes',
+                            optional: true)
+                    } catch (err) {
+                        echo "Could not copy artifacts for vcf-indexes (${err.message}); " +
+                             "they remain on ${params.VCF_INDEXES_JOB} #${downstream.number}."
                     }
                 }
             }

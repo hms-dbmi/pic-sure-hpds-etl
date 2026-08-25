@@ -126,17 +126,17 @@ class AllConceptsDataGeneratorJobTest {
                 .writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
         List<String> uris = uriCaptor.getAllValues();
-        assertThat(uris).anyMatch(u -> u.contains(STUDY_ID + ".c1_allConcepts.csv"));
-        assertThat(uris).anyMatch(u -> u.contains(STUDY_ID + ".c2_allConcepts.csv"));
+        assertThat(uris).anyMatch(u -> u.contains(STUDY_ID + "_allConcepts_c1.csv"));
+        assertThat(uris).anyMatch(u -> u.contains(STUDY_ID + "_allConcepts_c2.csv"));
 
         for (int i = 0; i < uris.size(); i++) {
             String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
-            if (uris.get(i).contains(".c1_allConcepts.csv")) {
+            if (uris.get(i).contains("_allConcepts_c1.csv")) {
                 assertThat(csv).contains("\"" + uuid1 + "\"");
                 assertThat(csv).contains("\"µStudyµAgeµ\"");
                 assertThat(csv).contains("\"25\"");
             }
-            if (uris.get(i).contains(".c2_allConcepts.csv")) {
+            if (uris.get(i).contains("_allConcepts_c2.csv")) {
                 assertThat(csv).contains("\"" + uuid2 + "\"");
                 assertThat(csv).contains("\"30\"");
             }
@@ -166,7 +166,7 @@ class AllConceptsDataGeneratorJobTest {
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
             String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
-            if (uriCaptor.getAllValues().get(i).contains(".c1_allConcepts.csv")) {
+            if (uriCaptor.getAllValues().get(i).contains("_allConcepts_c1.csv")) {
                 // numeric value in the numeric column (3rd), non-numeric column (4th) empty
                 assertThat(csv).contains("\"24.5\"");
                 String[] lines = csv.trim().split("\n");
@@ -293,7 +293,7 @@ class AllConceptsDataGeneratorJobTest {
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
             String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
-            if (uriCaptor.getAllValues().get(i).contains(".c1_allConcepts.csv")) {
+            if (uriCaptor.getAllValues().get(i).contains("_allConcepts_c1.csv")) {
                 assertThat(csv).contains("\"µStudyµAgeµ\"");
                 assertThat(csv).contains("\"µStudyµWeightµ\"");
             }
@@ -355,7 +355,7 @@ class AllConceptsDataGeneratorJobTest {
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
             String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
-            if (uriCaptor.getAllValues().get(i).contains(".c1_allConcepts.csv")) {
+            if (uriCaptor.getAllValues().get(i).contains("_allConcepts_c1.csv")) {
                 // "hello" is now TEXT since analysis detected non-numeric values
                 assertThat(csv).contains("\"hello\"");
             }

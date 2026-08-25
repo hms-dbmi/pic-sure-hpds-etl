@@ -4,7 +4,7 @@
 // Generates per-consent allConcepts CSV files for a single study. Reads decoded
 // data CSVs and a mapping file, resolves participant/consent associations from
 // the RDS database, runs data type analysis, and writes one
-// {study_id}.c{consent_code}_allConcepts.csv per consent group.
+// {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv per consent group.
 //
 // This job replaces the legacy "ETL - Generate DBGAP All Concepts with Data Type
 // Analyzer" Jenkins job, producing per-consent output rather than per-study.
@@ -17,7 +17,7 @@
 //   RDS credentials fetched on the runner from Secrets Manager by instance role
 //
 // Outputs
-//   {study_id}.c{code}_allConcepts.csv per consent group at the --output location
+//   {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv per consent group
 //   all-concepts-data-generator-<runId>.json report with per-consent row counts
 //
 // Exit codes (see ExitCode.java)
