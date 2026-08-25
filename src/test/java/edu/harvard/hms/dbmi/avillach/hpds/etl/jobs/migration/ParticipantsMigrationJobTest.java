@@ -114,7 +114,7 @@ class ParticipantsMigrationJobTest {
     @Test
     void fails_with_config_error_when_shared_all_concepts_csv_is_missing() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
-                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
@@ -132,7 +132,7 @@ class ParticipantsMigrationJobTest {
     @Test
     void fails_study_when_patient_mapping_is_empty() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
-                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
@@ -159,7 +159,7 @@ class ParticipantsMigrationJobTest {
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
         String managedInputs = tempFile("managed_inputs.csv",
-                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 participants, mock(ConsentRepository.class), mock(SampleRepository.class));

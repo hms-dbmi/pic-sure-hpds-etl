@@ -118,7 +118,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
      */
     @Test
     void open_access_study_with_no_consent_suffix_migrates_as_public() throws IOException {
-        managedInputs("OPENSTUDY,open-study-01,true");
+        managedInputs("OPENSTUDY,open-study-01,Yes");
         String dataFolder = dataFolder(Map.of(
                 // No ".c<code>" suffix in the _consents value: this is what an open-access study looks like.
                 "GLOBAL_allConcepts_merged.csv", "\"3001\",\"µ_consentsµ\",\"\",\"open-study-01\",\"0\"\n",
@@ -148,7 +148,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
      */
     @Test
     void a_malformed_consent_value_is_reported_rather_than_read_as_public() throws IOException {
-        managedInputs("BADSTUDY,bad-study-01,true");
+        managedInputs("BADSTUDY,bad-study-01,Yes");
         String dataFolder = dataFolder(Map.of(
                 "GLOBAL_allConcepts_merged.csv", "\"4001\",\"µ_consentsµ\",\"\",\"bad-study-01.c\",\"0\"\n",
                 "BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
@@ -170,7 +170,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     @Test
     void sstr_driven_study_populates_rds_and_writes_mapping_file() throws IOException {
-        managedInputs("GRU,phs001412,true");
+        managedInputs("GRU,phs001412,Yes");
         String dataFolder = dataFolder(Map.of(
                 "GLOBAL_allConcepts_merged.csv", "",
                 "phs001412_sstr.tsv", """
@@ -197,7 +197,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     @Test
     void non_sstr_study_populates_directly_with_abbreviation_from_all_concepts() throws IOException {
-        managedInputs("OTHER,other-study-01,true");
+        managedInputs("OTHER,other-study-01,Yes");
         String allConcepts = "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n"
                 + "\"2002\",\"µ_studies_consentsµother-study-01µ\",\"\",\"TRUE\",\"0\"\n"
                 + "\"2002\",\"µ_studies_consentsµother-study-01µGRU-IRBµ\",\"\",\"TRUE\",\"0\"\n";
@@ -223,7 +223,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     @Test
     void open_access_1000_genomes_also_populates_samples() {
-        managedInputs("open_access-1000Genomes,tg-study-01,true");
+        managedInputs("open_access-1000Genomes,tg-study-01,Yes");
         String dataFolder = dataFolder(Map.of(
                 "GLOBAL_allConcepts_merged.csv", "\"3003\",\"µ_consentsµ\",\"\",\"tg-study-01.c1\",\"0\"\n",
                 "OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
@@ -238,7 +238,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     @Test
     void unmatched_patient_mappings_are_filtered_and_reported() throws IOException {
-        managedInputs("MIXED,mixed-study-01,true");
+        managedInputs("MIXED,mixed-study-01,Yes");
         String dataFolder = dataFolder(Map.of(
                 "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"mixed-study-01.c1\",\"0\"\n",
                 "MIXED_PatientMapping.v2.csv",
@@ -266,8 +266,8 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     void study_not_marked_ready_is_skipped_entirely() {
         // NOTSET has no data files at all -- if the job touched it, it would fail.
         managedInputs(
-                "OTHER,other-study-01,true",
-                "NOTSET,not-ready-study,false");
+                "OTHER,other-study-01,Yes",
+                "NOTSET,not-ready-study,No");
         String dataFolder = dataFolder(Map.of(
                 "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
                 "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
@@ -284,8 +284,8 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         // MISSING has no patient mapping file on disk -- that study should fail, but
         // OTHER (also ready, in the same run) must still be committed.
         managedInputs(
-                "OTHER,other-study-01,true",
-                "MISSING,missing-study-01,true");
+                "OTHER,other-study-01,Yes",
+                "MISSING,missing-study-01,Yes");
         String dataFolder = dataFolder(Map.of(
                 "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
                 "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));

@@ -11,6 +11,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsCsvBuilder;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsRow;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.model.ConceptPaths;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
@@ -22,7 +23,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,10 +69,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
                         ParamSpec.required("output",
                                 "Output location for global_AllConcepts.csv (local path or s3:// URI). "
                                         + "The filename is appended automatically if the value ends with '/'.",
-                                "s3://bucket/etl-output/"),
-                        ParamSpec.optional("managed-inputs",
-                                "Override for the managed inputs URI (default: etl.managed-inputs.uri config)",
-                                "s3://bucket/managed_inputs.csv")),
+                                "s3://bucket/etl-output/")),
                 List.of("global_AllConcepts.csv written to --output with concept rows for all ready studies"));
     }
 
@@ -94,6 +92,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         AllConceptsCsvBuilder builder = new AllConceptsCsvBuilder();
         Map<String, Long> rowsPerStudy = new LinkedHashMap<>();
         Map<String, Long> emptyAbbreviationCounts = new LinkedHashMap<>();
+        List<String> skippedNoConsents = new ArrayList<>();
 
         for (ManagedInputRow study : readyStudies) {
             String studyId = study.studyId();
@@ -103,6 +102,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
             List<Consent> consents = consentRepository.findByStudyId(studyId);
             if (consents.isEmpty()) {
                 log.warn("Study {} has no consents in the database; skipping", studyId);
+                skippedNoConsents.add(studyId);
                 continue;
             }
 
@@ -124,18 +124,18 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
                     + " ready studies. Check that the database has been populated.");
         }
 
-        byte[] csv = builder.build();
-        io.writeOutput(outputUri, csv);
-        log.info("Wrote {} rows ({} bytes) to {}", builder.size(), csv.length, outputUri);
+        io.writeOutput(outputUri, builder::writeTo);
+        log.info("Wrote {} rows to {}", builder.size(), outputUri);
 
-        return new Output(readyStudies.size(), builder.size(), rowsPerStudy, emptyAbbreviationCounts, outputUri);
+        return new Output(readyStudies.size(), builder.size(), rowsPerStudy,
+                emptyAbbreviationCounts, skippedNoConsents, outputUri);
     }
 
     private void addConsentsConcept(AllConceptsCsvBuilder builder, List<Consent> consents, String studyId) {
         for (Consent c : consents) {
             builder.add(AllConceptsRow.nonNumeric(
                     c.hpdsUuid().toString(),
-                    "µ_consentsµ",
+                    ConceptPaths.CONSENTS,
                     studyId + ".c" + c.consentCode()));
         }
     }
@@ -145,7 +145,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         for (Participant p : participants) {
             builder.add(AllConceptsRow.nonNumeric(
                     p.hpdsUuid().toString(),
-                    "µ_source_subject_idµ",
+                    ConceptPaths.SOURCE_SUBJECT_ID,
                     p.sourceId()));
         }
     }
@@ -155,7 +155,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         for (Sample s : samples) {
             builder.add(AllConceptsRow.nonNumeric(
                     s.hpdsUuid().toString(),
-                    "µ_source_sample_idµ",
+                    ConceptPaths.SOURCE_SAMPLE_ID,
                     s.sourceSampleId()));
         }
     }
@@ -170,7 +170,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         for (Consent c : consents) {
             builder.add(AllConceptsRow.nonNumeric(
                     c.hpdsUuid().toString(),
-                    "µ_studies_consentsµ" + studyId + "µ",
+                    ConceptPaths.STUDIES_CONSENTS_PREFIX + studyId + "µ",
                     "TRUE"));
 
             if (c.consentAbbreviation() == null || c.consentAbbreviation().isBlank()) {
@@ -182,7 +182,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
 
             builder.add(AllConceptsRow.nonNumeric(
                     c.hpdsUuid().toString(),
-                    "µ_studies_consentsµ" + studyId + "µ" + c.consentAbbreviation() + "µ",
+                    ConceptPaths.STUDIES_CONSENTS_PREFIX + studyId + "µ" + c.consentAbbreviation() + "µ",
                     "TRUE"));
         }
 
@@ -190,7 +190,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
     }
 
     private String resolveOutputUri(String output) {
-        if (output.endsWith("/") || output.endsWith(Path.of(output).getFileSystem().getSeparator())) {
+        if (output.endsWith("/")) {
             return output + OUTPUT_FILENAME;
         }
         return output;
@@ -200,6 +200,10 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
         if (output.totalRows() == 0) {
             report.error("EMPTY_OUTPUT", "No rows were written to the output file");
+        }
+        for (String studyId : output.skippedNoConsents()) {
+            report.warning("NO_CONSENTS",
+                    "Study " + studyId + " has no consents in the database and was skipped");
         }
         output.emptyAbbreviationCounts().forEach((studyId, count) ->
                 report.warning("EMPTY_CONSENT_ABBREVIATION",
@@ -214,6 +218,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         builder.metric("studiesProcessed", output.studiesProcessed())
                 .metric("totalRows", output.totalRows())
                 .metric("rowsPerStudy", output.rowsPerStudy())
+                .metric("skippedNoConsents", output.skippedNoConsents())
                 .metric("outputUri", output.outputUri());
     }
 
@@ -222,6 +227,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
             long totalRows,
             Map<String, Long> rowsPerStudy,
             Map<String, Long> emptyAbbreviationCounts,
+            List<String> skippedNoConsents,
             String outputUri
     ) {
     }

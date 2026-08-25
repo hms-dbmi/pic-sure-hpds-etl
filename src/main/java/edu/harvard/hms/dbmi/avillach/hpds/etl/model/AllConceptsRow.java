@@ -48,6 +48,10 @@ public record AllConceptsRow(
         return new AllConceptsRow(hpdsId, conceptPath, "", value, "0");
     }
 
+    public static AllConceptsRow numeric(String hpdsId, String conceptPath, String value) {
+        return new AllConceptsRow(hpdsId, conceptPath, value, "", "0");
+    }
+
     public String toCsvLine() {
         return "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"".formatted(
                 escapeQuotes(hpdsId),

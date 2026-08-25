@@ -1,0 +1,261 @@
+// =============================================================================
+// TEMPORARY -- split-allconcepts (JobType.MIGRATION)
+//
+// Runs one hpds-etl job on a Terraform-provisioned ephemeral EC2 runner that terminates itself
+// when the job exits. Triggered by the migration orchestrator's "Split AllConcepts" stage
+// (/Jenkinsfile.migration) once per study; also runnable standalone.
+//
+// Delete this file, its runner directory, and SplitAllConceptsJob once the migration has run
+// in every environment.
+//
+// What the job does
+//   For a single study: reads the legacy allConcepts CSV from S3, replaces old hpds integer
+//   IDs with the new UUIDs produced by participants-migration, then splits the result into
+//   per-consent files using the consent assignments in the database.
+//
+// Inputs
+//   --study-id       study identifier           (params.STUDY_ID)
+//   --abbreviation   study abbreviated name     (params.ABBREVIATION)
+//   --input          allConcepts CSV S3 URI     (params.INPUT)
+//   --mapping        hpds_id_mapping CSV S3 URI (params.MAPPING)
+//   --output         output directory           (params.OUTPUT)
+//   RDS credentials  fetched on the runner from Secrets Manager by instance role
+//
+// Outputs
+//   Per-consent CSVs:  {output}/split_allconcepts/{study_id}/c{code}/{ABV}_allConcepts_c{code}.csv
+//   split-allconcepts-<runId>.json   the JobResult
+//
+// Exit codes (see ExitCode.java)
+//   0 success | 2 validation | 3 data | 4 infrastructure, retried once | 5 config | 1 unknown
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
+        timeout(time: 2, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'STUDY_ID',
+               defaultValue: '',
+               description: '--study-id: the phs###### study identifier')
+        string(name: 'ABBREVIATION',
+               defaultValue: '',
+               description: '--abbreviation: study abbreviated name')
+        string(name: 'INPUT',
+               defaultValue: '',
+               description: '--input: S3 URI of the study allConcepts CSV')
+        string(name: 'MAPPING',
+               defaultValue: '',
+               description: '--mapping: S3 URI of the hpds_id_mapping.csv from participants-migration')
+        string(name: 'OUTPUT',
+               defaultValue: './output',
+               description: '--output: output directory for split files')
+        string(name: 'RUN_ID', defaultValue: '',
+               description: 'Correlation id. Blank uses a sanitised BUILD_TAG.')
+        string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
+               description: 'Runner instance type.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
+               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false,
+               description: 'Skip the JAR test suites.')
+        booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
+               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
+        booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
+               description: 'Validate the input layout and stop, without provisioning anything')
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        RUNNER_DIR = 'etl-runners/split-allconcepts'
+
+        TF_VAR_study_id      = "${params.STUDY_ID}"
+        TF_VAR_abbreviation  = "${params.ABBREVIATION}"
+        TF_VAR_input_uri     = "${params.INPUT}"
+        TF_VAR_mapping_uri   = "${params.MAPPING}"
+        TF_VAR_output_uri    = "${params.OUTPUT}"
+        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+        TF_VAR_name_suffix   = "${env.BUILD_NUMBER}"
+
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                script {
+                    def base = (params.RUN_ID?.trim()) ?: env.BUILD_TAG
+                    env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
+
+                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_image_tar = env.IMAGE_TAR
+
+                    echo "run id: ${env.BASE_RUN_ID}"
+                    echo "study:  ${params.STUDY_ID} (${params.ABBREVIATION})"
+                    echo "input:  ${params.INPUT}"
+                    echo "mapping: ${params.MAPPING}"
+                }
+                sh '''
+                    set -e
+                    echo "--- tool versions ---"
+                    terraform version | head -1
+                    aws --version
+                    docker --version
+                    jq --version
+                    java -version 2>&1 | head -1
+                '''
+            }
+        }
+
+        stage('Build JAR') {
+            steps {
+                sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml,target/failsafe-reports/*.xml',
+                          allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Pre-flight') {
+            steps {
+                script {
+                    env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
+                    }
+                }
+            }
+        }
+
+        stage('Package runner image') {
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+            }
+        }
+
+        stage('Provision, run and monitor') {
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
+                    int rc = 1
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                        env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
+                                                              : "${env.BASE_RUN_ID}-r${attempt}"
+                        env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                        env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/split-allconcepts/${env.EFFECTIVE_RUN_ID}.tfstate"
+
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+
+                        sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
+                        env.TF_INITIALISED = 'true'
+
+                        rc = sh(returnStatus: true, script: """
+                            cd ${RUNNER_DIR}
+                            ../common/monitor-runner.sh \
+                              "\$(terraform -chdir=terraform output -raw instance_id)" \
+                              "\$(terraform -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(terraform -chdir=terraform output -raw log_s3_uri)"
+                        """)
+
+                        env.JOB_EXIT_CODE = "${rc}"
+                        if (rc != 4 || attempt == maxAttempts) {
+                            break
+                        }
+
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        sh(returnStatus: true,
+                           script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                        sleep time: 60, unit: 'SECONDS'
+                    }
+
+                    if (rc != 0) {
+                        String meaning = [
+                            1  : 'UNKNOWN (unclassified failure)',
+                            2  : 'VALIDATION_FAILED (input/output validation)',
+                            3  : 'DATA_ERROR (input reachable but malformed)',
+                            4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
+                            5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
+                            124: 'TIMEOUT (runner did not finish in time)',
+                        ].get(rc, "unmapped code ${rc}")
+                        env.FAILURE_MEANING = meaning
+                        echo "Job exited ${rc}: ${meaning}"
+                    }
+                }
+            }
+        }
+
+        stage('Fetch reports') {
+            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+            }
+        }
+
+        stage('Validate') {
+            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
+            steps {
+                script {
+                    int rc = sh(returnStatus: true, script:
+                        "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
+
+                    if (env.JOB_EXIT_CODE != '0') {
+                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                    }
+                    if (rc == 10) {
+                        unstable('Validation passed with warnings')
+                    } else if (rc != 0) {
+                        error("Report validation failed (rc=${rc})")
+                    }
+                    echo "Split allConcepts validated for study ${params.STUDY_ID}."
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "${RUNNER_DIR}/reports/**",
+                             allowEmptyArchive: true, fingerprint: true
+            script {
+                if (env.TF_INITIALISED == 'true') {
+                    int rc = sh(returnStatus: true,
+                                script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                    if (rc != 0) {
+                        echo "WARNING: terraform destroy returned ${rc}."
+                    }
+                }
+                if (env.IMAGE_TAR) {
+                    sh(returnStatus: true, script: """
+                        aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
+                          ${RUNNER_DIR}/terraform/split-allconcepts.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          --region ${AWS_REGION} || true
+                    """)
+                }
+            }
+        }
+        failure {
+            echo "split-allconcepts FAILED for study ${params.STUDY_ID} at stage '${env.STAGE_NAME}'. " +
+                 "${env.FAILURE_MEANING ?: ''}"
+        }
+        unstable {
+            echo "split-allconcepts completed WITH WARNINGS for study ${params.STUDY_ID}."
+        }
+        success {
+            echo "split-allconcepts succeeded for study ${params.STUDY_ID} (run ${env.EFFECTIVE_RUN_ID})."
+        }
+    }
+}

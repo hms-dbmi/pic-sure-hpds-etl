@@ -22,6 +22,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,7 +78,7 @@ class GenerateGlobalAllConceptsJobTest {
         String studyId = "phs001412";
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("STUDY1", studyId, true)));
+                ManagedInputRow.of("STUDY1", studyId, true)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(uuid1, studyId, "1", "GRU"),
@@ -94,10 +96,10 @@ class GenerateGlobalAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(ioResolver).writeOutput(eq(outputPath + "global_AllConcepts.csv"), contentCaptor.capture());
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath + "global_AllConcepts.csv"), writerCaptor.capture());
 
-        String csv = new String(contentCaptor.getValue(), StandardCharsets.UTF_8);
+        String csv = invokeWriter(writerCaptor.getValue());
         String[] lines = csv.split("\n");
 
         // 2 consents + 2 participants + 1 sample + 2 study-level consents + 2 individual consents = 9
@@ -129,7 +131,7 @@ class GenerateGlobalAllConceptsJobTest {
         String studyId = "phs001412";
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("STUDY1", studyId, true)));
+                ManagedInputRow.of("STUDY1", studyId, true)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(uuid1, studyId, "1", "")));
@@ -144,10 +146,10 @@ class GenerateGlobalAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(ioResolver).writeOutput(eq(outputPath), contentCaptor.capture());
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath), writerCaptor.capture());
 
-        String csv = new String(contentCaptor.getValue(), StandardCharsets.UTF_8);
+        String csv = invokeWriter(writerCaptor.getValue());
         // 1 consent + 1 participant + 0 samples + 1 study-level + 0 individual (skipped) = 3
         assertThat(csv.split("\n")).hasSize(3);
         assertThat(csv).contains("\"µ_studies_consentsµ" + studyId + "µ\"");
@@ -157,7 +159,7 @@ class GenerateGlobalAllConceptsJobTest {
     @Test
     void fails_validation_when_no_studies_are_ready() {
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("STUDY1", "phs001412", false)));
+                ManagedInputRow.of("STUDY1", "phs001412", false)));
 
         String outputPath = tempDir.resolve("output.csv").toString();
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-no-ready");
@@ -169,7 +171,7 @@ class GenerateGlobalAllConceptsJobTest {
     @Test
     void fails_when_no_rows_generated_across_all_studies() {
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("STUDY1", "phs001412", true)));
+                ManagedInputRow.of("STUDY1", "phs001412", true)));
 
         when(consentRepository.findByStudyId("phs001412")).thenReturn(List.of());
 
@@ -183,7 +185,7 @@ class GenerateGlobalAllConceptsJobTest {
     @Test
     void fails_with_infrastructure_error_when_database_unreachable() {
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("STUDY1", "phs001412", true)));
+                ManagedInputRow.of("STUDY1", "phs001412", true)));
 
         when(consentRepository.findByStudyId("phs001412"))
                 .thenThrow(new InfrastructureException("connection refused"));
@@ -197,7 +199,7 @@ class GenerateGlobalAllConceptsJobTest {
     @Test
     void fails_validation_when_output_param_missing() {
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("STUDY1", "phs001412", true)));
+                ManagedInputRow.of("STUDY1", "phs001412", true)));
 
         JobResult result = executor.run(job, Map.of(), "test-missing-output");
 
@@ -210,9 +212,9 @@ class GenerateGlobalAllConceptsJobTest {
         UUID uuid2 = UUID.randomUUID();
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("S1", "phs000001", true),
-                new ManagedInputRow("S2", "phs000002", true),
-                new ManagedInputRow("S3", "phs000003", false)));
+                ManagedInputRow.of("S1", "phs000001", true),
+                ManagedInputRow.of("S2", "phs000002", true),
+                ManagedInputRow.of("S3", "phs000003", false)));
 
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
                 new Consent(uuid1, "phs000001", "1", "GRU")));
@@ -232,10 +234,10 @@ class GenerateGlobalAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(ioResolver).writeOutput(eq(outputPath), contentCaptor.capture());
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath), writerCaptor.capture());
 
-        String csv = new String(contentCaptor.getValue(), StandardCharsets.UTF_8);
+        String csv = invokeWriter(writerCaptor.getValue());
         assertThat(csv).contains("phs000001");
         assertThat(csv).contains("phs000002");
         assertThat(csv).doesNotContain("phs000003");
@@ -248,8 +250,8 @@ class GenerateGlobalAllConceptsJobTest {
         UUID uuid2 = UUID.randomUUID();
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("S1", "phs000001", true),
-                new ManagedInputRow("S2", "phs000002", true)));
+                ManagedInputRow.of("S1", "phs000001", true),
+                ManagedInputRow.of("S2", "phs000002", true)));
 
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of());
         when(consentRepository.findByStudyId("phs000002")).thenReturn(List.of(
@@ -262,12 +264,14 @@ class GenerateGlobalAllConceptsJobTest {
         String outputPath = tempDir.resolve("output.csv").toString();
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-skip-empty");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.message().contains("phs000001") && i.message().contains("no consents"));
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(ioResolver).writeOutput(eq(outputPath), contentCaptor.capture());
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath), writerCaptor.capture());
 
-        String csv = new String(contentCaptor.getValue(), StandardCharsets.UTF_8);
+        String csv = invokeWriter(writerCaptor.getValue());
         assertThat(csv).doesNotContain("phs000001");
         assertThat(csv).contains("phs000002");
     }
@@ -277,7 +281,7 @@ class GenerateGlobalAllConceptsJobTest {
         UUID uuid1 = UUID.randomUUID();
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("S1", "phs000001", true)));
+                ManagedInputRow.of("S1", "phs000001", true)));
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
                 new Consent(uuid1, "phs000001", "1", "GRU")));
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of());
@@ -286,10 +290,10 @@ class GenerateGlobalAllConceptsJobTest {
         String outputPath = tempDir.resolve("output.csv").toString();
         executor.run(job, Map.of("output", outputPath), "test-quoting");
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(ioResolver).writeOutput(eq(outputPath), contentCaptor.capture());
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath), writerCaptor.capture());
 
-        String csv = new String(contentCaptor.getValue(), StandardCharsets.UTF_8);
+        String csv = invokeWriter(writerCaptor.getValue());
         for (String line : csv.split("\n")) {
             String[] fields = line.split(",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)");
             for (String field : fields) {
@@ -303,7 +307,7 @@ class GenerateGlobalAllConceptsJobTest {
         UUID uuid1 = UUID.randomUUID();
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("S1", "phs000001", true)));
+                ManagedInputRow.of("S1", "phs000001", true)));
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
                 new Consent(uuid1, "phs000001", "1", "GRU")));
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of(
@@ -313,10 +317,10 @@ class GenerateGlobalAllConceptsJobTest {
         String outputPath = tempDir.resolve("output.csv").toString();
         executor.run(job, Map.of("output", outputPath), "test-timestamp");
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
-        verify(ioResolver).writeOutput(eq(outputPath), contentCaptor.capture());
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath), writerCaptor.capture());
 
-        String csv = new String(contentCaptor.getValue(), StandardCharsets.UTF_8);
+        String csv = invokeWriter(writerCaptor.getValue());
         for (String line : csv.split("\n")) {
             assertThat(line).endsWith(",\"0\"");
         }
@@ -327,7 +331,7 @@ class GenerateGlobalAllConceptsJobTest {
         UUID uuid1 = UUID.randomUUID();
 
         when(managedInputsService.read()).thenReturn(List.of(
-                new ManagedInputRow("S1", "phs000001", true)));
+                ManagedInputRow.of("S1", "phs000001", true)));
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
                 new Consent(uuid1, "phs000001", "1", "GRU")));
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of());
@@ -335,6 +339,16 @@ class GenerateGlobalAllConceptsJobTest {
 
         executor.run(job, Map.of("output", "s3://bucket/output/"), "test-s3-slash");
 
-        verify(ioResolver).writeOutput(eq("s3://bucket/output/global_AllConcepts.csv"), any(byte[].class));
+        verify(ioResolver).writeOutput(eq("s3://bucket/output/global_AllConcepts.csv"), any(IoResolver.IoWriter.class));
+    }
+
+    private static String invokeWriter(IoResolver.IoWriter writer) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            writer.writeTo(baos);
+            return baos.toString(StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

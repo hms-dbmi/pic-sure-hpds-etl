@@ -78,8 +78,20 @@ class ManagedInputsServiceTest {
 
         // The blank-abbreviation row names no study, so it is dropped rather than processed.
         assertThat(rows).containsExactly(
-                new ManagedInputRow("PVDOMICS", "phs002451", true),
-                new ManagedInputRow("HeartShare-Harmonized-dataset", "phs004460", false));
+                new ManagedInputRow("PVDOMICS", "phs002451",
+                        "v1", "p1", "No", "", "",
+                        "NHLBI TOPMed: Pulmonary Vascular Disease Phenomics Program (PVDOMICS)",
+                        "TOPMed", "TOPMed", "P/G", "No", "Yes", "No", "", "", "",
+                        "Use dbGaP to submit a Data Access Request (DAR). For more information on how to request access to this dataset, please view the BDC Gitbook documentation: https://bdcatalyst.gitbook.io/biodata-catalyst-documentation/written-documentation/data-access/submitting-a-dbgap-data-access-request",
+                        "", "", "topmed", "PVDOMICS", "Human", true, false),
+                new ManagedInputRow("HeartShare-Harmonized-dataset", "phs004460",
+                        "v1", "p1", "", "", "",
+                        "HeartShare Harmonized dataset",
+                        "", "", "", "", "", "",
+                        "https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id=phs004460",
+                        "", "",
+                        "Use dbGaP to submit a Data Access Request (DAR). For more information on how to request access to this dataset, please view the BDC Gitbook documentation: [https://bdcatalyst.gitbook.io/biodata-catalyst-documentation/written-documentation/data-access/submitting-a-dbgap-data-access-request|https://bdcatalyst.gitbook.io/biodata-catalyst-documentation/written-documentation/data-access/submitting-a-dbgap-data-access-request]",
+                        "", "", "", "HeartShare_Harmonized", "Human", false, false));
     }
 
     /** Not-ready studies are returned too; filtering them is the caller's decision, not the read's. */
@@ -92,16 +104,14 @@ class ManagedInputsServiceTest {
     }
 
     @Test
-    void reads_only_affirmative_values_as_ready() {
+    void reads_yes_and_no_as_ready_values() {
         String csv = STANDARD_HEADER
                 + "YES1,phs000001,Yes\n"
-                + "YES2,phs000002,true\n"
-                + "YES3,phs000003, TRUE \n"
-                + "YES4,phs000004,1\n"
-                + "NO1,phs000005,No\n"
-                + "NO2,phs000006,\n"
-                // Hand-maintained column: a note typed into it is not an affirmative.
-                + "NO3,phs000007,waiting on dbGaP\n";
+                + "YES2,phs000002, yes \n"
+                + "YES3,phs000003,YES\n"
+                + "NO1,phs000004,No\n"
+                + "NO2,phs000005,no\n"
+                + "NO3,phs000006,\n";
 
         List<ManagedInputRow> rows = service(new IoResolver(null), tempCsv(csv)).read();
 
@@ -110,10 +120,21 @@ class ManagedInputsServiceTest {
                         org.assertj.core.groups.Tuple.tuple("YES1", true),
                         org.assertj.core.groups.Tuple.tuple("YES2", true),
                         org.assertj.core.groups.Tuple.tuple("YES3", true),
-                        org.assertj.core.groups.Tuple.tuple("YES4", true),
                         org.assertj.core.groups.Tuple.tuple("NO1", false),
                         org.assertj.core.groups.Tuple.tuple("NO2", false),
                         org.assertj.core.groups.Tuple.tuple("NO3", false));
+    }
+
+    @Test
+    void rejects_invalid_values_in_ready_column() {
+        String csv = STANDARD_HEADER + "BAD,phs000001,true\n";
+
+        assertThatThrownBy(() -> service(new IoResolver(null), tempCsv(csv)).read())
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining("true")
+                .hasMessageContaining("Data is ready to process")
+                .hasMessageContaining("Yes")
+                .hasMessageContaining("No");
     }
 
     @Test
@@ -125,7 +146,7 @@ class ManagedInputsServiceTest {
                 + "  ,  ,Yes\n";
 
         assertThat(service(new IoResolver(null), tempCsv(csv)).read())
-                .containsExactly(new ManagedInputRow("GOOD", "phs000001", true));
+                .containsExactly(ManagedInputRow.of("GOOD", "phs000001", true));
     }
 
     @Test
@@ -133,7 +154,7 @@ class ManagedInputsServiceTest {
         String csv = STANDARD_HEADER + "  SPACED  ,  phs000009 ,Yes\n";
 
         assertThat(service(new IoResolver(null), tempCsv(csv)).read())
-                .containsExactly(new ManagedInputRow("SPACED", "phs000009", true));
+                .containsExactly(ManagedInputRow.of("SPACED", "phs000009", true));
     }
 
     /** The reason the service exists: a job may call read() per study without re-reading the source. */
@@ -169,7 +190,7 @@ class ManagedInputsServiceTest {
     void returns_a_list_callers_cannot_mutate() {
         List<ManagedInputRow> rows = service(new IoResolver(null), sampleSheetPath()).read();
 
-        assertThatThrownBy(() -> rows.add(new ManagedInputRow("SNEAKY", "phs000000", true)))
+        assertThatThrownBy(() -> rows.add(ManagedInputRow.of("SNEAKY", "phs000000", true)))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 

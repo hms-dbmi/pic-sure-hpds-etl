@@ -20,6 +20,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SingleConsentDataPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.model.ConceptPaths;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
@@ -107,8 +108,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /** {@code {studyId}.c{code}} -- a consented study. Group 1 is the consent code. */
     private static final Pattern CONSENT_VALUE_PATTERN = Pattern.compile("^.+\\.c(\\w+)$");
 
-    private static final String CONCEPT_PATH_CONSENTS = "µ_consentsµ";
-    private static final String CONCEPT_PATH_STUDIES_CONSENTS_PREFIX = "µ_studies_consentsµ";
+    private static final String CONCEPT_PATH_CONSENTS = ConceptPaths.CONSENTS;
+    private static final String CONCEPT_PATH_STUDIES_CONSENTS_PREFIX = ConceptPaths.STUDIES_CONSENTS_PREFIX;
 
     /**
      * Marks a value as intended to name a consent group. Present without a full
@@ -420,7 +421,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     }
                     Matcher m = CONSENT_VALUE_PATTERN.matcher(nonNumericValue);
                     if (m.matches()) {
-                        hpdsIdToCode.put(hpdsId, m.group(1));
+                        String code = m.group(1);
+                        String prev = hpdsIdToCode.put(hpdsId, code);
+                        if (prev != null && !prev.equals(code)) {
+                            log.warn("{}: hpds id '{}' already mapped to consent code '{}'; overwritten with '{}' "
+                                    + "(from value '{}')", ALL_CONCEPTS_FILE_NAME, hpdsId, prev, code, nonNumericValue);
+                        }
                         continue;
                     }
                     if (nonNumericValue.contains(CONSENT_GROUP_MARKER)) {
@@ -429,15 +435,21 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                         unparseableRows++;
                         continue;
                     }
-                    hpdsIdToCode.put(hpdsId, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
+                    String prev = hpdsIdToCode.put(hpdsId, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
+                    if (prev != null && !prev.equals(SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE)) {
+                        log.warn("{}: hpds id '{}' already mapped to consent code '{}'; overwritten with public code "
+                                + "(from value '{}')", ALL_CONCEPTS_FILE_NAME, hpdsId, prev, nonNumericValue);
+                    }
                     publicRows++;
                 } else if (conceptPath.startsWith(CONCEPT_PATH_STUDIES_CONSENTS_PREFIX)) {
                     String[] parts = conceptPath.split("µ");
-                    // split drops trailing empty strings, so:
-                    // Individual consent path: ["", "_studies_consents", "{study_id}", "{abbreviation}"]
-                    // Study-level path:        ["", "_studies_consents", "{study_id}"]
                     if (parts.length >= 4 && !parts[3].isEmpty()) {
-                        hpdsIdToAbbreviation.put(hpdsId, parts[3]);
+                        String abbrev = parts[3];
+                        String prev = hpdsIdToAbbreviation.put(hpdsId, abbrev);
+                        if (prev != null && !prev.equals(abbrev)) {
+                            log.warn("{}: hpds id '{}' already mapped to abbreviation '{}'; overwritten with '{}'",
+                                    ALL_CONCEPTS_FILE_NAME, hpdsId, prev, abbrev);
+                        }
                     }
                 }
             }

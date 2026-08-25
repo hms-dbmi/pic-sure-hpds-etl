@@ -1,5 +1,8 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.model;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,5 +44,21 @@ public class AllConceptsCsvBuilder {
             sb.append(row.toCsvLine()).append('\n');
         }
         return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Streams rows to the given output without building the full byte[] in memory.
+     * Use this instead of {@link #build()} for large result sets.
+     */
+    public void writeTo(OutputStream out) {
+        try {
+            for (AllConceptsRow row : rows) {
+                out.write(row.toCsvLine().getBytes(StandardCharsets.UTF_8));
+                out.write('\n');
+            }
+            out.flush();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 }

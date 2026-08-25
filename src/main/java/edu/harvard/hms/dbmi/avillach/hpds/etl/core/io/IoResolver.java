@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -111,6 +112,49 @@ public class IoResolver {
         } catch (IOException e) {
             throw new InfrastructureException("Failed to write local output: " + path, e);
         }
+    }
+
+    /**
+     * Streams output to the target location without materializing the full content in memory.
+     * For S3, the content is spooled to a temp file first (S3 PutObject needs content length).
+     */
+    public void writeOutput(String uri, IoWriter writer) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            try {
+                Path tmp = Files.createTempFile("etl-upload-", ".tmp");
+                try {
+                    try (OutputStream out = Files.newOutputStream(tmp)) {
+                        writer.writeTo(out);
+                    }
+                    s3.putObject(PutObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build(),
+                            RequestBody.fromFile(tmp));
+                    log.info("Streamed {} bytes to S3 {}", Files.size(tmp), uri);
+                } finally {
+                    Files.deleteIfExists(tmp);
+                }
+            } catch (IOException e) {
+                throw new InfrastructureException("Failed to write to S3: " + uri, e);
+            }
+            return;
+        }
+        Path path = toLocalPath(uri);
+        try {
+            if (path.getParent() != null) {
+                Files.createDirectories(path.getParent());
+            }
+            try (OutputStream out = Files.newOutputStream(path)) {
+                writer.writeTo(out);
+            }
+            log.info("Streamed to {}", path.toAbsolutePath());
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to write local output: " + path, e);
+        }
+    }
+
+    @FunctionalInterface
+    public interface IoWriter {
+        void writeTo(OutputStream out) throws IOException;
     }
 
     private Path toLocalPath(String uri) {

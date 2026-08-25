@@ -30,10 +30,6 @@ pipeline {
         timeout(time: 12, unit: 'HOURS')
     }
 
-    // Deliberately not scheduled by default: each run writes to shared RDS tables, so a
-    // sweep should be turned on knowingly rather than inherited. Uncomment for a weekly run.
-    // triggers { cron('H 3 * * 1') }
-
     parameters {
         string(name: 'STUDY_ID', defaultValue: '',
                description: 'Blank sweeps every ready study from managed inputs. Set to a phs###### to load exactly one study (the reload/manual entry path).')
@@ -57,6 +53,10 @@ pipeline {
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
         string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
                description: 'Output location for global_AllConcepts.csv (local path or s3:// URI)')
+        string(name: 'VCF_INDEXES_JOB', defaultValue: 'hpds-etl/create-vcf-indexes',
+               description: 'Jenkins job that runs the create-vcf-indexes runner')
+        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
+               description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')
     }
 
     environment {
@@ -101,9 +101,11 @@ pipeline {
 
                     if (managedInputsUri) {
                         // Read managed inputs CSV directly via the pipeline.
-                        def lines = sh(returnStdout: true, script:
-                            "aws s3 cp '${managedInputsUri}' - 2>/dev/null || cat '${managedInputsUri}' 2>/dev/null || echo ''"
-                        ).trim()
+                        // Use an env var to avoid Groovy GString injection into the shell.
+                        env.MI_URI = managedInputsUri
+                        def lines = sh(returnStdout: true, script: '''
+                            aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
+                        ''').trim()
 
                         if (!lines) {
                             error("Could not read managed inputs from ${managedInputsUri}")
@@ -112,8 +114,7 @@ pipeline {
                         def header = null
                         lines.readLines().each { line ->
                             if (!line.trim()) return
-                            // Simple CSV parse: split by comma, strip quotes
-                            def cols = line.split(',').collect { it.trim().replaceAll(/^"|"$/, '') }
+                            def cols = parseCsvLine(line)
                             if (header == null) {
                                 header = cols
                                 return
@@ -122,11 +123,15 @@ pipeline {
                                 ? cols[header.indexOf('Study Identifier')].trim() : ''
                             def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
                                 ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
-                            def ready = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
-                                ? cols[header.indexOf('Data is ready to process')].trim().toLowerCase() : ''
+                            def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
+                                ? cols[header.indexOf('Data is ready to process')].trim() : ''
+                            def processedRaw = cols.size() > header.indexOf('Data Processed') && header.indexOf('Data Processed') >= 0
+                                ? cols[header.indexOf('Data Processed')].trim() : ''
                             if (studyId) {
+                                def ready = parseYesNo(readyRaw, 'Data is ready to process', studyId)
+                                def processed = parseYesNo(processedRaw, 'Data Processed', studyId)
                                 studies << [studyId: studyId, abv: abv,
-                                            ready: ready in ['true', 'yes', '1']]
+                                            ready: ready, processed: processed]
                             }
                         }
                     } else {
@@ -175,15 +180,24 @@ pipeline {
                         error("Duplicate study id(s) in managed inputs: ${dupes.join(', ')}")
                     }
 
-                    STUDIES = selected
+                    // SSTR load and VCF indexes only run for studies not yet processed.
+                    // Global AllConcepts runs on all ready studies (handled inside the job).
+                    UNPROCESSED_STUDIES = selected.findAll { !it.processed }
+                    def alreadyProcessed = selected.findAll { it.processed }
 
                     currentBuild.displayName = params.STUDY_ID?.trim()
                         ? "#${env.BUILD_NUMBER} ${params.STUDY_ID}"
-                        : "#${env.BUILD_NUMBER} sweep (${selected.size()} studies)"
+                        : "#${env.BUILD_NUMBER} sweep (${selected.size()} ready, ${UNPROCESSED_STUDIES.size()} unprocessed)"
 
-                    echo "Studies to load (${selected.size()}):"
+                    echo "Studies ready (${selected.size()}):"
                     selected.each { s ->
-                        echo "  ${s.studyId}  <- ${s.input}"
+                        echo "  ${s.studyId}  ${s.processed ? '[processed]' : '[new]'}  <- ${s.input}"
+                    }
+                    if (alreadyProcessed) {
+                        echo "${alreadyProcessed.size()} study/studies already processed — skipping DB population and VCF index creation"
+                    }
+                    if (UNPROCESSED_STUDIES.isEmpty()) {
+                        echo 'No unprocessed studies to load. Global AllConcepts will still regenerate.'
                     }
                 }
             }
@@ -194,11 +208,12 @@ pipeline {
         // ---------------------------------------------------------------------
 
         stage('Load SSTR participants') {
+            when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
             steps {
                 script {
                     def results = []
 
-                    for (study in STUDIES) {
+                    for (study in UNPROCESSED_STUDIES) {
                         echo "--- ${study.studyId} ---"
                         def outcome
                         try {
@@ -247,7 +262,7 @@ pipeline {
                     def ok       = results.findAll { it.result == 'SUCCESS' }
                     def warned   = results.findAll { it.result == 'UNSTABLE' }
                     def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
-                    def skipped  = STUDIES.size() - results.size()
+                    def skipped  = UNPROCESSED_STUDIES.size() - results.size()
 
                     echo ''
                     echo '================ SSTR load summary ================'
@@ -304,6 +319,42 @@ pipeline {
                 }
             }
         }
+
+        stage('Create VCF indexes') {
+            when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
+            steps {
+                script {
+                    echo 'Creating VCF indexes from genomic data...'
+
+                    def vcfParams = [
+                        string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
+                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
+                        booleanParam(name: 'SKIP_TESTS', value: true),
+                    ]
+
+                    def downstream = build(
+                        job: params.VCF_INDEXES_JOB,
+                        wait: true,
+                        propagate: true,
+                        parameters: vcfParams)
+
+                    if (downstream.result == 'UNSTABLE') {
+                        unstable('Create VCF indexes completed with warnings')
+                    }
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.VCF_INDEXES_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/vcf-indexes',
+                            optional: true)
+                    } catch (err) {
+                        echo "Could not copy artifacts for vcf-indexes (${err.message}); " +
+                             "they remain on ${params.VCF_INDEXES_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
     }
 
     post {
@@ -323,4 +374,33 @@ pipeline {
             echo 'Permanent ETL pipeline completed. Every study loaded and passed its output validation.'
         }
     }
+}
+
+@NonCPS
+static boolean parseYesNo(String value, String column, String studyId) {
+    if (!value) return false
+    def v = value.trim().toLowerCase()
+    if (v == 'yes') return true
+    if (v == 'no' || v == '') return false
+    throw new IllegalArgumentException("Study ${studyId}: invalid value '${value}' in column '${column}'; expected 'Yes' or 'No'")
+}
+
+@NonCPS
+static List<String> parseCsvLine(String line) {
+    def fields = []
+    def current = new StringBuilder()
+    boolean inQuotes = false
+    for (int i = 0; i < line.length(); i++) {
+        char c = line.charAt(i)
+        if (c == (char)'"') {
+            inQuotes = !inQuotes
+        } else if (c == (char)',' && !inQuotes) {
+            fields << current.toString().trim()
+            current = new StringBuilder()
+        } else {
+            current.append(c)
+        }
+    }
+    fields << current.toString().trim()
+    return fields
 }

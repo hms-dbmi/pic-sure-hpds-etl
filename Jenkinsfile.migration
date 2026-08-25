@@ -46,6 +46,12 @@ pipeline {
                description: 'Rows per batch insert, passed to every migration job')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'hpds-etl/participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
+        string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'hpds-etl/split-allconcepts',
+               description: 'Jenkins job that runs etl-runners/split-allconcepts/Jenkinsfile')
+        string(name: 'SPLIT_OUTPUT', defaultValue: './output',
+               description: 'Output directory for split allConcepts files (local path or s3:// URI)')
+        booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
+               description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
                description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state, so leaving them on is strongly preferred before a migration.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
@@ -136,16 +142,156 @@ pipeline {
             }
         }
 
-        // Add the next migration as another stage; it runs only because the one above passed.
-        //
-        // stage('Migrate consents') {
-        //     steps {
-        //         script {
-        //             build job: 'hpds-etl/consents-migration', wait: true, propagate: true,
-        //                   parameters: [ /* that job's parameters */ ]
-        //         }
-        //     }
-        // }
+        stage('Split AllConcepts') {
+            steps {
+                script {
+                    // Resolve the study list from managed inputs so we can loop per study.
+                    def managedInputsUri = params.MANAGED_INPUTS?.trim()
+                    if (!managedInputsUri) {
+                        error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
+                    }
+
+                    def studies = []
+                    // Use an env var to avoid Groovy GString injection into the shell.
+                    env.MI_URI = managedInputsUri
+                    def lines = sh(returnStdout: true, script: '''
+                        aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
+                    ''').trim()
+
+                    if (!lines) {
+                        error("Could not read managed inputs from ${managedInputsUri}")
+                    }
+
+                    def header = null
+                    lines.readLines().each { line ->
+                        if (!line.trim()) return
+                        def cols = parseCsvLine(line)
+                        if (header == null) {
+                            header = cols
+                            return
+                        }
+                        def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
+                            ? cols[header.indexOf('Study Identifier')].trim() : ''
+                        def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
+                            ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
+                        def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
+                            ? cols[header.indexOf('Data is ready to process')].trim() : ''
+                        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
+                            studies << [studyId: studyId, abv: abv]
+                        }
+                    }
+
+                    if (studies.isEmpty()) {
+                        error('No ready studies found in managed inputs for Split AllConcepts.')
+                    }
+
+                    echo "Split AllConcepts: ${studies.size()} study/studies to process"
+
+                    // The participants-migration reports are archived on its build and synced
+                    // to S3. Derive the mapping CSV path from the report prefix.
+                    def reportPrefix = sh(returnStdout: true, script: """
+                        cd etl-runners/participants-migration && \
+                        terraform -chdir=terraform output -raw reports_s3_uri 2>/dev/null || echo ''
+                    """).trim()
+
+                    def results = []
+
+                    for (study in studies) {
+                        def sid = study.studyId
+                        def abv = study.abv
+                        def abvLower = abv.toLowerCase()
+
+                        def inputUri = "s3://avillach-73-bdcatalyst-etl/${abvLower}/completed/${sid}/${sid}_allConcepts_new_search_with_data_analyzer.csv"
+
+                        // Mapping CSV: from participants-migration reports in S3
+                        def mappingUri
+                        if (reportPrefix) {
+                            mappingUri = "${reportPrefix}${sid}_hpds_id_mapping.csv"
+                        } else {
+                            // Fallback: check the archived artifacts directory
+                            def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
+                            if (fileExists(localMapping)) {
+                                mappingUri = localMapping
+                            } else {
+                                echo "${sid}: cannot locate mapping CSV; skipping"
+                                results << [studyId: sid, result: 'SKIPPED', error: 'mapping CSV not found']
+                                continue
+                            }
+                        }
+
+                        echo "--- ${sid} (${abv}) ---"
+                        echo "  input:   ${inputUri}"
+                        echo "  mapping: ${mappingUri}"
+
+                        def outcome
+                        try {
+                            def downstream = build(
+                                job: params.SPLIT_ALLCONCEPTS_JOB,
+                                wait: true,
+                                propagate: false,
+                                parameters: [
+                                    string(name: 'STUDY_ID',     value: sid),
+                                    string(name: 'ABBREVIATION', value: abv),
+                                    string(name: 'INPUT',        value: inputUri),
+                                    string(name: 'MAPPING',      value: mappingUri),
+                                    string(name: 'OUTPUT',       value: params.SPLIT_OUTPUT),
+                                    string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
+                                    booleanParam(name: 'SKIP_TESTS', value: true),
+                                    booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                ])
+
+                            outcome = [studyId: sid, result: downstream.result,
+                                       build: downstream.number, url: downstream.absoluteUrl]
+
+                            try {
+                                copyArtifacts(
+                                    projectName: params.SPLIT_ALLCONCEPTS_JOB,
+                                    selector: specific("${downstream.number}"),
+                                    target: "downstream-artifacts/split-allconcepts/${sid}",
+                                    optional: true)
+                            } catch (err) {
+                                echo "Could not copy artifacts for ${sid} (${err.message})"
+                            }
+                        } catch (err) {
+                            outcome = [studyId: sid, result: 'NOT_BUILT',
+                                       build: null, url: null, error: err.message]
+                            echo "${sid}: could not run — ${err.message}"
+                        }
+
+                        results << outcome
+                        echo "${sid}: ${outcome.result}"
+
+                        if (outcome.result != 'SUCCESS' && !params.CONTINUE_ON_STUDY_FAILURE) {
+                            echo 'CONTINUE_ON_STUDY_FAILURE is off — stopping here.'
+                            break
+                        }
+                    }
+
+                    // --- summary --------------------------------------------------
+                    def ok       = results.findAll { it.result == 'SUCCESS' }
+                    def warned   = results.findAll { it.result == 'UNSTABLE' }
+                    def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
+                    def skipped  = studies.size() - results.size()
+
+                    echo ''
+                    echo '================ Split AllConcepts summary ================'
+                    results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
+                    if (skipped > 0) {
+                        echo "  ${skipped} study/studies not attempted"
+                    }
+                    echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
+                         "${failed.size()} failed, ${skipped} not attempted"
+                    echo '==========================================================='
+
+                    if (failed) {
+                        error("Split AllConcepts failed for: ${failed*.studyId.join(', ')}")
+                    }
+                    if (warned) {
+                        unstable("Split AllConcepts completed with warnings: ${warned*.studyId.join(', ')}")
+                    }
+                }
+            }
+        }
     }
 
     post {
@@ -165,4 +311,33 @@ pipeline {
             echo 'Migration pipeline completed. Every migration stage passed its own output validation.'
         }
     }
+}
+
+@NonCPS
+static boolean parseYesNo(String value, String column, String studyId) {
+    if (!value) return false
+    def v = value.trim().toLowerCase()
+    if (v == 'yes') return true
+    if (v == 'no' || v == '') return false
+    throw new IllegalArgumentException("Study ${studyId}: invalid value '${value}' in column '${column}'; expected 'Yes' or 'No'")
+}
+
+@NonCPS
+static List<String> parseCsvLine(String line) {
+    def fields = []
+    def current = new StringBuilder()
+    boolean inQuotes = false
+    for (int i = 0; i < line.length(); i++) {
+        char c = line.charAt(i)
+        if (c == (char)'"') {
+            inQuotes = !inQuotes
+        } else if (c == (char)',' && !inQuotes) {
+            fields << current.toString().trim()
+            current = new StringBuilder()
+        } else {
+            current.append(c)
+        }
+    }
+    fields << current.toString().trim()
+    return fields
 }
