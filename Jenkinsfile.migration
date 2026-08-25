@@ -44,17 +44,17 @@ pipeline {
                description: 'participants-migration --data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every migration job')
-        string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'hpds-etl/participants-migration',
+        string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
-        string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'hpds-etl/split-allconcepts',
+        string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
                description: 'Jenkins job that runs etl-runners/split-allconcepts/Jenkinsfile')
         string(name: 'SPLIT_OUTPUT', defaultValue: './output',
                description: 'Output directory for split allConcepts files (local path or s3:// URI)')
-        string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'hpds-etl/generate-global-all-concepts',
+        string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
         string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
                description: 'Output location for global_AllConcepts.csv (local path or s3:// URI)')
-        string(name: 'VCF_INDEXES_JOB', defaultValue: 'hpds-etl/create-vcf-indexes',
+        string(name: 'VCF_INDEXES_JOB', defaultValue: 'create-vcf-indexes',
                description: 'Jenkins job that runs the create-vcf-indexes runner')
         string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
                description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')

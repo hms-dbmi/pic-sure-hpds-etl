@@ -41,7 +41,7 @@ pipeline {
                description: 'Base S3 path for SSTR input files. Each study\'s input is derived as {INPUT_BASE}/{study_id}_sstr.tsv unless INPUT overrides it.')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every permanent job')
-        string(name: 'SSTR_JOB', defaultValue: 'hpds-etl/sstr-populate-rds-participants',
+        string(name: 'SSTR_JOB', defaultValue: 'sstr-populate-rds-participants',
                description: 'Jenkins job that runs etl-runners/sstr-populate-rds-participants/Jenkinsfile')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
                description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state.')
@@ -49,11 +49,11 @@ pipeline {
                description: 'Keep loading the remaining studies when one fails, then fail the build with a summary. Safe: each study is loaded in its own transaction, scoped to its own study_id.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate every study\'s inputs and stop, without provisioning anything')
-        string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'hpds-etl/generate-global-all-concepts',
+        string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
         string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
                description: 'Output location for global_AllConcepts.csv (local path or s3:// URI)')
-        string(name: 'VCF_INDEXES_JOB', defaultValue: 'hpds-etl/create-vcf-indexes',
+        string(name: 'VCF_INDEXES_JOB', defaultValue: 'create-vcf-indexes',
                description: 'Jenkins job that runs the create-vcf-indexes runner')
         string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
                description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')

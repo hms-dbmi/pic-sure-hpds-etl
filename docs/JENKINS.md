@@ -44,17 +44,21 @@ runs every week.
 
 ## Jenkins Jobs
 
-Four jobs, all pointing at this repository:
+Seven jobs, all pointing at this repository:
 
 | Jenkins job                               | Script path                                              |
 |-------------------------------------------|----------------------------------------------------------|
-| `hpds-etl/migration`                      | `Jenkinsfile`                                            |
-| `hpds-etl/participants-migration`         | `etl-runners/participants-migration/Jenkinsfile`         |
-| `hpds-etl/permanent`                      | `Jenkinsfile.permanent`                                  |
-| `hpds-etl/sstr-populate-rds-participants` | `etl-runners/sstr-populate-rds-participants/Jenkinsfile` |
+| `new-hpds-etl-participant-migration-pipeline` | `Jenkinsfile.migration`                     |
+| `participants-migration`         | `etl-runners/participants-migration/Jenkinsfile`         |
+| `split-allconcepts`              | `etl-runners/split-allconcepts/Jenkinsfile`              |
+| `hpds-etl-pipeline`              | `Jenkinsfile`                                            |
+| `sstr-populate-rds-participants` | `etl-runners/sstr-populate-rds-participants/Jenkinsfile` |
+| `generate-global-all-concepts`   | `etl-runners/generate-global-all-concepts/Jenkinsfile`   |
+| `create-vcf-indexes`             | `etl-runners/create-vcf-indexes/Jenkinsfile`             |
 
-The orchestrators' `PARTICIPANTS_MIGRATION_JOB` and `SSTR_JOB` parameters default to these
-names. If your naming differs, change the parameter rather than the pipeline.
+The orchestrators' job-name parameters (`PARTICIPANTS_MIGRATION_JOB`, `SSTR_JOB`,
+`ALL_CONCEPTS_JOB`, etc.) default to these names. If your naming differs, change the
+parameter rather than the pipeline.
 
 ---
 
@@ -292,19 +296,19 @@ process table and `docker inspect`. `xtrace` is disabled in the bootstrap for th
 
 ### Full Migration
 
-Run `hpds-etl/migration` with `MANAGED_INPUTS` and `DATA_FOLDER`. Set `PREFLIGHT_ONLY` to
+Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_FOLDER`. Set `PREFLIGHT_ONLY` to
 validate the export layout without provisioning anything.
 
 ### Permanent Sweep
 
-Run `hpds-etl/permanent` with `STUDY_ID` blank. Every study marked ready in
+Run `hpds-etl-pipeline` with `STUDY_ID` blank. Every study marked ready in
 [`studies.tsv`](../etl-runners/sstr-populate-rds-participants/studies.tsv) is loaded, one
 ephemeral runner each, sequentially. `CONTINUE_ON_STUDY_FAILURE` (default on) lets one bad study
 fail without stopping the rest; the build ends with a per-study summary table.
 
 ### Single-Study Reload
 
-Run `hpds-etl/permanent`, or the SSTR job directly, with `STUDY_ID` set. The manifest's `ready`
+Run `hpds-etl-pipeline`, or the SSTR job directly, with `STUDY_ID` set. The manifest's `ready`
 flag is ignored in this mode, so an explicit reload is not blocked by a sweep flag.
 
 A reload is safe: purge and load share one transaction, so a failure leaves RDS exactly as it
