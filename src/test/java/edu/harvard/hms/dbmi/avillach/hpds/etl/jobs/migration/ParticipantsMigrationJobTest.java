@@ -74,12 +74,13 @@ class ParticipantsMigrationJobTest {
                 mock(SstrPopulateRdsParticipantsJob.class), mock(JobExecutor.class));
     }
 
-    /** Writes each entry as a file into one shared temp directory and returns its path. */
-    private static String dataFolder(Map<String, String> filesByName) {
+    private static String baseUri(Map<String, String> filesByRelativePath) {
         try {
             Path dir = Files.createTempDirectory("migration-data");
-            for (Map.Entry<String, String> entry : filesByName.entrySet()) {
-                Files.writeString(dir.resolve(entry.getKey()), entry.getValue(), StandardCharsets.UTF_8);
+            for (Map.Entry<String, String> entry : filesByRelativePath.entrySet()) {
+                Path file = dir.resolve(entry.getKey());
+                Files.createDirectories(file.getParent());
+                Files.writeString(file, entry.getValue(), StandardCharsets.UTF_8);
             }
             return dir.toString();
         } catch (IOException e) {
@@ -119,8 +120,7 @@ class ParticipantsMigrationJobTest {
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        // data-folder deliberately has no GLOBAL_allConcepts_merged.csv.
-        String folder = dataFolder(Map.of("placeholder.txt", ""));
+        String folder = baseUri(Map.of("placeholder.txt", ""));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-missing-all-concepts");
@@ -137,9 +137,9 @@ class ParticipantsMigrationJobTest {
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        String folder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
-                "ABV1_PatientMapping.v2.csv", ""));
+        String folder = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
+                "abv1/ABV1_PatientMapping.v2.csv", ""));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-empty-patient-mapping");
@@ -164,9 +164,9 @@ class ParticipantsMigrationJobTest {
                 managedInputsService(managedInputs),
                 participants, mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        String folder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
-                "ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
+        String folder = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
+                "abv1/ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-db-down");

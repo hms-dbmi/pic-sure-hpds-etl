@@ -35,6 +35,16 @@ uri_exists() {
   fi
 }
 
+# Lists file names under an S3 prefix or local directory.
+uri_ls() {
+  local uri="$1"
+  if [[ "$uri" == s3://* ]]; then
+    aws s3 ls "${uri%/}/" --region "$REGION" 2>/dev/null | awk '{print $NF}'
+  else
+    ls -1 "$uri" 2>/dev/null
+  fi
+}
+
 read_uri() {
   local uri="$1"
   if [[ "$uri" == s3://* ]]; then
@@ -97,13 +107,15 @@ READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
 check "at least one study is marked ready" test "$READY_COUNT" -gt 0
 note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
 
-# --- shared consents.csv -------------------------------------------------
-# Required unconditionally: execute() reads consents.csv before looking at any study, so a missing
+# --- shared GLOBAL_allConcepts_merged.csv --------------------------------
+# Required unconditionally: execute() reads it before looking at any study, so a missing
 # one aborts the entire run rather than just the studies that would have used it.
-CONSENTS="$DATA_FOLDER/consents.csv"
-check "shared consents.csv exists (read before any study is processed)" uri_exists "$CONSENTS"
+ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
+check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed)" uri_exists "$ALL_CONCEPTS"
 
 # --- per-study files -----------------------------------------------------
+# Layout: {base}/{abv_lowercase}/{ABV_UPPERCASE}_PatientMapping.v2.csv
+#         {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt (optional)
 echo ""
 echo "  Per-study inputs:"
 SSTR_STUDIES=0
@@ -112,12 +124,18 @@ DIRECT_STUDIES=0
 while IFS=$'\t' read -r abv sid state; do
   [[ "$state" != "ready" ]] && continue
 
-  sstr="$DATA_FOLDER/${sid}_sstr.tsv"
-  mapping="$DATA_FOLDER/$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')_PatientMapping.v2.csv"
+  abv_lower=$(printf '%s' "$abv" | tr '[:upper:]' '[:lower:]')
+  abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
+  mapping="$DATA_FOLDER/${abv_lower}/${abv_upper}_PatientMapping.v2.csv"
 
-  if uri_exists "$sstr"; then
+  # Find SSTR file by listing the rawData directory for a file matching SSTR_*{studyId}*.txt
+  raw_data_dir="$DATA_FOLDER/${abv_lower}/rawData"
+  sstr_file=$(uri_ls "$raw_data_dir" 2>/dev/null | grep -F "$sid" | grep "^SSTR_.*\.txt$" | head -1 || true)
+
+  if [[ -n "$sstr_file" ]]; then
     SSTR_STUDIES=$((SSTR_STUDIES + 1))
     route="sstr"
+    note "$sid ($abv): found SSTR file '$sstr_file'"
   else
     DIRECT_STUDIES=$((DIRECT_STUDIES + 1))
     route="direct"
@@ -130,7 +148,7 @@ done <<<"$STUDIES"
 echo ""
 note "$SSTR_STUDIES study/studies will load via the sstr sub-job, $DIRECT_STUDIES via direct population"
 if (( DIRECT_STUDIES > 0 )); then
-  note "the $DIRECT_STUDIES direct study/studies also need a consents.csv row per legacy hpds id, "
+  note "the $DIRECT_STUDIES direct study/studies also need a GLOBAL_allConcepts_merged.csv row per legacy hpds id, "
   note "formatted {studyid}.c{code} -- ids with no row are skipped with a log warning only"
 fi
 

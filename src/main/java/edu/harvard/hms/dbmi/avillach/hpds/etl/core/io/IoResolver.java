@@ -10,8 +10,10 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
@@ -19,6 +21,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.List;
+import java.util.stream.Stream;
 
 /**
  * A single door for job I/O that hides whether a location is on S3 or the local
@@ -155,6 +160,60 @@ public class IoResolver {
     @FunctionalInterface
     public interface IoWriter {
         void writeTo(OutputStream out) throws IOException;
+    }
+
+    /**
+     * Lists file names (not full paths) directly under the given directory URI.
+     * For S3, lists object keys at the given prefix level (single-level, not recursive).
+     * Returns an empty list if the directory does not exist.
+     */
+    public List<String> listFileNames(String directoryUri) {
+        if (isS3(directoryUri)) {
+            String prefix = directoryUri.endsWith("/") ? directoryUri : directoryUri + "/";
+            S3Uri s3Uri = S3Uri.parse(prefix);
+            try {
+                var request = ListObjectsV2Request.builder()
+                        .bucket(s3Uri.bucket()).prefix(s3Uri.key()).delimiter("/").build();
+                List<String> names = new java.util.ArrayList<>();
+                var paginator = s3.listObjectsV2Paginator(request);
+                for (var page : paginator) {
+                    page.contents().stream()
+                            .map(S3Object::key)
+                            .map(k -> k.substring(s3Uri.key().length()))
+                            .filter(name -> !name.isEmpty())
+                            .forEach(names::add);
+                }
+                return List.copyOf(names);
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to list S3 prefix: " + directoryUri, e);
+            }
+        }
+        Path dir = toLocalPath(directoryUri);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (Stream<Path> stream = Files.list(dir)) {
+            return stream.filter(Files::isRegularFile)
+                    .map(p -> p.getFileName().toString())
+                    .toList();
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to list directory: " + dir, e);
+        }
+    }
+
+    /** Downloads a remote (or local) file to a local path, creating parent directories as needed. */
+    public void copyToLocal(String sourceUri, Path target) {
+        try {
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            try (InputStream in = openInput(sourceUri)) {
+                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            log.info("Staged {} -> {}", sourceUri, target);
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to stage " + sourceUri + " to " + target, e);
+        }
     }
 
     private Path toLocalPath(String uri) {

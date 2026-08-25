@@ -79,12 +79,18 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         return path;
     }
 
-    /** Writes each entry as a file into one shared temp directory and returns its path. */
-    private static String dataFolder(Map<String, String> filesByName) {
+    /**
+     * Creates a base URI directory with the subfolder convention:
+     * {@code general/completed/} for allConcepts, {@code {abvLower}/} for patient mapping,
+     * {@code {abvLower}/rawData/} for SSTR files. Keys are relative paths from the base.
+     */
+    private static String baseUri(Map<String, String> filesByRelativePath) {
         try {
             Path dir = Files.createTempDirectory("migration-data");
-            for (Map.Entry<String, String> entry : filesByName.entrySet()) {
-                Files.writeString(dir.resolve(entry.getKey()), entry.getValue(), StandardCharsets.UTF_8);
+            for (Map.Entry<String, String> entry : filesByRelativePath.entrySet()) {
+                Path file = dir.resolve(entry.getKey());
+                Files.createDirectories(file.getParent());
+                Files.writeString(file, entry.getValue(), StandardCharsets.UTF_8);
             }
             return dir.toString();
         } catch (IOException e) {
@@ -119,13 +125,12 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     @Test
     void open_access_study_with_no_consent_suffix_migrates_as_public() throws IOException {
         managedInputs("OPENSTUDY,open-study-01,Yes");
-        String dataFolder = dataFolder(Map.of(
-                // No ".c<code>" suffix in the _consents value: this is what an open-access study looks like.
-                "GLOBAL_allConcepts_merged.csv", "\"3001\",\"µ_consentsµ\",\"\",\"open-study-01\",\"0\"\n",
-                "OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"3001\",\"µ_consentsµ\",\"\",\"open-study-01\",\"0\"\n",
+                "openstudy/OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-open-access");
+                Map.of("data-folder", base), "it-open-access");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics())
@@ -149,12 +154,12 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     @Test
     void a_malformed_consent_value_is_reported_rather_than_read_as_public() throws IOException {
         managedInputs("BADSTUDY,bad-study-01,Yes");
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"4001\",\"µ_consentsµ\",\"\",\"bad-study-01.c\",\"0\"\n",
-                "BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"4001\",\"µ_consentsµ\",\"\",\"bad-study-01.c\",\"0\"\n",
+                "badstudy/BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-bad-consent");
+                Map.of("data-folder", base), "it-bad-consent");
 
         // The study still succeeds; the warnings carry the problem, so they must be in the report.
         assertThat(result.getMetrics())
@@ -171,16 +176,16 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     @Test
     void sstr_driven_study_populates_rds_and_writes_mapping_file() throws IOException {
         managedInputs("GRU,phs001412,Yes");
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "",
-                "phs001412_sstr.tsv", """
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "",
+                "gru/rawData/SSTR_dbGaP_phs001412.txt", """
                 SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
                 SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
                 """,
-                "GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
+                "gru/GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-sstr");
+                Map.of("data-folder", base), "it-sstr");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics()).containsEntry("succeededStudies", 1L).containsEntry("failedStudies", 0L);
@@ -201,12 +206,12 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         String allConcepts = "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n"
                 + "\"2002\",\"µ_studies_consentsµother-study-01µ\",\"\",\"TRUE\",\"0\"\n"
                 + "\"2002\",\"µ_studies_consentsµother-study-01µGRU-IRBµ\",\"\",\"TRUE\",\"0\"\n";
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", allConcepts,
-                "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", allConcepts,
+                "other/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-direct");
+                Map.of("data-folder", base), "it-direct");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(participants.count()).isEqualTo(1);
@@ -224,12 +229,12 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     @Test
     void open_access_1000_genomes_also_populates_samples() {
         managedInputs("open_access-1000Genomes,tg-study-01,Yes");
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"3003\",\"µ_consentsµ\",\"\",\"tg-study-01.c1\",\"0\"\n",
-                "OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"3003\",\"µ_consentsµ\",\"\",\"tg-study-01.c1\",\"0\"\n",
+                "open_access-1000genomes/OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-1000genomes");
+                Map.of("data-folder", base), "it-1000genomes");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(countWhere("samples", "source_sample_id = ? AND sample_source = ?",
@@ -239,13 +244,13 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     @Test
     void unmatched_patient_mappings_are_filtered_and_reported() throws IOException {
         managedInputs("MIXED,mixed-study-01,Yes");
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"mixed-study-01.c1\",\"0\"\n",
-                "MIXED_PatientMapping.v2.csv",
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"mixed-study-01.c1\",\"0\"\n",
+                "mixed/MIXED_PatientMapping.v2.csv",
                 "SUBJ1,MIXED,2002\n" + "SUBJ2,MIXED,9999\n" + "SUBJ3,MIXED,8888\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-unmatched");
+                Map.of("data-folder", base), "it-unmatched");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(result.getMetrics())
@@ -264,16 +269,15 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     @Test
     void study_not_marked_ready_is_skipped_entirely() {
-        // NOTSET has no data files at all -- if the job touched it, it would fail.
         managedInputs(
                 "OTHER,other-study-01,Yes",
                 "NOTSET,not-ready-study,No");
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
-                "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
+                "other/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-not-ready");
+                Map.of("data-folder", base), "it-not-ready");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics()).containsEntry("readyStudies", 1L);
@@ -281,17 +285,15 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     @Test
     void isolates_a_failing_study_so_others_still_succeed() {
-        // MISSING has no patient mapping file on disk -- that study should fail, but
-        // OTHER (also ready, in the same run) must still be committed.
         managedInputs(
                 "OTHER,other-study-01,Yes",
                 "MISSING,missing-study-01,Yes");
-        String dataFolder = dataFolder(Map.of(
-                "GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
-                "OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
+                "other/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", dataFolder), "it-isolation");
+                Map.of("data-folder", base), "it-isolation");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getMetrics()).containsEntry("succeededStudies", 1L).containsEntry("failedStudies", 1L);
