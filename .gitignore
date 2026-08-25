@@ -22,3 +22,35 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Maven build output
+target/
+
+# Job validation/summary reports written at runtime
+/reports/
+# Reports pulled back from an ephemeral runner by `make fetch-reports`
+etl-runners/*/reports/
+
+# Terraform working state. .terraform.lock.hcl IS committed (it pins the provider version
+# for both linux_amd64 -- the Jenkins agent -- and darwin_arm64, for local runs).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# Local overrides would silently change what an ephemeral runner does.
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# IDE
+.idea/
+*.iml
+
+# Local environment overrides
+.env
+application-local.yml
+application-local.properties

@@ -1,0 +1,69 @@
+spring:
+  application:
+    name: hpds-etl
+  main:
+    # Jobs are CLI-driven, not a long-running server. Keep the context lean.
+    web-application-type: none
+    banner-mode: "off"
+  datasource:
+    url: ${RDS_URL:jdbc:postgresql://unset:5432/unset}
+    username: ${RDS_USERNAME:}
+    password: ${RDS_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:8}
+      # Do NOT fail context startup when the DB is unreachable. Jobs that don't
+      # touch the DB must still be able to run; DB-backed jobs surface the failure
+      # as an INFRASTRUCTURE_ERROR exit code when they actually connect.
+      initialization-fail-timeout: -1
+  sql:
+    init:
+      # Schema is owned/managed externally (Flyway/DBA). Never auto-run against RDS.
+      mode: never
+
+etl:
+  # Jobs are opt-in. Each job class carries
+  # @ConditionalOnProperty("etl.jobs.<job-name>.enabled", havingValue = "true"), so a job whose
+  # flag is absent or false is never instantiated and never reaches JobRegistry; --job=<name>
+  # then exits 5 (CONFIG_ERROR). This file is the single list of what may run in an environment.
+  #
+  # Flipping a flag to false is also how a job is retired: disable it everywhere, confirm
+  # nothing calls it, then delete the class.
+  #
+  # <job-name> is the job's name() value, i.e. what --job= takes.
+  jobs:
+    # Demonstration job for copy-me purposes only; never enable outside a local sandbox.
+    template:
+      enabled: ${ETL_JOB_TEMPLATE_ENABLED:false}
+
+    # PERMANENT ingestion.
+    sstr-populate-rds-participants:
+      enabled: ${ETL_JOB_SSTR_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
+    single-consent-data-populate-rds-participants:
+      enabled: ${ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
+
+    # TEMPORARY migration. Set this to false once the migration has run in every environment,
+    # then delete the job. NOTE: participants-migration also requires
+    # sstr-populate-rds-participants to be enabled -- it injects that job to load the
+    # sstr-backed studies, and its condition lists both flags.
+    participants-migration:
+      enabled: ${ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED:true}
+
+  managed-inputs:
+    uri: ${managed-inputs:${MANAGED_INPUTS_URI:}}
+  reports:
+    # Where per-run validation/summary JSON reports are written. Jenkins archives this dir.
+    dir: ${ETL_REPORTS_DIR:./reports}
+  # In-process pipelines for local/CI use (--pipeline=<name>). In production prefer
+  # Jenkins stages so you get per-stage retry/notification/scheduling for free.
+  pipelines:
+    migrate-all:
+      - participants-migration
+  aws:
+    region: ${AWS_REGION:us-east-1}
+    s3:
+      # Blank in prod (uses real S3). Overridden to a LocalStack URL in tests.
+      endpoint-override: ${AWS_S3_ENDPOINT:}
+
+logging:
+  level:
+    edu.harvard.hms.dbmi.avillach.hpds: ${LOG_LEVEL:INFO}

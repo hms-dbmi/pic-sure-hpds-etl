@@ -1,0 +1,308 @@
+// =============================================================================
+// PERMANENT -- sstr-populate-rds-participants (JobType.PERMANENT)
+//
+// Loads one dbGaP study's SSTR subject/sample mapping TSV into RDS on a Terraform-provisioned
+// ephemeral EC2 runner that terminates itself when the job exits. Triggered per study by the
+// permanent orchestrator's "Load SSTR participants" stage (/Jenkinsfile.permanent); also runnable
+// standalone to reload a single study.
+//
+// What the job does
+//   - one participants row per distinct dbgap_subject_id, reusing the existing HPDS uuid if the
+//     subject was already loaded, source = "DBGap"
+//   - one consents row per participant, study_id = --study-id, consent/abbreviation from that
+//     subject's first row
+//   - one samples row per input row with a non-blank dbgap_sample_id
+//
+//   Every run first purges the study's existing consents rows so its consent groups are
+//   repopulated from this file rather than merged with stale data. Purge and load share one
+//   transaction: a single bad row rolls the whole study back, leaving RDS untouched. A re-run is
+//   therefore safe and idempotent, which makes a truncated input file the real risk --
+//   EXPECTED_MIN_PARTICIPANTS exists to catch it.
+//
+// Inputs
+//   --study-id     phs###### (params.STUDY_ID)
+//   --input        the SSTR TSV, local or s3:// (params.INPUT)
+//   --batch-size   rows per batch insert (params.BATCH_SIZE)
+//   RDS credentials fetched on the runner from Secrets Manager by instance role; they never pass
+//                   through Jenkins
+//
+// Outputs
+//   RDS rows in participants / consents / samples for this study
+//   sstr-populate-rds-participants-<runId>.json with rowsRead, distinctParticipants,
+//   participantsInserted, consentsWritten, samplesInserted, and countsByConsentGroup.
+//   Archived on this build and left in S3 under the runner's report prefix.
+//
+// Exit codes (see ExitCode.java)
+//   0 success | 2 validation | 3 data, study rolled back | 4 infrastructure, retried once |
+//   5 config | 1 unknown | 124 monitor timeout
+//
+// Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, and the
+// jenkins-s3-role instance profile.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
+        // Concurrency is deliberately ALLOWED so the orchestrator can load several studies at
+        // once. Study-scoped work is isolated (the purge is scoped to one study_id; resource
+        // names and the Terraform state key are per-run), and the cross-study hazard -- two
+        // studies racing for a shared dbgap_subject_id's uuid, since all of them use
+        // source = "DBGap" -- is handled by ParticipantRepository.resolveOrCreate.
+        timeout(time: 4, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'STUDY_ID', defaultValue: '',
+               description: 'REQUIRED. --study-id, format phs###### (exactly 6 digits), e.g. phs001412')
+        string(name: 'INPUT', defaultValue: '',
+               description: 'REQUIRED. --input: the dbGaP SSTR subject/sample mapping TSV (local path or s3:// URI)')
+        string(name: 'BATCH_SIZE', defaultValue: '1000',
+               description: '--batch-size: rows per batch insert')
+        string(name: 'EXPECTED_consent_codeS', defaultValue: '',
+               description: 'Optional. Comma-separated CONSENT values this study must produce. When set, a mismatch fails the build — this is what catches a file swapped for the wrong study.')
+        string(name: 'EXPECTED_MIN_PARTICIPANTS', defaultValue: '',
+               description: 'Optional. Minimum distinct participants. Catches a truncated or partially-staged input file.')
+        string(name: 'RUN_ID', defaultValue: '',
+               description: 'Correlation id. Blank derives one from the study id and BUILD_NUMBER.')
+        string(name: 'INSTANCE_TYPE', defaultValue: 'm5.large',
+               description: 'Runner instance type. One record is held per input row, so size against this study, not the average.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
+               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false,
+               description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
+        booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
+               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: purge + load is one transaction and upserts are idempotent.')
+        booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
+               description: 'Validate the study id and input header, then stop without provisioning anything')
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        RUNNER_DIR = 'etl-runners/sstr-populate-rds-participants'
+
+        // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
+        // line (and so never in `ps` output or the console log's shell echo).
+        TF_VAR_study_id      = "${params.STUDY_ID}"
+        TF_VAR_input_uri     = "${params.INPUT}"
+        TF_VAR_batch_size    = "${params.BATCH_SIZE}"
+        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+
+        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS}"
+        EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS}"
+
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                script {
+                    if (!params.STUDY_ID?.trim()) {
+                        error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile.permanent) to sweep every ready study from studies.tsv.')
+                    }
+                    if (!params.INPUT?.trim()) {
+                        error('INPUT is required: the s3:// URI or local path of this study\'s SSTR TSV.')
+                    }
+                    if (!(params.STUDY_ID ==~ /^phs\d{6}$/)) {
+                        error("STUDY_ID '${params.STUDY_ID}' must match phs###### (exactly 6 digits) — the same rule the job enforces, failing with exit 2 if broken.")
+                    }
+
+                    // The run id becomes a filename and an S3 key, and carries the study so a
+                    // sweep's reports are distinguishable at a glance.
+                    def base = (params.RUN_ID?.trim())
+                        ?: "${params.STUDY_ID}-${env.BUILD_NUMBER}"
+                    env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
+
+                    // Unique per study AND per build: a sweep may run several of these at once.
+                    env.TF_VAR_name_suffix = "${params.STUDY_ID}-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
+
+                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_image_tar = env.IMAGE_TAR
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.STUDY_ID}"
+                    echo "study:  ${params.STUDY_ID}"
+                    echo "input:  ${params.INPUT}"
+                    echo "run id: ${env.BASE_RUN_ID}"
+                }
+                sh '''
+                    set -e
+                    echo "--- tool versions ---"
+                    terraform version | head -1
+                    aws --version
+                    docker --version
+                    jq --version
+                    java -version 2>&1 | head -1
+                '''
+            }
+        }
+
+        stage('Build JAR') {
+            steps {
+                // `package` runs the unit suites; a failing test must stop the run before any
+                // infrastructure exists. The Testcontainers *IT suites bind on `verify` and
+                // are gated by the orchestrator (/Jenkinsfile.permanent) instead, so a
+                // single-study reload does not pay for Docker-backed Postgres and LocalStack.
+                sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Pre-flight') {
+            steps {
+                script {
+                    // Called directly, not through make: make collapses every failure to 2 and
+                    // would lose the validator's "10 = warnings" signal.
+                    env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings in the input file')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
+                    }
+                }
+            }
+        }
+
+        stage('Package runner image') {
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+            }
+        }
+
+        stage('Provision, run and monitor') {
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
+                    int rc = 1
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                        // A retry needs its own run id: the previous attempt's status.json
+                        // sentinel is still in S3, and the monitor would read it instantly.
+                        env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
+                                                              : "${env.BASE_RUN_ID}-r${attempt}"
+                        env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                        env.TF_VAR_name_suffix = "${params.STUDY_ID}-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
+                        env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/sstr-populate-rds-participants/${env.EFFECTIVE_RUN_ID}.tfstate"
+
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+
+                        sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
+                        env.TF_INITIALISED = 'true'
+
+                        rc = sh(returnStatus: true, script: """
+                            cd ${RUNNER_DIR}
+                            ../common/monitor-runner.sh \
+                              "\$(terraform -chdir=terraform output -raw instance_id)" \
+                              "\$(terraform -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(terraform -chdir=terraform output -raw log_s3_uri)"
+                        """)
+
+                        env.JOB_EXIT_CODE = "${rc}"
+                        if (rc != 4 || attempt == maxAttempts) {
+                            break
+                        }
+
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        sh(returnStatus: true,
+                           script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                        sleep time: 60, unit: 'SECONDS'
+                    }
+
+                    if (rc != 0) {
+                        String meaning = [
+                            1  : 'UNKNOWN (unclassified failure)',
+                            2  : 'VALIDATION_FAILED (bad --study-id/--batch-size, or empty input)',
+                            3  : 'DATA_ERROR (blank dbgap_subject_id or CONSENT, or a missing column — the study was rolled back, RDS is unchanged)',
+                            4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
+                            5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
+                            124: 'TIMEOUT (runner did not finish in time)',
+                        ].get(rc, "unmapped code ${rc}")
+                        env.FAILURE_MEANING = meaning
+                        echo "Job exited ${rc}: ${meaning}"
+                    }
+                }
+            }
+        }
+
+        stage('Fetch reports') {
+            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+            }
+        }
+
+        stage('Validate') {
+            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
+            steps {
+                script {
+                    int rc = sh(returnStatus: true, script:
+                        "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
+
+                    // The job's exit code and the report assertions are independent gates: a
+                    // load that exits 0 but wrote fewer consent rows than it found subjects
+                    // is still a failed load.
+                    if (env.JOB_EXIT_CODE != '0') {
+                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                    }
+                    if (rc == 10) {
+                        unstable('Validation passed with warnings')
+                    } else if (rc != 0) {
+                        error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
+                    }
+                    echo "Study ${params.STUDY_ID} validated: consent rows match distinct participants and every group is accounted for."
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "${RUNNER_DIR}/reports/**",
+                             allowEmptyArchive: true, fingerprint: true
+            script {
+                if (env.TF_INITIALISED == 'true') {
+                    // The instance self-terminates, so this only reclaims the Terraform state
+                    // and the instance profile -- never fatal.
+                    int rc = sh(returnStatus: true,
+                                script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                    if (rc != 0) {
+                        echo "WARNING: terraform destroy returned ${rc}. The runner terminates itself, " +
+                             "but check for a leftover instance profile: " +
+                             "sstr-populate-rds-participants-etl-instance-profile-${env.TF_VAR_name_suffix}"
+                    }
+                }
+                if (env.IMAGE_TAR) {
+                    sh(returnStatus: true, script: """
+                        aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
+                          ${RUNNER_DIR}/terraform/sstr-populate-rds-participants.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          --region ${AWS_REGION} || true
+                    """)
+                }
+            }
+        }
+        failure {
+            echo "sstr-populate-rds-participants FAILED for ${params.STUDY_ID} at stage '${env.STAGE_NAME}'. " +
+                 "${env.FAILURE_MEANING ?: ''} On exit 3 the study was rolled back and RDS is unchanged — " +
+                 "fix the file and re-run. Reports are archived on this build; the full runner log is in S3 " +
+                 "under etl-runner/logs/sstr-populate-rds-participants-${env.EFFECTIVE_RUN_ID}.log"
+        }
+        unstable {
+            echo "sstr-populate-rds-participants completed WITH WARNINGS for ${params.STUDY_ID}. " +
+                 "Check whether 0 new participants / 0 samples is expected for this study."
+        }
+        success {
+            echo "Loaded ${params.STUDY_ID} (run ${env.EFFECTIVE_RUN_ID})."
+        }
+    }
+}
