@@ -202,93 +202,91 @@ pipeline {
                         terraform -chdir=terraform output -raw reports_s3_uri 2>/dev/null || echo ''
                     """).trim()
 
-                    def results = []
+                    def results = java.util.Collections.synchronizedList([])
+                    def branches = [:]
 
                     for (study in studies) {
-                        def sid = study.studyId
-                        def abv = study.abv
-                        def abvLower = abv.toLowerCase()
+                        def s = study
+                        branches[s.studyId] = {
+                            def sid = s.studyId
+                            def abv = s.abv
+                            def abvLower = abv.toLowerCase()
 
-                        def inputUri = "s3://avillach-73-bdcatalyst-etl/${abvLower}/completed/${sid}/${sid}_allConcepts_new_search_with_data_analyzer.csv"
+                            def inputUri = "s3://avillach-73-bdcatalyst-etl/${abvLower}/completed/${sid}/${sid}_allConcepts_new_search_with_data_analyzer.csv"
 
-                        // Mapping CSV: from participants-migration reports in S3
-                        def mappingUri
-                        if (reportPrefix) {
-                            mappingUri = "${reportPrefix}${sid}_hpds_id_mapping.csv"
-                        } else {
-                            // Fallback: check the archived artifacts directory
-                            def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
-                            if (fileExists(localMapping)) {
-                                mappingUri = localMapping
+                            def mappingUri
+                            if (reportPrefix) {
+                                mappingUri = "${reportPrefix}${sid}_hpds_id_mapping.csv"
                             } else {
-                                echo "${sid}: cannot locate mapping CSV; skipping"
-                                results << [studyId: sid, result: 'SKIPPED', error: 'mapping CSV not found']
-                                continue
+                                def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
+                                if (fileExists(localMapping)) {
+                                    mappingUri = localMapping
+                                } else {
+                                    echo "${sid}: cannot locate mapping CSV; skipping"
+                                    results << [studyId: sid, result: 'SKIPPED', error: 'mapping CSV not found']
+                                    return
+                                }
                             }
-                        }
 
-                        echo "--- ${sid} (${abv}) ---"
-                        echo "  input:   ${inputUri}"
-                        echo "  mapping: ${mappingUri}"
+                            echo "--- ${sid} (${abv}) ---"
+                            echo "  input:   ${inputUri}"
+                            echo "  mapping: ${mappingUri}"
 
-                        def outcome
-                        try {
-                            def downstream = build(
-                                job: params.SPLIT_ALLCONCEPTS_JOB,
-                                wait: true,
-                                propagate: false,
-                                parameters: [
-                                    string(name: 'STUDY_ID',     value: sid),
-                                    string(name: 'ABBREVIATION', value: abv),
-                                    string(name: 'INPUT',        value: inputUri),
-                                    string(name: 'MAPPING',      value: mappingUri),
-                                    string(name: 'OUTPUT',       value: params.SPLIT_OUTPUT),
-                                    string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
-                                    booleanParam(name: 'SKIP_TESTS', value: true),
-                                    booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
-                                ])
-
-                            outcome = [studyId: sid, result: downstream.result,
-                                       build: downstream.number, url: downstream.absoluteUrl]
-
+                            def outcome
                             try {
-                                copyArtifacts(
-                                    projectName: params.SPLIT_ALLCONCEPTS_JOB,
-                                    selector: specific("${downstream.number}"),
-                                    target: "downstream-artifacts/split-allconcepts/${sid}",
-                                    optional: true)
+                                def downstream = build(
+                                    job: params.SPLIT_ALLCONCEPTS_JOB,
+                                    wait: true,
+                                    propagate: false,
+                                    parameters: [
+                                        string(name: 'STUDY_ID',     value: sid),
+                                        string(name: 'ABBREVIATION', value: abv),
+                                        string(name: 'INPUT',        value: inputUri),
+                                        string(name: 'MAPPING',      value: mappingUri),
+                                        string(name: 'OUTPUT',       value: params.SPLIT_OUTPUT),
+                                        string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
+                                        booleanParam(name: 'SKIP_TESTS', value: true),
+                                        booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                    ])
+
+                                outcome = [studyId: sid, result: downstream.result,
+                                           build: downstream.number, url: downstream.absoluteUrl]
+
+                                try {
+                                    copyArtifacts(
+                                        projectName: params.SPLIT_ALLCONCEPTS_JOB,
+                                        selector: specific("${downstream.number}"),
+                                        target: "downstream-artifacts/split-allconcepts/${sid}",
+                                        optional: true)
+                                } catch (err) {
+                                    echo "Could not copy artifacts for ${sid} (${err.message})"
+                                }
                             } catch (err) {
-                                echo "Could not copy artifacts for ${sid} (${err.message})"
+                                outcome = [studyId: sid, result: 'NOT_BUILT',
+                                           build: null, url: null, error: err.message]
+                                echo "${sid}: could not run — ${err.message}"
                             }
-                        } catch (err) {
-                            outcome = [studyId: sid, result: 'NOT_BUILT',
-                                       build: null, url: null, error: err.message]
-                            echo "${sid}: could not run — ${err.message}"
-                        }
 
-                        results << outcome
-                        echo "${sid}: ${outcome.result}"
-
-                        if (outcome.result != 'SUCCESS' && !params.CONTINUE_ON_STUDY_FAILURE) {
-                            echo 'CONTINUE_ON_STUDY_FAILURE is off — stopping here.'
-                            break
+                            results << outcome
+                            echo "${sid}: ${outcome.result}"
                         }
                     }
+
+                    if (!params.CONTINUE_ON_STUDY_FAILURE) {
+                        branches.failFast = true
+                    }
+                    parallel branches
 
                     // --- summary --------------------------------------------------
                     def ok       = results.findAll { it.result == 'SUCCESS' }
                     def warned   = results.findAll { it.result == 'UNSTABLE' }
                     def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
-                    def skipped  = studies.size() - results.size()
 
                     echo ''
                     echo '================ Split AllConcepts summary ================'
                     results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
-                    if (skipped > 0) {
-                        echo "  ${skipped} study/studies not attempted"
-                    }
                     echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
-                         "${failed.size()} failed, ${skipped} not attempted"
+                         "${failed.size()} failed"
                     echo '==========================================================='
 
                     if (failed) {

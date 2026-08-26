@@ -211,67 +211,67 @@ pipeline {
             when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
             steps {
                 script {
-                    def results = []
+                    def results = java.util.Collections.synchronizedList([])
+                    def branches = [:]
 
                     for (study in UNPROCESSED_STUDIES) {
-                        echo "--- ${study.studyId} ---"
-                        def outcome
-                        try {
-                            def downstream = build(
-                                job: params.SSTR_JOB,
-                                wait: true,
-                                propagate: false,
-                                parameters: [
-                                    string(name: 'STUDY_ID', value: study.studyId),
-                                    string(name: 'INPUT',    value: study.input),
-                                    string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
-                                    string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${study.studyId}"),
-                                    booleanParam(name: 'SKIP_TESTS', value: true),
-                                    booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
-                                ])
-
-                            outcome = [studyId: study.studyId, result: downstream.result,
-                                       build: downstream.number, url: downstream.absoluteUrl]
-
+                        def s = study
+                        branches[s.studyId] = {
+                            echo "--- ${s.studyId} ---"
+                            def outcome
                             try {
-                                copyArtifacts(
-                                    projectName: params.SSTR_JOB,
-                                    selector: specific("${downstream.number}"),
-                                    target: "downstream-artifacts/sstr/${study.studyId}",
-                                    optional: true)
+                                def downstream = build(
+                                    job: params.SSTR_JOB,
+                                    wait: true,
+                                    propagate: false,
+                                    parameters: [
+                                        string(name: 'STUDY_ID', value: s.studyId),
+                                        string(name: 'INPUT',    value: s.input),
+                                        string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
+                                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
+                                        booleanParam(name: 'SKIP_TESTS', value: true),
+                                        booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                    ])
+
+                                outcome = [studyId: s.studyId, result: downstream.result,
+                                           build: downstream.number, url: downstream.absoluteUrl]
+
+                                try {
+                                    copyArtifacts(
+                                        projectName: params.SSTR_JOB,
+                                        selector: specific("${downstream.number}"),
+                                        target: "downstream-artifacts/sstr/${s.studyId}",
+                                        optional: true)
+                                } catch (err) {
+                                    echo "Could not copy artifacts for ${s.studyId} (${err.message}); " +
+                                         "they remain on ${params.SSTR_JOB} #${downstream.number}."
+                                }
                             } catch (err) {
-                                echo "Could not copy artifacts for ${study.studyId} (${err.message}); " +
-                                     "they remain on ${params.SSTR_JOB} #${downstream.number}."
+                                outcome = [studyId: s.studyId, result: 'NOT_BUILT',
+                                           build: null, url: null, error: err.message]
+                                echo "${s.studyId}: could not run — ${err.message}"
                             }
-                        } catch (err) {
-                            outcome = [studyId: study.studyId, result: 'NOT_BUILT',
-                                       build: null, url: null, error: err.message]
-                            echo "${study.studyId}: could not run — ${err.message}"
-                        }
 
-                        results << outcome
-                        echo "${study.studyId}: ${outcome.result}"
-
-                        if (outcome.result != 'SUCCESS' && !params.CONTINUE_ON_STUDY_FAILURE) {
-                            echo 'CONTINUE_ON_STUDY_FAILURE is off — stopping the sweep here.'
-                            break
+                            results << outcome
+                            echo "${s.studyId}: ${outcome.result}"
                         }
                     }
+
+                    if (!params.CONTINUE_ON_STUDY_FAILURE) {
+                        branches.failFast = true
+                    }
+                    parallel branches
 
                     // --- summary --------------------------------------------------
                     def ok       = results.findAll { it.result == 'SUCCESS' }
                     def warned   = results.findAll { it.result == 'UNSTABLE' }
                     def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
-                    def skipped  = UNPROCESSED_STUDIES.size() - results.size()
 
                     echo ''
                     echo '================ SSTR load summary ================'
                     results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
-                    if (skipped > 0) {
-                        echo "  ${skipped} study/studies not attempted"
-                    }
                     echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
-                         "${failed.size()} failed, ${skipped} not attempted"
+                         "${failed.size()} failed"
                     echo '=================================================='
 
                     if (failed) {
