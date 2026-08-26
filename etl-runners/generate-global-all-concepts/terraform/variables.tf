@@ -60,18 +60,6 @@ variable "manage_secret_access" {
   description = "Let this run attach a GetSecretValue policy to the instance role"
 }
 
-variable "rds_host" {
-  type        = string
-  default     = ""
-  description = "RDS endpoint hostname, used when the secret contains only username/password"
-}
-
-variable "rds_dbname" {
-  type        = string
-  default     = ""
-  description = "RDS database name, used when the secret contains only username/password"
-}
-
 variable "tags" {
   type        = map(string)
   default     = {}
