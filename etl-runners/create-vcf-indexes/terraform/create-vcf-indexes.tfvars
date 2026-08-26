@@ -12,9 +12,10 @@ subnet_id        = "subnet-00a35d901a151ab01"
 instance_type    = "m5.large"
 root_volume_size = 30
 
-rds_secret_id = "hpds/rds/etl-credentials"
+rds_secret_id = "arn:aws:secretsmanager:us-east-1:900561893673:secret:rds!db-8086eb77-cd6d-48bc-9298-4380892798ca-9cjLb2"
 
-manage_secret_access = false
+manage_secret_access = true
+rds_secret_arn       = "arn:aws:secretsmanager:us-east-1:900561893673:secret:rds!db-8086eb77-cd6d-48bc-9298-4380892798ca-9cjLb2"
 
 tags = {
   Project     = "PIC-SURE HPDS ETL"

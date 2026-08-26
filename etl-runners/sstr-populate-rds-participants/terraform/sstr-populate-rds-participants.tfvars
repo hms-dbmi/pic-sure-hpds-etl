@@ -24,11 +24,11 @@ root_volume_size = 30
 
 # Secrets Manager id (not the value). Expected JSON: {"url"|"host"/"port"/"dbname",
 # "username", "password"} -- an RDS-managed secret works unchanged.
-rds_secret_id = "hpds/rds/etl-credentials"
+rds_secret_id = "arn:aws:secretsmanager:us-east-1:900561893673:secret:rds!db-8086eb77-cd6d-48bc-9298-4380892798ca-9cjLb2"
 
 # Leave false: jenkins-s3-role is shared with the BDC pipelines and is managed centrally.
-manage_secret_access = false
-# rds_secret_arn     = "arn:aws:secretsmanager:us-east-1:<account>:secret:hpds/rds/etl-credentials-??????"
+manage_secret_access = true
+rds_secret_arn       = "arn:aws:secretsmanager:us-east-1:900561893673:secret:rds!db-8086eb77-cd6d-48bc-9298-4380892798ca-9cjLb2"
 
 tags = {
   Project     = "PIC-SURE HPDS ETL"
