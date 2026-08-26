@@ -136,6 +136,18 @@ variable "rds_secret_arn" {
   description = "ARN of the RDS secret. Only needed when manage_secret_access is true."
 }
 
+variable "rds_host" {
+  type        = string
+  default     = ""
+  description = "RDS endpoint hostname. Used to build the JDBC URL when the secret contains only username/password."
+}
+
+variable "rds_dbname" {
+  type        = string
+  default     = ""
+  description = "RDS database name. Used to build the JDBC URL when the secret contains only username/password."
+}
+
 variable "manage_secret_access" {
   type        = bool
   default     = false

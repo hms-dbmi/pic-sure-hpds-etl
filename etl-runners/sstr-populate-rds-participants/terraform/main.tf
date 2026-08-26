@@ -30,6 +30,8 @@ module "etl_runner" {
   rds_secret_id        = var.rds_secret_id
   rds_secret_arn       = var.rds_secret_arn
   manage_secret_access = var.manage_secret_access
+  rds_host             = var.rds_host
+  rds_dbname           = var.rds_dbname
 
   # Keys use underscores; the runner converts them to --input, --study-id, --batch-size.
   # Names must match SstrPopulateRdsParticipantsJob.expectations().

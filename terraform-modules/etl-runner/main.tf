@@ -52,8 +52,10 @@ locals {
       run_id          = var.run_id
       image_name      = var.image_name
       image_tar       = var.image_tar
-      rds_secret_id   = var.rds_secret_id
-      reports_prefix  = local.reports_prefix
+      rds_secret_id     = var.rds_secret_id
+      rds_host          = var.rds_host
+      rds_dbname        = var.rds_dbname
+      reports_prefix    = local.reports_prefix
       container_env_b64 = local.container_env_b64
     },
     var.user_data_template_vars

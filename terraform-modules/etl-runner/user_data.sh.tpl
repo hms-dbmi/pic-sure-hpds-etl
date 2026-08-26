@@ -120,13 +120,15 @@ SECRET_JSON=$(aws secretsmanager get-secret-value \
   --query SecretString --output text)
 
 # Accept either a ready-made JDBC url or discrete host/port/dbname fields.
+# When the secret contains only username/password (e.g. an RDS-managed secret),
+# fall back to the rds_host and rds_dbname provided via Terraform variables.
 # Credentials go into --env-file, never -e: this keeps them out of the process table,
 # `docker inspect`, and any command echo.
 {
-  printf 'RDS_URL=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '
+  printf 'RDS_URL=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r --arg tfhost '${rds_host}' --arg tfdb '${rds_dbname}' '
     if .url then .url
     elif .jdbcUrl then .jdbcUrl
-    else "jdbc:postgresql://" + .host + ":" + ((.port // 5432) | tostring) + "/" + (.dbname // .dbName // "hpds")
+    else "jdbc:postgresql://" + ((.host // $tfhost) | if . == "" then error("no RDS host in secret or tfvars") else . end) + ":" + ((.port // 5432) | tostring) + "/" + ((.dbname // .dbName // $tfdb) | if . == "" then "hpds" else . end)
     end')"
   printf 'RDS_USERNAME=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.username')"
   printf 'RDS_PASSWORD=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.password')"
