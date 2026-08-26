@@ -53,7 +53,9 @@ check "abbreviation is non-empty" test -n "$ABV"
 check "allConcepts input exists" uri_exists "$INPUT"
 
 # --- mapping CSV exists ------------------------------------------------------
-check "mapping CSV exists" uri_exists "$MAPPING"
+# The mapping CSV is an output of participants-migration; it may not exist yet
+# when running preflight-only or before the upstream job has completed.
+soft "mapping CSV exists (produced by participants-migration)" uri_exists "$MAPPING"
 
 # --- output looks reasonable -------------------------------------------------
 if [[ "$OUTPUT" == s3://* ]]; then
