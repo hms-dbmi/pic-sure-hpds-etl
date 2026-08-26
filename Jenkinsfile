@@ -23,6 +23,10 @@
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk-25'
+    }
+
     options {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '20'))
