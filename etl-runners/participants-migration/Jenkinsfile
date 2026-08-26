@@ -79,7 +79,9 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'us-east-1'
+        AWS_REGION      = 'us-east-1'
+        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
+        AWS_PROFILE     = 'dbgap-etl'
         RUNNER_DIR = 'etl-runners/participants-migration'
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
@@ -97,6 +99,15 @@ pipeline {
 
         stage('Init') {
             steps {
+                sh '''
+                    cat > "$AWS_CONFIG_FILE" <<'EOF'
+[profile dbgap-etl]
+role_arn = arn:aws:iam::736265540791:role/dbgap-etl
+credential_source = Ec2InstanceMetadata
+role_session_name = jenkins-hpds-etl
+EOF
+                    aws sts get-caller-identity
+                '''
                 script {
                     // BUILD_TAG can contain '/' for folder or multibranch jobs, and this
                     // value becomes both a filename and an S3 key.

@@ -84,7 +84,9 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'us-east-1'
+        AWS_REGION      = 'us-east-1'
+        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
+        AWS_PROFILE     = 'dbgap-etl'
         RUNNER_DIR = 'etl-runners/sstr-populate-rds-participants'
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
@@ -104,6 +106,15 @@ pipeline {
 
         stage('Init') {
             steps {
+                sh '''
+                    cat > "$AWS_CONFIG_FILE" <<'EOF'
+[profile dbgap-etl]
+role_arn = arn:aws:iam::736265540791:role/dbgap-etl
+credential_source = Ec2InstanceMetadata
+role_session_name = jenkins-hpds-etl
+EOF
+                    aws sts get-caller-identity
+                '''
                 script {
                     if (!params.STUDY_ID?.trim()) {
                         error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile) to sweep every ready study from managed inputs.')

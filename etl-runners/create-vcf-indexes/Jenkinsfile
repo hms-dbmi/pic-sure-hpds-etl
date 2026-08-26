@@ -57,7 +57,9 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = 'us-east-1'
+        AWS_REGION      = 'us-east-1'
+        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
+        AWS_PROFILE     = 'dbgap-etl'
         RUNNER_DIR = 'etl-runners/create-vcf-indexes'
 
         TF_VAR_output_uri    = "${params.OUTPUT}"
@@ -70,6 +72,15 @@ pipeline {
 
         stage('Init') {
             steps {
+                sh '''
+                    cat > "$AWS_CONFIG_FILE" <<'EOF'
+[profile dbgap-etl]
+role_arn = arn:aws:iam::736265540791:role/dbgap-etl
+credential_source = Ec2InstanceMetadata
+role_session_name = jenkins-hpds-etl
+EOF
+                    aws sts get-caller-identity
+                '''
                 script {
                     if (!params.OUTPUT?.trim()) {
                         error('OUTPUT is required: the s3:// URI or local path for vcfIndex.tsv and SampleIds.csv.')
