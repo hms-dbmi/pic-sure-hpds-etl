@@ -75,11 +75,17 @@ read_uri "$MANAGED_INPUTS" > "$MANIFEST"
 STUDIES=$(python3 - "$MANIFEST" <<'PY'
 import csv, sys
 
-ABV, SID, READY = "Study Abbreviated Name", "Study Identifier", "Data is ready to process"
+ABV       = "Study Abbreviated Name"
+SID       = "Study Identifier"
+READY     = "Data is ready to process"
+DATA_TYPE = "Data Type"
+PROCESSED = "Data Processed"
+
+REQUIRED = [ABV, SID, READY, DATA_TYPE, PROCESSED]
 
 with open(sys.argv[1], newline="", encoding="utf-8-sig") as fh:
     reader = csv.DictReader(fh)
-    missing = [c for c in (ABV, SID, READY) if c not in (reader.fieldnames or [])]
+    missing = [c for c in REQUIRED if c not in (reader.fieldnames or [])]
     if missing:
         print("MISSING_COLUMNS\t" + ", ".join(missing))
         sys.exit(0)
@@ -96,12 +102,12 @@ PY
 
 if [[ "$STUDIES" == MISSING_COLUMNS* ]]; then
   fail "managed-inputs is missing required column(s): ${STUDIES#MISSING_COLUMNS$'\t'}"
-  note "expected: 'Study Abbreviated Name', 'Study Identifier', 'Data is ready to process'"
+  note "expected: 'Study Abbreviated Name', 'Study Identifier', 'Data is ready to process', 'Data Type', 'Data Processed'"
   summary
   exit 1
 fi
 
-check "managed-inputs has the three required columns" true
+check "managed-inputs has the required columns" true
 
 READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
 check "at least one study is marked ready" test "$READY_COUNT" -gt 0
@@ -114,7 +120,7 @@ ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
 check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed)" uri_exists "$ALL_CONCEPTS"
 
 # --- per-study files -----------------------------------------------------
-# Layout: {base}/{abv_lowercase}/{ABV_UPPERCASE}_PatientMapping.v2.csv
+# Layout: {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
 #         {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt (optional)
 echo ""
 echo "  Per-study inputs:"
@@ -126,7 +132,7 @@ while IFS=$'\t' read -r abv sid state; do
 
   abv_lower=$(printf '%s' "$abv" | tr '[:upper:]' '[:lower:]')
   abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
-  mapping="$DATA_FOLDER/${abv_lower}/${abv_upper}_PatientMapping.v2.csv"
+  mapping="$DATA_FOLDER/${abv_lower}/data/${abv_upper}_PatientMapping.v2.csv"
 
   # Find SSTR file by listing the rawData directory for a file matching SSTR_*{studyId}*.txt
   raw_data_dir="$DATA_FOLDER/${abv_lower}/rawData"

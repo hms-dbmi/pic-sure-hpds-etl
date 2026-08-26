@@ -264,7 +264,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
 
         String pmFileName = abvUpper + "_PatientMapping.v2.csv";
-        String pmUri = joinPath(joinPath(baseUri, abvLower), pmFileName);
+        String pmUri = joinPath(joinPath(joinPath(baseUri, abvLower), "data"), pmFileName);
         Path localPm = studyDir.resolve(pmFileName);
         io.copyToLocal(pmUri, localPm);
 

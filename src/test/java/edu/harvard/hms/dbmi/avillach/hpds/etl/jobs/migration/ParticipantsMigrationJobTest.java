@@ -139,7 +139,7 @@ class ParticipantsMigrationJobTest {
 
         String folder = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
-                "abv1/ABV1_PatientMapping.v2.csv", ""));
+                "abv1/data/ABV1_PatientMapping.v2.csv", ""));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-empty-patient-mapping");
@@ -166,7 +166,7 @@ class ParticipantsMigrationJobTest {
 
         String folder = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
-                "abv1/ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
+                "abv1/data/ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-db-down");

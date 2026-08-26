@@ -81,7 +81,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     /**
      * Creates a base URI directory with the subfolder convention:
-     * {@code general/completed/} for allConcepts, {@code {abvLower}/} for patient mapping,
+     * {@code general/completed/} for allConcepts, {@code {abvLower}/data/} for patient mapping,
      * {@code {abvLower}/rawData/} for SSTR files. Keys are relative paths from the base.
      */
     private static String baseUri(Map<String, String> filesByRelativePath) {
@@ -127,7 +127,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         managedInputs("OPENSTUDY,open-study-01,Yes");
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"3001\",\"µ_consentsµ\",\"\",\"open-study-01\",\"0\"\n",
-                "openstudy/OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
+                "openstudy/data/OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-open-access");
@@ -156,7 +156,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         managedInputs("BADSTUDY,bad-study-01,Yes");
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"4001\",\"µ_consentsµ\",\"\",\"bad-study-01.c\",\"0\"\n",
-                "badstudy/BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
+                "badstudy/data/BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-bad-consent");
@@ -182,7 +182,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
                 SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
                 """,
-                "gru/GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
+                "gru/data/GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-sstr");
@@ -208,7 +208,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 + "\"2002\",\"µ_studies_consentsµother-study-01µGRU-IRBµ\",\"\",\"TRUE\",\"0\"\n";
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", allConcepts,
-                "other/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+                "other/data/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-direct");
@@ -231,7 +231,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         managedInputs("open_access-1000Genomes,tg-study-01,Yes");
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"3003\",\"µ_consentsµ\",\"\",\"tg-study-01.c1\",\"0\"\n",
-                "open_access-1000genomes/OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
+                "open_access-1000genomes/data/OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-1000genomes");
@@ -246,7 +246,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         managedInputs("MIXED,mixed-study-01,Yes");
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"mixed-study-01.c1\",\"0\"\n",
-                "mixed/MIXED_PatientMapping.v2.csv",
+                "mixed/data/MIXED_PatientMapping.v2.csv",
                 "SUBJ1,MIXED,2002\n" + "SUBJ2,MIXED,9999\n" + "SUBJ3,MIXED,8888\n"));
 
         JobResult result = executor.run(job,
@@ -274,7 +274,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "NOTSET,not-ready-study,No");
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
-                "other/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+                "other/data/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-not-ready");
@@ -290,7 +290,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "MISSING,missing-study-01,Yes");
         String base = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
-                "other/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+                "other/data/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-isolation");
