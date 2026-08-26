@@ -46,6 +46,12 @@ variable "subnet_id" {
   description = "Subnet to launch the instance in."
 }
 
+variable "vpc_security_group_ids" {
+  type        = list(string)
+  default     = []
+  description = "Security group IDs to attach to the instance. When empty, the VPC default security group is used."
+}
+
 variable "iam_role_name" {
   type        = string
   default     = "jenkins-s3-role"

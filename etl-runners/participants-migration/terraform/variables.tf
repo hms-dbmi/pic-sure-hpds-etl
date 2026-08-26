@@ -34,6 +34,12 @@ variable "subnet_id" {
   description = "Subnet to launch the runner in. Must have a route to RDS and to S3."
 }
 
+variable "vpc_security_group_ids" {
+  type        = list(string)
+  default     = []
+  description = "Security group IDs to attach to the runner. When empty, the VPC default is used."
+}
+
 variable "root_volume_size" {
   type        = number
   default     = 50

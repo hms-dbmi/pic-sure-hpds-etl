@@ -101,6 +101,7 @@ module "etl_runner" {
   ami                                  = data.aws_ami.etl_base.id
   instance_type                        = var.instance_type
   subnet_id                            = var.subnet_id
+  vpc_security_group_ids               = length(var.vpc_security_group_ids) > 0 ? var.vpc_security_group_ids : null
   iam_instance_profile                 = aws_iam_instance_profile.etl_runner_profile.name
   instance_initiated_shutdown_behavior = "terminate"
 

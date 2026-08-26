@@ -81,9 +81,12 @@ pipeline {
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: purge + load is one transaction and upserts are idempotent.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the study id and input header, then stop without provisioning anything')
+        choice(name: 'ENV', choices: ['integration'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
+        ENV             = "${params.ENV ?: 'integration'}"
         AWS_REGION      = 'us-east-1'
         AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 

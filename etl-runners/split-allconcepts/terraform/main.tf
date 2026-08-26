@@ -15,8 +15,9 @@ module "etl_runner" {
   ami_owner_id     = var.ami_owner_id
   ami_name_pattern = var.ami_name_pattern
   instance_type    = var.instance_type
-  subnet_id        = var.subnet_id
-  iam_role_name    = "jenkins-s3-role"
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = var.vpc_security_group_ids
+  iam_role_name          = "jenkins-s3-role"
   root_volume_size = var.root_volume_size
 
   job_name  = "split-allconcepts"

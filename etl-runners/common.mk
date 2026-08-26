@@ -23,13 +23,17 @@ TF_DIR      := terraform
 TFVARS      := $(TF_DIR)/$(NAME).tfvars
 BACKEND     := $(TF_DIR)/$(NAME).backend.tfvars
 
+# Environment: switch with ENV=staging, ENV=production, etc.
+ENV         ?= integration
+ENV_TFVARS  := $(abspath ../environments/$(ENV).tfvars)
+
 JAR         := $(REPO_ROOT)/target/hpds-etl.jar
 IMAGE_TAR   ?= hpds-etl-runner.tar.gz
 IMAGE_NAME  := $(basename $(basename $(notdir $(IMAGE_TAR))))
 
-# Single source of truth for the bucket: the tfvars file Terraform already reads.
-STACK_S3_BUCKET ?= $(shell sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS))
-AWS_REGION      ?= $(shell sed -n 's/^aws_region[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS))
+# Single source of truth for the bucket: check environment file first, then runner tfvars.
+STACK_S3_BUCKET ?= $(or $(shell sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(ENV_TFVARS) 2>/dev/null),$(shell sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS)))
+AWS_REGION      ?= $(or $(shell sed -n 's/^aws_region[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(ENV_TFVARS) 2>/dev/null),$(shell sed -n 's/^aws_region[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS)))
 S3_IMAGE_URI    := s3://$(STACK_S3_BUCKET)/etl-runner/container/$(IMAGE_TAR)
 
 # Per-run Terraform state. Jenkins overrides STATE_KEY so concurrent runs never share
@@ -94,10 +98,10 @@ validate-tf:
 	$(TF) -chdir=$(TF_DIR) validate
 
 plan:
-	$(TF) -chdir=$(TF_DIR) plan -var-file=$(notdir $(TFVARS))
+	$(TF) -chdir=$(TF_DIR) plan -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS))
 
 apply:
-	$(TF) -chdir=$(TF_DIR) apply -var-file=$(notdir $(TFVARS)) --auto-approve
+	$(TF) -chdir=$(TF_DIR) apply -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS)) --auto-approve
 
 output:
 	$(TF) -chdir=$(TF_DIR) output
@@ -122,7 +126,7 @@ fetch-reports:
 # --- Teardown ------------------------------------------------------------
 
 destroy:
-	$(TF) -chdir=$(TF_DIR) destroy -var-file=$(notdir $(TFVARS)) --auto-approve
+	$(TF) -chdir=$(TF_DIR) destroy -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS)) --auto-approve
 
 clean: destroy
 	rm -f $(IMAGE_TAR)

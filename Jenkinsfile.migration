@@ -68,6 +68,8 @@ pipeline {
                description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state, so leaving them on is strongly preferred before a migration.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate every migration input layout and stop, without provisioning anything')
+        choice(name: 'ENV', choices: ['integration'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for network, RDS, and account settings.')
     }
 
     environment {
@@ -134,6 +136,7 @@ EOF
                             string(name: 'DATA_FOLDER',    value: params.DATA_FOLDER),
                             string(name: 'BATCH_SIZE',     value: params.BATCH_SIZE),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
+                            string(name: 'ENV',            value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS',     value: true),
                             booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
                         ])
@@ -264,6 +267,7 @@ EOF
                                         string(name: 'MAPPING',      value: mappingUri),
                                         string(name: 'OUTPUT',       value: params.SPLIT_OUTPUT),
                                         string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
+                                        string(name: 'ENV',          value: params.ENV),
                                         booleanParam(name: 'SKIP_TESTS', value: true),
                                         booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
                                     ])
@@ -326,6 +330,7 @@ EOF
                     def conceptParams = [
                         string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                        string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
@@ -360,6 +365,7 @@ EOF
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
+                        string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {

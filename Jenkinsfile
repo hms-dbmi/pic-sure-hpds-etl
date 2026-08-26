@@ -61,9 +61,12 @@ pipeline {
                description: 'Jenkins job that runs the create-vcf-indexes runner')
         string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
                description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')
+        choice(name: 'ENV', choices: ['integration'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for network, RDS, and account settings.')
     }
 
     environment {
+        ENV             = "${params.ENV ?: 'integration'}"
         AWS_REGION      = 'us-east-1'
         AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
@@ -248,6 +251,7 @@ EOF
                                         string(name: 'INPUT',    value: s.input),
                                         string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
                                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
+                                        string(name: 'ENV',  value: params.ENV),
                                         booleanParam(name: 'SKIP_TESTS', value: true),
                                         booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
                                     ])
@@ -313,6 +317,7 @@ EOF
                     def conceptParams = [
                         string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                        string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
@@ -348,6 +353,7 @@ EOF
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
+                        string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
 
