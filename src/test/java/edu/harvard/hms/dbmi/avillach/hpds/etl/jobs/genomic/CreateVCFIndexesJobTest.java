@@ -337,4 +337,55 @@ class CreateVCFIndexesJobTest {
             assertThat(fields[7]).isEmpty();
         }
     }
+
+    @Test
+    void sample_ids_and_patient_ids_counts_match_on_every_row() {
+        UUID uuid1 = UUID.randomUUID();
+        UUID uuid2 = UUID.randomUUID();
+        UUID uuid3 = UUID.randomUUID();
+        String studyId = "phs000222";
+
+        when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(uuid1, studyId, "1", "GRU"),
+                new Consent(uuid2, studyId, "1", "GRU"),
+                new Consent(uuid3, studyId, "1", "GRU")));
+
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Sample(uuid1, "NWD800001", "TOPMed"),
+                new Sample(uuid2, "NWD800002", "TOPMed"),
+                new Sample(uuid3, "NWD800003", "TOPMed")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-id-counts");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+
+        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
+        verify(ioResolver, org.mockito.Mockito.atLeast(1)).writeOutput(uriCaptor.capture(), contentCaptor.capture());
+
+        int vcfIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000222.c1_vcfIndex.tsv");
+        String vcfContent = new String(contentCaptor.getAllValues().get(vcfIdx), StandardCharsets.UTF_8);
+        String[] lines = vcfContent.split("\n");
+
+        for (int i = 2; i < lines.length; i++) {
+            String[] fields = lines[i].split("\t", -1);
+            String[] sampleIds = fields[4].split(",", -1);
+            String[] patientIds = fields[5].split(",", -1);
+
+            assertThat(sampleIds)
+                    .as("row %d: sample_ids count must match patient_ids count", i)
+                    .hasSameSizeAs(patientIds);
+            assertThat(sampleIds).hasSize(3);
+
+            for (String sid : sampleIds) {
+                assertThat(sid).startsWith("NWD");
+            }
+            for (String pid : patientIds) {
+                assertThat(pid).matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+            }
+        }
+    }
 }

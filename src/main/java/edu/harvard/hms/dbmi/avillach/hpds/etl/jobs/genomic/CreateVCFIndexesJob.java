@@ -106,6 +106,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         long totalSamples = 0;
         List<String> outputFiles = new ArrayList<>();
         List<String> skippedStudies = new ArrayList<>();
+        List<String> idCountMismatches = new ArrayList<>();
 
         for (ManagedInputRow study : genomicStudies) {
             String studyId = study.studyId();
@@ -158,6 +159,13 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
                         .map(s -> s.hpdsUuid().toString())
                         .collect(Collectors.joining(","));
 
+                long sampleIdCount = sampleIds.chars().filter(c -> c == ',').count() + 1;
+                long patientIdCount = patientIds.chars().filter(c -> c == ',').count() + 1;
+                if (sampleIdCount != patientIdCount) {
+                    idCountMismatches.add(consentGroup + ": " + sampleIdCount + " sample_ids vs " + patientIdCount + " patient_ids");
+                    log.error("Count mismatch in {}: {} sample_ids vs {} patient_ids", consentGroup, sampleIdCount, patientIdCount);
+                }
+
                 String vcfIndex = buildVcfIndex(consentGroup, sampleIds, patientIds);
                 String sampleCsv = buildSampleIdsCsv(nwdSamples, study.abv());
 
@@ -175,7 +183,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
             }
         }
 
-        return new Output(genomicStudies.size(), consentGroupsProcessed, totalSamples, outputFiles, skippedStudies);
+        return new Output(genomicStudies.size(), consentGroupsProcessed, totalSamples, outputFiles, skippedStudies, idCountMismatches);
     }
 
     private String buildVcfIndex(String consentGroup, String sampleIds, String patientIds) {
@@ -232,6 +240,10 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
             report.warning("SKIPPED_STUDY",
                     "Study " + studyId + " was skipped (no consents or no samples)");
         }
+        for (String mismatch : output.idCountMismatches()) {
+            report.error("ID_COUNT_MISMATCH",
+                    "sample_ids and patient_ids column counts differ: " + mismatch);
+        }
     }
 
     @Override
@@ -248,6 +260,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
             int consentGroupsProcessed,
             long totalSamples,
             List<String> outputFiles,
-            List<String> skippedStudies
+            List<String> skippedStudies,
+            List<String> idCountMismatches
     ) {}
 }
