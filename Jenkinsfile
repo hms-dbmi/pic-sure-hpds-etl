@@ -66,12 +66,12 @@ pipeline {
     environment {
         AWS_REGION      = 'us-east-1'
         AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
-        AWS_PROFILE     = 'dbgap-etl'
+
     }
 
     stages {
 
-        stage('Assume role') {
+        stage('AWS config') {
             steps {
                 sh '''
                     cat > "$AWS_CONFIG_FILE" <<'EOF'
@@ -80,7 +80,6 @@ role_arn = arn:aws:iam::736265540791:role/dbgap-etl
 credential_source = Ec2InstanceMetadata
 role_session_name = jenkins-hpds-etl
 EOF
-                    aws sts get-caller-identity
                 '''
             }
         }
@@ -124,7 +123,7 @@ EOF
                         // Use an env var to avoid Groovy GString injection into the shell.
                         env.MI_URI = managedInputsUri
                         def lines = sh(returnStdout: true, script: '''
-                            aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
+                            AWS_PROFILE=dbgap-etl aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
                         ''').trim()
 
                         if (!lines) {

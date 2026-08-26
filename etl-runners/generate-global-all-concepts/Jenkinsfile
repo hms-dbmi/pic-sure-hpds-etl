@@ -57,7 +57,7 @@ pipeline {
     environment {
         AWS_REGION      = 'us-east-1'
         AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
-        AWS_PROFILE     = 'dbgap-etl'
+
         RUNNER_DIR = 'etl-runners/generate-global-all-concepts'
 
         TF_VAR_output_uri    = "${params.OUTPUT}"
@@ -77,7 +77,6 @@ role_arn = arn:aws:iam::736265540791:role/dbgap-etl
 credential_source = Ec2InstanceMetadata
 role_session_name = jenkins-hpds-etl
 EOF
-                    aws sts get-caller-identity
                 '''
                 script {
                     if (!params.OUTPUT?.trim()) {
@@ -125,11 +124,13 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                    if (rc == 10) {
-                        unstable('Pre-flight found warnings')
-                    } else if (rc != 0) {
-                        error("Pre-flight failed (rc=${rc})")
+                    withEnv(['AWS_PROFILE=dbgap-etl']) {
+                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                        if (rc == 10) {
+                            unstable('Pre-flight found warnings')
+                        } else if (rc != 0) {
+                            error("Pre-flight failed (rc=${rc})")
+                        }
                     }
                 }
             }

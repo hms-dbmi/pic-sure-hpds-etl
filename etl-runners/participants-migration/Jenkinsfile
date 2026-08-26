@@ -81,7 +81,7 @@ pipeline {
     environment {
         AWS_REGION      = 'us-east-1'
         AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
-        AWS_PROFILE     = 'dbgap-etl'
+
         RUNNER_DIR = 'etl-runners/participants-migration'
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
@@ -106,7 +106,6 @@ role_arn = arn:aws:iam::736265540791:role/dbgap-etl
 credential_source = Ec2InstanceMetadata
 role_session_name = jenkins-hpds-etl
 EOF
-                    aws sts get-caller-identity
                 '''
                 script {
                     // BUILD_TAG can contain '/' for folder or multibranch jobs, and this
@@ -158,11 +157,13 @@ EOF
                     // Called directly, not through make: make collapses every failure to 2
                     // and would lose the validator's "10 = warnings" signal.
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                    if (rc == 10) {
-                        unstable('Pre-flight found warnings in the input layout')
-                    } else if (rc != 0) {
-                        error("Pre-flight failed (rc=${rc}): the input layout would fail studies at run time")
+                    withEnv(['AWS_PROFILE=dbgap-etl']) {
+                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                        if (rc == 10) {
+                            unstable('Pre-flight found warnings in the input layout')
+                        } else if (rc != 0) {
+                            error("Pre-flight failed (rc=${rc}): the input layout would fail studies at run time")
+                        }
                     }
                 }
             }
