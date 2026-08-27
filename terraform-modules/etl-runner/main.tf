@@ -50,7 +50,7 @@ locals {
       module_name     = var.module_name
       job_name        = var.job_name
       run_id          = var.run_id
-      image_name      = var.image_name
+      image_name      = trimsuffix(trimsuffix(var.image_tar, ".gz"), ".tar")
       image_tar       = var.image_tar
       rds_secret_id     = var.rds_secret_id
       rds_host          = var.rds_host
