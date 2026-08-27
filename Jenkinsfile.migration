@@ -244,9 +244,8 @@ EOF
                                 if (fileExists(localMapping)) {
                                     mappingUri = localMapping
                                 } else {
-                                    echo "${sid}: cannot locate mapping CSV; skipping"
-                                    results << [studyId: sid, result: 'SKIPPED', error: 'mapping CSV not found']
-                                    return
+                                    mappingUri = "s3://avillach-73-bdcatalyst-etl/__migration__/current/${sid}_hpds_id_mapping.csv"
+                                    echo "${sid}: mapping CSV not found locally; passing expected S3 path to downstream preflight"
                                 }
                             }
 
