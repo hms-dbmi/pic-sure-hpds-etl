@@ -119,27 +119,40 @@ SECRET_JSON=$(aws secretsmanager get-secret-value \
   --secret-id "${rds_secret_id}" --region "${aws_region}" \
   --query SecretString --output text)
 
+say "Secret keys: $(printf '%s' "$SECRET_JSON" | jq -r 'keys | join(", ")' 2>/dev/null || echo '(not valid JSON)')"
+
 # Accept either a ready-made JDBC url or discrete host/port/dbname fields.
 # When the secret contains only username/password (e.g. an RDS-managed secret),
 # fall back to the rds_host and rds_dbname provided via Terraform variables.
+JQ_ERR=$(mktemp)
+RDS_URL=$(printf '%s' "$SECRET_JSON" | jq -r --arg tfhost '${rds_host}' --arg tfdb '${rds_dbname}' '
+  def nonempty: if (. // "") == "" then null else . end;
+  if (.url | nonempty) then .url
+  elif (.jdbcUrl | nonempty) then .jdbcUrl
+  else "jdbc:postgresql://"
+    + ((.host | nonempty) // ($tfhost | nonempty) // error("no RDS host in secret or tfvars"))
+    + ":" + (((.port | nonempty) // 5432) | tostring)
+    + "/" + (((.dbname | nonempty) // (.dbName | nonempty) // ($tfdb | nonempty)) // "hpds")
+  end' 2>"$JQ_ERR") || true
+
+if [[ ! "$RDS_URL" =~ ^jdbc: ]]; then
+  say "ERROR: secret yielded no JDBC url"
+  say "  tfhost='${rds_host}' tfdb='${rds_dbname}'"
+  [[ -s "$JQ_ERR" ]] && say "  jq error: $(cat "$JQ_ERR")"
+  [[ -n "$RDS_URL" ]] && say "  jq output: $RDS_URL"
+  rm -f "$JQ_ERR"
+  exit 5
+fi
+rm -f "$JQ_ERR"
+
 # Credentials go into --env-file, never -e: this keeps them out of the process table,
 # `docker inspect`, and any command echo.
 {
-  printf 'RDS_URL=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r --arg tfhost '${rds_host}' --arg tfdb '${rds_dbname}' '
-    def nonempty: if (. // "") == "" then null else . end;
-    if (.url | nonempty) then .url
-    elif (.jdbcUrl | nonempty) then .jdbcUrl
-    else "jdbc:postgresql://"
-      + ((.host | nonempty) // ($tfhost | nonempty) // error("no RDS host in secret or tfvars"))
-      + ":" + (((.port | nonempty) // 5432) | tostring)
-      + "/" + (((.dbname | nonempty) // (.dbName | nonempty) // ($tfdb | nonempty)) // "hpds")
-    end')"
+  printf 'RDS_URL=%s\n' "$RDS_URL"
   printf 'RDS_USERNAME=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.username')"
   printf 'RDS_PASSWORD=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.password')"
 } >> "$ENV_FILE"
-unset SECRET_JSON
-
-grep -q '^RDS_URL=jdbc:' "$ENV_FILE" || { say "ERROR: secret yielded no JDBC url"; exit 5; }
+unset SECRET_JSON RDS_URL
 say "RDS credentials resolved"
 
 # --------------------------------------------------------------------------
