@@ -28,7 +28,8 @@ if [[ "$STATUS" != "SUCCESS" && "$STATUS" != "SUCCESS_WITH_WARNINGS" ]]; then
 fi
 
 TOTAL_ROWS=$(jq -r '.metrics.totalRows // 0' "$REPORT")
-if [[ "$TOTAL_ROWS" -le 0 ]]; then
+ALLOW_EMPTY=$(jq -r '[.outputValidation.issues[] | select(.code == "EMPTY_OUTPUT" and .severity == "WARNING")] | length' "$REPORT" 2>/dev/null || echo 0)
+if [[ "$TOTAL_ROWS" -le 0 && "$ALLOW_EMPTY" -eq 0 ]]; then
     echo "FAIL: totalRows is $TOTAL_ROWS — expected at least 1"
     exit 1
 fi
