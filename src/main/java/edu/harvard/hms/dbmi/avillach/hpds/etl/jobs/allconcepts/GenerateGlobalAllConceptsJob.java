@@ -69,7 +69,10 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
                         ParamSpec.required("output",
                                 "Output location for global_AllConcepts.csv (local path or s3:// URI). "
                                         + "The filename is appended automatically if the value ends with '/'.",
-                                "s3://bucket/etl-output/")),
+                                "s3://bucket/etl-output/"),
+                        ParamSpec.optional("allow-empty",
+                                "When true, exit 0 even if no concept rows are generated (for preflight runs).",
+                                "true")),
                 List.of("global_AllConcepts.csv written to --output with concept rows for all ready studies"));
     }
 
@@ -120,6 +123,12 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         }
 
         if (builder.isEmpty()) {
+            if (ctx.getBoolean("allow-empty", false)) {
+                log.warn("No concept rows generated across {} ready studies, but --allow-empty is set; skipping output",
+                        readyStudies.size());
+                return new Output(readyStudies.size(), 0, rowsPerStudy,
+                        emptyAbbreviationCounts, skippedNoConsents, outputUri);
+            }
             throw new DataException("No concept rows were generated across " + readyStudies.size()
                     + " ready studies. Check that the database has been populated.");
         }
@@ -199,7 +208,11 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
         if (output.totalRows() == 0) {
-            report.error("EMPTY_OUTPUT", "No rows were written to the output file");
+            if (ctx.getBoolean("allow-empty", false)) {
+                report.warning("EMPTY_OUTPUT", "No rows were written (--allow-empty is set)");
+            } else {
+                report.error("EMPTY_OUTPUT", "No rows were written to the output file");
+            }
         }
         for (String studyId : output.skippedNoConsents()) {
             report.warning("NO_CONSENTS",

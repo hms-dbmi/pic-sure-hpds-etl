@@ -319,6 +319,7 @@ EOF
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
+                        booleanParam(name: 'ALLOW_EMPTY', value: params.PREFLIGHT_ONLY),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
                         conceptParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)

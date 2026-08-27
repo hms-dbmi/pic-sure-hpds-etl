@@ -108,6 +108,12 @@ variable "container_assume_role_arn" {
   description = "Cross-account IAM role ARN for the container to assume when accessing S3 inputs."
 }
 
+variable "allow_empty" {
+  type        = string
+  default     = ""
+  description = "When 'true', the job exits 0 even if the database has no data (preflight mode)."
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"

@@ -37,7 +37,8 @@ module "etl_runner" {
 
   job_params = merge(
     { output = var.output_uri },
-    var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {}
+    var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {},
+    var.allow_empty != ""        ? { allow_empty = var.allow_empty }           : {}
   )
 
   tags = merge({
