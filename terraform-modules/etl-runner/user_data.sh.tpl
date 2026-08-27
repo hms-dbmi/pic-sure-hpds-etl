@@ -167,20 +167,24 @@ rm -f /tmp/image.tar.gz
 # --------------------------------------------------------------------------
 PHASE=job
 
-# Cross-account role assumption: when container_assume_role_arn is set, write an AWS
-# config so the SDK inside the container assumes that role via the instance profile.
+# Cross-account role assumption: call STS on the host (which has the instance profile)
+# and inject the temporary credentials into the container's env file. This avoids
+# needing the sts SDK artifact inside the Java app for profile-based role assumption.
 DOCKER_EXTRA_ARGS=()
 %{ if container_assume_role_arn != "" ~}
-AWS_CONFIG_DIR=$WORK/.aws
-mkdir -p "$AWS_CONFIG_DIR"
-cat > "$AWS_CONFIG_DIR/config" <<'AWSCFG'
-[profile cross-account]
-role_arn = ${container_assume_role_arn}
-credential_source = Ec2InstanceMetadata
-AWSCFG
-chmod 600 "$AWS_CONFIG_DIR/config"
-DOCKER_EXTRA_ARGS+=(-v "$AWS_CONFIG_DIR:/root/.aws:ro" -e "AWS_PROFILE=cross-account")
-say "Cross-account role configured: ${container_assume_role_arn}"
+say "Assuming cross-account role: ${container_assume_role_arn}"
+ASSUME_JSON=$(aws sts assume-role \
+  --role-arn "${container_assume_role_arn}" \
+  --role-session-name "etl-${run_id}" \
+  --region "${aws_region}" \
+  --output json)
+{
+  printf 'AWS_ACCESS_KEY_ID=%s\n' "$(printf '%s' "$ASSUME_JSON" | jq -r '.Credentials.AccessKeyId')"
+  printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$(printf '%s' "$ASSUME_JSON" | jq -r '.Credentials.SecretAccessKey')"
+  printf 'AWS_SESSION_TOKEN=%s\n' "$(printf '%s' "$ASSUME_JSON" | jq -r '.Credentials.SessionToken')"
+} >> "$ENV_FILE"
+unset ASSUME_JSON
+say "Cross-account credentials written to env file (${container_assume_role_arn})"
 %{ endif ~}
 
 say "Running job ${job_name} (run ${run_id})"
