@@ -173,9 +173,11 @@ PHASE=job
 DOCKER_EXTRA_ARGS=()
 %{ if container_assume_role_arn != "" ~}
 say "Assuming cross-account role: ${container_assume_role_arn}"
+STS_SESSION="etl-${run_id}"
+STS_SESSION="$${STS_SESSION:0:64}"
 ASSUME_JSON=$(aws sts assume-role \
   --role-arn "${container_assume_role_arn}" \
-  --role-session-name "etl-${run_id}" \
+  --role-session-name "$STS_SESSION" \
   --region "${aws_region}" \
   --output json)
 {
