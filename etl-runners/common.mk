@@ -55,7 +55,7 @@ STATE_KEY   ?= tf_backend/etl-runners/hpds-etl/$(NAME)/terraform.tfstate
 REPORTS_DIR ?= $(CURDIR)/reports
 SKIP_TESTS  ?= false
 
-.PHONY: help jar image image-save image-upload package ensure-terraform init plan apply \
+.PHONY: help jar image image-save image-upload package ensure-terraform tf-path init plan apply \
         run monitor fetch-reports output destroy clean validate-tf
 
 help:
@@ -127,6 +127,9 @@ ensure-terraform:
 	rm -f "$(LOCAL_TF_DIR)/terraform.zip"; \
 	chmod +x "$(LOCAL_TF)"; \
 	echo "Installed: $$($(LOCAL_TF) version | head -1)"
+
+tf-path:
+	@echo $(TF)
 
 init: ensure-terraform
 	$(TF) -chdir=$(TF_DIR) init -reconfigure \

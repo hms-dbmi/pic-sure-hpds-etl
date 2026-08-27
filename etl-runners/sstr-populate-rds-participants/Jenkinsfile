@@ -45,7 +45,6 @@ pipeline {
 
     tools {
         jdk 'jdk-25'
-        terraform 'tf-1.9.8'
     }
 
     options {
@@ -150,7 +149,7 @@ EOF
                 sh '''
                     set -e
                     echo "--- tool versions ---"
-                    terraform version | head -1
+                    make -s -C $RUNNER_DIR ensure-terraform
                     aws --version
                     docker --version
                     jq --version
@@ -222,10 +221,11 @@ EOF
 
                         rc = sh(returnStatus: true, script: """
                             cd ${RUNNER_DIR}
+                            TF=\$(make -s tf-path)
                             ../common/monitor-runner.sh \
-                              "\$(terraform -chdir=terraform output -raw instance_id)" \
-                              "\$(terraform -chdir=terraform output -raw status_s3_uri)" \
-                              "\$(terraform -chdir=terraform output -raw log_s3_uri)"
+                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
                         """)
 
                         env.JOB_EXIT_CODE = "${rc}"
