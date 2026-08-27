@@ -11,6 +11,7 @@ spring:
     password: ${RDS_PASSWORD:}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
+      schema: ${DB_SCHEMA:etl}
       # Do NOT fail context startup when the DB is unreachable. Jobs that don't
       # touch the DB must still be able to run; DB-backed jobs surface the failure
       # as an INFRASTRUCTURE_ERROR exit code when they actually connect.
