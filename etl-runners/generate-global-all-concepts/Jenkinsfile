@@ -42,6 +42,8 @@ pipeline {
     parameters {
         string(name: 'OUTPUT', defaultValue: '',
                description: 'REQUIRED. --output: where global_AllConcepts.csv is written (local path or s3:// URI). Appends the filename if it ends with /.')
+        string(name: 'MANAGED_INPUTS', defaultValue: '',
+               description: 'Override for the managed inputs CSV URI (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'm5.large',
@@ -63,8 +65,9 @@ pipeline {
 
         RUNNER_DIR = 'etl-runners/generate-global-all-concepts'
 
-        TF_VAR_output_uri    = "${params.OUTPUT}"
-        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+        TF_VAR_output_uri          = "${params.OUTPUT}"
+        TF_VAR_managed_inputs_uri  = "${params.MANAGED_INPUTS}"
+        TF_VAR_instance_type       = "${params.INSTANCE_TYPE}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
     }

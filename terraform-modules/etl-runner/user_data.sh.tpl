@@ -112,7 +112,7 @@ say "Fetching RDS credentials from Secrets Manager (${rds_secret_id})"
 
 # Non-secret environment, rendered by Terraform. Decoded from base64 so no heredoc
 # delimiter or embedded newline in a job param value can inject into this file.
-echo '${container_env_b64}' | base64 -d > "$ENV_FILE"
+{ echo '${container_env_b64}' | base64 -d; printf '\n'; } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 SECRET_JSON=$(aws secretsmanager get-secret-value \

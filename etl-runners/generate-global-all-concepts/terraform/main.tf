@@ -33,9 +33,10 @@ module "etl_runner" {
   rds_host             = var.rds_host
   rds_dbname           = var.rds_dbname
 
-  job_params = {
-    output = var.output_uri
-  }
+  job_params = merge(
+    { output = var.output_uri },
+    var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {}
+  )
 
   tags = merge({
     Project  = "PIC-SURE HPDS ETL"

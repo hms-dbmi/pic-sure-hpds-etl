@@ -96,6 +96,12 @@ variable "output_uri" {
   description = "--output: where global_AllConcepts.csv is written (local path or s3:// URI)"
 }
 
+variable "managed_inputs_uri" {
+  type        = string
+  default     = ""
+  description = "--managed-inputs: CSV listing studies to include (local path or s3:// URI). When blank the job falls back to etl.managed-inputs.uri from its config."
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"
