@@ -52,12 +52,21 @@ sentinel_present() {
 }
 
 # Prints the run's status and returns the job's exit code.
+# Returns 200 if the sentinel belongs to a different instance (stale from a previous attempt).
 report_sentinel() {
   local body
   body=$(aws s3 cp "$STATUS_URI" - --region "$REGION" 2>/dev/null) || {
     warn "sentinel present but could not be downloaded"
     return 4
   }
+
+  local sentinel_instance
+  sentinel_instance=$(printf '%s' "$body" | jq -r '.instanceId // empty')
+  if [[ -n "$sentinel_instance" && "$sentinel_instance" != "$INSTANCE_ID" ]]; then
+    warn "stale sentinel from instance $sentinel_instance (monitoring $INSTANCE_ID) — deleting"
+    aws s3 rm "$STATUS_URI" --region "$REGION" 2>/dev/null || true
+    return 200
+  fi
 
   echo "=== status.json ==="
   echo "$body"
@@ -127,7 +136,13 @@ log "Monitoring $INSTANCE_ID (sentinel: $STATUS_URI)"
 #    always wins over the instance state.
 boot_start=$(date +%s)
 while true; do
-  sentinel_present && break
+  if sentinel_present; then
+    report_sentinel; rc=$?
+    if (( rc != 200 )); then
+      dump_log_from_s3
+      exit "$rc"
+    fi
+  fi
 
   state=$(instance_state)
   [[ "$state" == "running" ]] && { log "Instance running"; break; }
@@ -151,10 +166,11 @@ done
 run_start=$(date +%s)
 while true; do
   if sentinel_present; then
-    report_sentinel
-    rc=$?
-    dump_log_from_s3
-    exit "$rc"
+    report_sentinel; rc=$?
+    if (( rc != 200 )); then
+      dump_log_from_s3
+      exit "$rc"
+    fi
   fi
 
   state=$(instance_state)
@@ -164,10 +180,11 @@ while true; do
       grace_start=$(date +%s)
       while (( $(date +%s) - grace_start < GRACE_TIMEOUT )); do
         if sentinel_present; then
-          report_sentinel
-          rc=$?
-          dump_log_from_s3
-          exit "$rc"
+          report_sentinel; rc=$?
+          if (( rc != 200 )); then
+            dump_log_from_s3
+            exit "$rc"
+          fi
         fi
         sleep 10
       done
