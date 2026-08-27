@@ -57,6 +57,7 @@ locals {
       rds_dbname        = var.rds_dbname
       reports_prefix    = local.reports_prefix
       container_env_b64 = local.container_env_b64
+      container_assume_role_arn = var.container_assume_role_arn
     },
     var.user_data_template_vars
   )

@@ -33,6 +33,8 @@ module "etl_runner" {
   rds_host             = var.rds_host
   rds_dbname           = var.rds_dbname
 
+  container_assume_role_arn = var.container_assume_role_arn
+
   job_params = merge(
     { output = var.output_uri },
     var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {}

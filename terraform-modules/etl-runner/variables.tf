@@ -168,6 +168,17 @@ variable "reports_s3_prefix" {
   EOT
 }
 
+variable "container_assume_role_arn" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    When set, the runner writes an AWS CLI config that assumes this role using the
+    instance-profile credentials, mounts it into the container, and sets AWS_PROFILE.
+    Use this for cross-account access (e.g. reading inputs from a different account's
+    S3 bucket).
+  EOT
+}
+
 variable "user_data_template_vars" {
   type        = map(string)
   default     = {}

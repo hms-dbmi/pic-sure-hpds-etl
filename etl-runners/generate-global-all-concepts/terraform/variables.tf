@@ -102,6 +102,12 @@ variable "managed_inputs_uri" {
   description = "--managed-inputs: CSV listing studies to include (local path or s3:// URI). When blank the job falls back to etl.managed-inputs.uri from its config."
 }
 
+variable "container_assume_role_arn" {
+  type        = string
+  default     = ""
+  description = "Cross-account IAM role ARN for the container to assume when accessing S3 inputs."
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"

@@ -166,10 +166,28 @@ rm -f /tmp/image.tar.gz
 
 # --------------------------------------------------------------------------
 PHASE=job
+
+# Cross-account role assumption: when container_assume_role_arn is set, write an AWS
+# config so the SDK inside the container assumes that role via the instance profile.
+DOCKER_EXTRA_ARGS=()
+%{ if container_assume_role_arn != "" ~}
+AWS_CONFIG_DIR=$WORK/.aws
+mkdir -p "$AWS_CONFIG_DIR"
+cat > "$AWS_CONFIG_DIR/config" <<'AWSCFG'
+[profile cross-account]
+role_arn = ${container_assume_role_arn}
+credential_source = Ec2InstanceMetadata
+AWSCFG
+chmod 600 "$AWS_CONFIG_DIR/config"
+DOCKER_EXTRA_ARGS+=(-v "$AWS_CONFIG_DIR:/root/.aws:ro" -e "AWS_PROFILE=cross-account")
+say "Cross-account role configured: ${container_assume_role_arn}"
+%{ endif ~}
+
 say "Running job ${job_name} (run ${run_id})"
 set +e
 docker run --rm \
   --env-file "$ENV_FILE" \
+  "$${DOCKER_EXTRA_ARGS[@]}" \
   -v "$REPORTS":/reports \
   "${image_name}"
 JOB_EXIT=$?
