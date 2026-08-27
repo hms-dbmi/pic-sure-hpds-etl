@@ -1,0 +1,3 @@
+*
+!target/hpds-etl.jar
+!etl-runners/run-job.sh
