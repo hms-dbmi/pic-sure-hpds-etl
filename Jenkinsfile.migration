@@ -341,8 +341,14 @@ EOF
                     def downstream = build(
                         job: params.ALL_CONCEPTS_JOB,
                         wait: true,
-                        propagate: true,
+                        propagate: false,
                         parameters: conceptParams)
+
+                    if (downstream.result == 'FAILURE') {
+                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} failed")
+                    } else if (downstream.result == 'UNSTABLE') {
+                        unstable("${params.ALL_CONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    }
 
                     try {
                         copyArtifacts(
