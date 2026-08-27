@@ -126,9 +126,13 @@ SECRET_JSON=$(aws secretsmanager get-secret-value \
 # `docker inspect`, and any command echo.
 {
   printf 'RDS_URL=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r --arg tfhost '${rds_host}' --arg tfdb '${rds_dbname}' '
-    if .url then .url
-    elif .jdbcUrl then .jdbcUrl
-    else "jdbc:postgresql://" + ((.host // $tfhost) | if . == "" then error("no RDS host in secret or tfvars") else . end) + ":" + ((.port // 5432) | tostring) + "/" + ((.dbname // .dbName // $tfdb) | if . == "" then "hpds" else . end)
+    def nonempty: if (. // "") == "" then null else . end;
+    if (.url | nonempty) then .url
+    elif (.jdbcUrl | nonempty) then .jdbcUrl
+    else "jdbc:postgresql://"
+      + ((.host | nonempty) // ($tfhost | nonempty) // error("no RDS host in secret or tfvars"))
+      + ":" + (((.port | nonempty) // 5432) | tostring)
+      + "/" + (((.dbname | nonempty) // (.dbName | nonempty) // ($tfdb | nonempty)) // "hpds")
     end')"
   printf 'RDS_USERNAME=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.username')"
   printf 'RDS_PASSWORD=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.password')"
