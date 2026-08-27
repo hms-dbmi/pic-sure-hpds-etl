@@ -17,3 +17,7 @@ vpc_security_group_ids = ["sg-0a1231bb668b1428f"]
 rds_secret_id        = "arn:aws:secretsmanager:us-east-1:900561893673:secret:rds!db-8086eb77-cd6d-48bc-9298-4380892798ca-9cjLb2"
 manage_secret_access = true
 rds_secret_arn       = "arn:aws:secretsmanager:us-east-1:900561893673:secret:rds!db-8086eb77-cd6d-48bc-9298-4380892798ca-9cjLb2"
+
+# RDS connection details (the RDS-managed secret only contains username/password)
+rds_host   = "dictionarydb.cljahwnkfisu.us-east-1.rds.amazonaws.com"
+rds_dbname = "etl_db"
