@@ -18,10 +18,22 @@ SHELL := /bin/bash
 
 REPO_ROOT   := $(abspath ../..)
 COMMON_DIR  := $(abspath ../common)
-TF          := terraform
 TF_DIR      := terraform
 TFVARS      := $(TF_DIR)/$(NAME).tfvars
 BACKEND     := $(TF_DIR)/$(NAME).backend.tfvars
+
+# Terraform version required by the .tf files (>= 1.3.0). If the system binary
+# is missing or too old, `ensure-terraform` downloads this exact version to a
+# shared local directory so every runner uses the same binary.
+TF_VERSION     := 1.9.8
+TF_MIN_VERSION := 1.3.0
+LOCAL_TF_DIR   := $(COMMON_DIR)/.terraform-bin
+LOCAL_TF       := $(LOCAL_TF_DIR)/terraform
+
+# Resolve TF: use the local binary if it exists, otherwise the system binary.
+# ensure-terraform (a dependency of init) installs the local binary when needed.
+# Recursively expanded (=) so it picks up the local binary after ensure-terraform runs.
+TF = $(if $(wildcard $(LOCAL_TF)),$(LOCAL_TF),terraform)
 
 # Environment: switch with ENV=staging, ENV=production, etc.
 ENV         ?= integration
@@ -43,8 +55,8 @@ STATE_KEY   ?= tf_backend/etl-runners/hpds-etl/$(NAME)/terraform.tfstate
 REPORTS_DIR ?= $(CURDIR)/reports
 SKIP_TESTS  ?= false
 
-.PHONY: help jar image image-save image-upload package init plan apply run monitor \
-        fetch-reports output destroy clean validate-tf
+.PHONY: help jar image image-save image-upload package ensure-terraform init plan apply \
+        run monitor fetch-reports output destroy clean validate-tf
 
 help:
 	@echo "Runner: $(NAME)"
@@ -89,7 +101,34 @@ package: image-upload
 
 # --- Terraform -----------------------------------------------------------
 
-init:
+ensure-terraform:
+	@if $(TF) version -json 2>/dev/null | jq -e '.terraform_version' >/dev/null 2>&1; then \
+		ver=$$($(TF) version -json | jq -r '.terraform_version'); \
+		if printf '%s\n%s\n' "$(TF_MIN_VERSION)" "$$ver" | sort -V -C 2>/dev/null; then \
+			echo "Terraform $$ver >= $(TF_MIN_VERSION) — ok"; \
+			exit 0; \
+		fi; \
+		echo "Terraform $$ver < $(TF_MIN_VERSION)"; \
+	else \
+		echo "No usable terraform on PATH"; \
+	fi; \
+	if [ -x "$(LOCAL_TF)" ]; then \
+		echo "Using previously installed $(LOCAL_TF)"; \
+		$(LOCAL_TF) version | head -1; \
+		exit 0; \
+	fi; \
+	echo "Installing Terraform $(TF_VERSION) to $(LOCAL_TF_DIR)"; \
+	mkdir -p "$(LOCAL_TF_DIR)"; \
+	os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
+	curl -fsSL "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_$${os}_$${arch}.zip" \
+		-o "$(LOCAL_TF_DIR)/terraform.zip"; \
+	unzip -o -q "$(LOCAL_TF_DIR)/terraform.zip" -d "$(LOCAL_TF_DIR)"; \
+	rm -f "$(LOCAL_TF_DIR)/terraform.zip"; \
+	chmod +x "$(LOCAL_TF)"; \
+	echo "Installed: $$($(LOCAL_TF) version | head -1)"
+
+init: ensure-terraform
 	$(TF) -chdir=$(TF_DIR) init -reconfigure \
 		-backend-config=$(notdir $(BACKEND)) \
 		-backend-config="key=$(STATE_KEY)"
