@@ -33,6 +33,8 @@ module "etl_runner" {
   rds_host             = var.rds_host
   rds_dbname           = var.rds_dbname
 
+  container_assume_role_arn = var.container_assume_role_arn
+
   # Keys use underscores; the runner converts them to --input, --study-id, --batch-size.
   # Names must match SstrPopulateRdsParticipantsJob.expectations().
   job_params = {

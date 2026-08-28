@@ -33,6 +33,8 @@ module "etl_runner" {
   rds_host             = var.rds_host
   rds_dbname           = var.rds_dbname
 
+  container_assume_role_arn = var.container_assume_role_arn
+
   job_params = {
     study-id      = var.study_id
     data-dir      = var.data_dir

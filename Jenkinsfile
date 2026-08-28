@@ -49,6 +49,8 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/sstr-populate-rds-participants/Jenkinsfile')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
                description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state.')
+        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
+               description: 'Cross-account IAM role ARN for containers to assume when reading S3 inputs from the 73 bucket. Passed to every downstream runner.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep loading the remaining studies when one fails, then fail the build with a summary. Safe: each study is loaded in its own transaction, scoped to its own study_id.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
@@ -250,6 +252,7 @@ EOF
                                         string(name: 'STUDY_ID', value: s.studyId),
                                         string(name: 'INPUT',    value: s.input),
                                         string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
+                                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
                                         string(name: 'ENV',  value: params.ENV),
                                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -316,6 +319,7 @@ EOF
 
                     def conceptParams = [
                         string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
+                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -359,6 +363,7 @@ EOF
 
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
+                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),

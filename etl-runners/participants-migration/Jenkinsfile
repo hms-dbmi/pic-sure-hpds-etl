@@ -74,6 +74,8 @@ pipeline {
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: loads are transactional and upserts are idempotent.')
+        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
+               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the input layout and stop, without provisioning anything')
         choice(name: 'ENV', choices: ['integration'],
@@ -89,10 +91,11 @@ pipeline {
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
         // line (and so never in `ps` output or the console log's shell echo).
-        TF_VAR_managed_inputs_uri = "${params.MANAGED_INPUTS}"
-        TF_VAR_data_folder_uri    = "${params.DATA_FOLDER}"
-        TF_VAR_batch_size         = "${params.BATCH_SIZE}"
-        TF_VAR_instance_type      = "${params.INSTANCE_TYPE}"
+        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS}"
+        TF_VAR_data_folder_uri           = "${params.DATA_FOLDER}"
+        TF_VAR_batch_size                = "${params.BATCH_SIZE}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE}"
         TF_VAR_name_suffix        = "${env.BUILD_NUMBER}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"

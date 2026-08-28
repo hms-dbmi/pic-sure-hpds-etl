@@ -32,6 +32,8 @@ module "etl_runner" {
   rds_host             = var.rds_host
   rds_dbname           = var.rds_dbname
 
+  container_assume_role_arn = var.container_assume_role_arn
+
   # Keys use underscores; the runner converts them to --managed-inputs, --data-folder,
   # --batch-size. Names must match ParticipantsMigrationJob.expectations().
   job_params = {

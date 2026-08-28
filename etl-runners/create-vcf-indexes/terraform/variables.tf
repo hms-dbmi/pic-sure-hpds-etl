@@ -96,6 +96,12 @@ variable "output_uri" {
   description = "--output: where vcfIndex.tsv and SampleIds.csv are written (local path or s3:// URI)"
 }
 
+variable "container_assume_role_arn" {
+  type        = string
+  default     = ""
+  description = "Cross-account IAM role ARN for the container to assume when accessing S3 inputs."
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"

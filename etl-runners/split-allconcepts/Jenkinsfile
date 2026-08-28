@@ -68,6 +68,8 @@ pipeline {
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
+        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
+               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the input layout and stop, without provisioning anything')
         choice(name: 'ENV', choices: ['integration'],
@@ -81,12 +83,13 @@ pipeline {
 
         RUNNER_DIR = 'etl-runners/split-allconcepts'
 
-        TF_VAR_study_id      = "${params.STUDY_ID}"
-        TF_VAR_abbreviation  = "${params.ABBREVIATION}"
-        TF_VAR_input_uri     = "${params.INPUT}"
-        TF_VAR_mapping_uri   = "${params.MAPPING}"
-        TF_VAR_output_uri    = "${params.OUTPUT}"
-        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+        TF_VAR_study_id                  = "${params.STUDY_ID}"
+        TF_VAR_abbreviation              = "${params.ABBREVIATION}"
+        TF_VAR_input_uri                 = "${params.INPUT}"
+        TF_VAR_mapping_uri               = "${params.MAPPING}"
+        TF_VAR_output_uri                = "${params.OUTPUT}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE}"
         TF_VAR_name_suffix   = "${env.BUILD_NUMBER}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
