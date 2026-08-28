@@ -33,9 +33,14 @@ public abstract class AbstractIntegrationTest {
                     .withServices("s3");
 
     static {
-        // Sequential: startup is dominated by the image pull, and a failure should name the
-        // container that could not start.
         POSTGRES.start();
+        try (var conn = java.sql.DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+             var stmt = conn.createStatement()) {
+            stmt.execute("CREATE SCHEMA IF NOT EXISTS etl");
+        } catch (java.sql.SQLException e) {
+            throw new RuntimeException("Failed to create etl schema in test container", e);
+        }
         LOCALSTACK.start();
     }
 
