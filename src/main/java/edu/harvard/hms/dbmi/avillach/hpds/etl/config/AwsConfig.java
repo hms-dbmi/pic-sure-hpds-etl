@@ -67,7 +67,8 @@ public class AwsConfig {
                 .orElseThrow(() -> new IllegalStateException(
                         "Profile " + profile + " has no role_arn"));
 
-        String sessionName = profileObj.property("role_session_name").orElse("etl-session");
+        String rawSession = profileObj.property("role_session_name").orElse("etl-session");
+        String sessionName = rawSession.length() > 64 ? rawSession.substring(0, 64) : rawSession;
 
         LOG.info("Assuming role {} with session {}", roleArn, sessionName);
 
