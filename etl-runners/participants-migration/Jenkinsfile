@@ -290,7 +290,7 @@ EOF
                 if (env.IMAGE_TAR) {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
-                          ${RUNNER_DIR}/terraform/participants-migration.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
                 }

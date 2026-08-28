@@ -167,26 +167,29 @@ rm -f /tmp/image.tar.gz
 # --------------------------------------------------------------------------
 PHASE=job
 
-# Cross-account role assumption: call STS on the host (which has the instance profile)
-# and inject the temporary credentials into the container's env file. This avoids
-# needing the sts SDK artifact inside the Java app for profile-based role assumption.
+# Cross-account role assumption: write an AWS config profile that assumes the
+# target role using the EC2 instance-profile credentials as source.  The SDK
+# refreshes the STS session automatically, so long-running jobs never hit an
+# expired-token error.
 DOCKER_EXTRA_ARGS=()
 %{ if container_assume_role_arn != "" ~}
-say "Assuming cross-account role: ${container_assume_role_arn}"
-STS_SESSION="etl-${run_id}"
-STS_SESSION="$${STS_SESSION:0:64}"
-ASSUME_JSON=$(aws sts assume-role \
-  --role-arn "${container_assume_role_arn}" \
-  --role-session-name "$STS_SESSION" \
-  --region "${aws_region}" \
-  --output json)
+say "Configuring cross-account role profile: ${container_assume_role_arn}"
+AWS_CFG_DIR=/tmp/aws-config
+mkdir -p "$AWS_CFG_DIR"
+cat > "$AWS_CFG_DIR/config" <<AWSCFG
+[profile etl-cross-account]
+role_arn = ${container_assume_role_arn}
+credential_source = Ec2InstanceMetadata
+role_session_name = etl-${run_id}
+region = ${aws_region}
+AWSCFG
+chmod 600 "$AWS_CFG_DIR/config"
+DOCKER_EXTRA_ARGS+=(-v "$AWS_CFG_DIR/config:/root/.aws/config:ro")
 {
-  printf 'AWS_ACCESS_KEY_ID=%s\n' "$(printf '%s' "$ASSUME_JSON" | jq -r '.Credentials.AccessKeyId')"
-  printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$(printf '%s' "$ASSUME_JSON" | jq -r '.Credentials.SecretAccessKey')"
-  printf 'AWS_SESSION_TOKEN=%s\n' "$(printf '%s' "$ASSUME_JSON" | jq -r '.Credentials.SessionToken')"
+  printf 'AWS_PROFILE=etl-cross-account\n'
+  printf 'AWS_CONFIG_FILE=/root/.aws/config\n'
 } >> "$ENV_FILE"
-unset ASSUME_JSON
-say "Cross-account credentials written to env file (${container_assume_role_arn})"
+say "Cross-account profile configured (${container_assume_role_arn})"
 %{ endif ~}
 
 say "Running job ${job_name} (run ${run_id})"
