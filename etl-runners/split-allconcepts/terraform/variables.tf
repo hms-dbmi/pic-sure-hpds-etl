@@ -114,7 +114,7 @@ variable "input_uri" {
 
 variable "mapping_uri" {
   type        = string
-  description = "--mapping: S3 URI of the hpds_id_mapping.csv produced by participants-migration"
+  description = "--mapping: S3 URI of the hpds_id_mapping.csv produced by participants-migration. Must be an s3:// URI readable by container_assume_role_arn (i.e. in the 73 bucket); the container resolves local paths against its own filesystem, where only /reports is mounted."
 }
 
 variable "output_uri" {

@@ -56,8 +56,8 @@ pipeline {
                defaultValue: '',
                description: '--mapping: S3 URI of the hpds_id_mapping.csv from participants-migration')
         string(name: 'OUTPUT',
-               defaultValue: './output',
-               description: '--output: output directory for split files')
+               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/split_allconcepts/',
+               description: '--output: output location for split files. Must be an s3:// URI (or a path under /reports): any other local path resolves inside the runner container and is destroyed with the instance.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
@@ -108,6 +108,16 @@ role_session_name = jenkins-hpds-etl
 EOF
                 '''
                 script {
+                    // Fail fast on paths the container cannot see. A non-s3 value resolves
+                    // against the container CWD (/app); only /reports is mounted. Anything
+                    // else burns ~20 minutes of provisioning and exits 5 (CONFIG_ERROR).
+                    [INPUT: params.INPUT, MAPPING: params.MAPPING, OUTPUT: params.OUTPUT].each { name, v ->
+                        if (v?.trim() && !v.startsWith('s3://') && !v.startsWith('/reports')) {
+                            error("${name} must be an s3:// URI (or a path under /reports): " +
+                                  "'${v}' would resolve inside the runner container and exit 5 (CONFIG_ERROR).")
+                        }
+                    }
+
                     def base = (params.RUN_ID?.trim()) ?: env.BUILD_TAG
                     env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
                     env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
