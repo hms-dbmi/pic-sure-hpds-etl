@@ -52,8 +52,11 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
                description: 'Jenkins job that runs etl-runners/split-allconcepts/Jenkinsfile')
-        string(name: 'SPLIT_OUTPUT', defaultValue: './output',
-               description: 'Output directory for split allConcepts files (local path or s3:// URI)')
+        string(name: 'MAPPING_UPLOAD_BASE',
+               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/mappings',
+               description: 'S3 prefix the orchestrator uploads each {studyid}_hpds_id_mapping.csv to before triggering split-allconcepts. Must be readable by CONTAINER_ASSUME_ROLE_ARN (the split container does ALL S3 I/O as that role). A per-build tag is appended.')
+        string(name: 'SPLIT_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/split_allconcepts/',
+               description: 'Output location for split allConcepts files. Must be an s3:// URI: a local path resolves INSIDE the runner container (/app), which is destroyed with the instance, silently discarding every per-consent CSV.')
         string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
         string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
@@ -221,6 +224,36 @@ EOF
 
                     echo "Split AllConcepts: ${studies.size()} study/studies to process"
 
+                    // Upload each study's mapping CSV to S3 before fanning out. The copied
+                    // artifact is a file in THIS workspace; the split job runs in a container
+                    // (WORKDIR /app, only /reports mounted) on its own EC2 instance, so a
+                    // workspace path can never resolve there. It must travel via a bucket the
+                    // container's assumed role (CONTAINER_ASSUME_ROLE_ARN) can read -- the
+                    // single S3Client in AwsConfig uses that role for ALL S3 I/O, which rules
+                    // out the stack bucket where runner reports land. Sequential on purpose:
+                    // the env-var handoff into sh is not safe under `parallel`.
+                    def mappingTag  = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    def mappingBase = "${params.MAPPING_UPLOAD_BASE.replaceAll('/+$', '')}/${mappingTag}"
+                    for (study in studies) {
+                        def sid = study.studyId
+                        def remoteMapping = "${mappingBase}/${sid}_hpds_id_mapping.csv"
+                        if (params.PREFLIGHT_ONLY) {
+                            // Nothing has produced a mapping yet; pass the would-be URI so the
+                            // split runner's soft preflight check warns instead of failing.
+                            study.mappingUri = remoteMapping
+                            continue
+                        }
+                        def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
+                        if (!fileExists(localMapping)) {
+                            error("${sid}: mapping CSV not found at ${localMapping}. " +
+                                  "The participants-migration copyArtifacts step may have failed.")
+                        }
+                        env.MAP_SRC = localMapping
+                        env.MAP_DST = remoteMapping
+                        sh 'AWS_PROFILE=dbgap-etl aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
+                        study.mappingUri = remoteMapping
+                    }
+
                     def results = java.util.Collections.synchronizedList([])
                     def branches = [:]
 
@@ -233,14 +266,7 @@ EOF
 
                             def inputUri = "s3://avillach-73-bdcatalyst-etl/${abvLower}/completed/${sid}/${sid}_allConcepts_new_search_with_data_analyzer.csv"
 
-                            def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
-                            def mappingUri
-                            if (fileExists(localMapping)) {
-                                mappingUri = localMapping
-                            } else {
-                                error("${sid}: mapping CSV not found at ${localMapping}. " +
-                                      "The participants-migration copyArtifacts step may have failed.")
-                            }
+                            def mappingUri = s.mappingUri
 
                             echo "--- ${sid} (${abv}) ---"
                             echo "  input:   ${inputUri}"
