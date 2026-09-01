@@ -24,8 +24,9 @@ variable "instance_type" {
   type        = string
   default     = "r6i.large"
   description = <<-EOT
-    Instance type. The job reads the allConcepts CSV, mapping CSV, and consent
-    assignments into memory, so it is memory-bound.
+    Instance type. The job streams the allConcepts CSV to per-consent temp files
+    on disk; only the id mapping and consent assignments live in memory, so the
+    job is disk/network-bound, not memory-bound.
   EOT
 }
 
@@ -42,8 +43,8 @@ variable "vpc_security_group_ids" {
 
 variable "root_volume_size" {
   type        = number
-  default     = 50
-  description = "Root EBS size in GiB. Holds the container image plus per-consent output CSVs."
+  default     = 500
+  description = "Root EBS size in GiB. Holds the container image plus the per-consent temp spool, which totals roughly the input size (phs000200's legacy allConcepts is 34 GiB). Sized generously: the volume is ephemeral and gp3 is cheap, running out of disk mid-split is not."
 }
 
 variable "rds_secret_id" {

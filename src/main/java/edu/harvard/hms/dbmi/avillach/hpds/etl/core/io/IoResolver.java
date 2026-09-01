@@ -120,6 +120,34 @@ public class IoResolver {
     }
 
     /**
+     * Sends an existing local file to the target location without loading it into memory
+     * and without a second spool. The caller keeps ownership of the file.
+     */
+    public void writeOutputFile(String uri, Path file) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            try {
+                s3.putObject(PutObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build(),
+                        RequestBody.fromFile(file));
+                log.info("Uploaded {} bytes to S3 {}", Files.size(file), uri);
+            } catch (IOException | RuntimeException e) {
+                throw new InfrastructureException("Failed to write to S3: " + uri, e);
+            }
+            return;
+        }
+        Path path = toLocalPath(uri);
+        try {
+            if (path.getParent() != null) {
+                Files.createDirectories(path.getParent());
+            }
+            Files.copy(file, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            log.info("Copied {} bytes to {}", Files.size(path), path.toAbsolutePath());
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to write local output: " + path, e);
+        }
+    }
+
+    /**
      * Streams output to the target location without materializing the full content in memory.
      * For S3, the content is spooled to a temp file first (S3 PutObject needs content length).
      */

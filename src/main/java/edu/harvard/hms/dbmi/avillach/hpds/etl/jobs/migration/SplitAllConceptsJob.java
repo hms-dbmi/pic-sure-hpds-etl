@@ -16,8 +16,12 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -115,76 +119,109 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         }
         log.info("Loaded {} consent assignment(s) for study {}", consentByUuid.size(), studyId);
 
-        Map<String, List<String>> linesByConsent = new LinkedHashMap<>();
+        // Rows are spooled to one local temp file per consent group rather than held in
+        // heap: parent studies' inputs run to tens of GB (phs000200 is 34 GB) and the
+        // previous per-consent List<String> accumulation OOMed the 12 GB runner heap.
+        Map<String, Path> tmpByConsent = new LinkedHashMap<>();
+        Map<String, BufferedWriter> writerByConsent = new LinkedHashMap<>();
+        Map<String, Long> rowsPerConsent = new LinkedHashMap<>();
         long totalRows = 0;
         long unmappedIds = 0;
         long noConsentRows = 0;
         List<String> unmappedSample = new ArrayList<>();
 
-        InputStream in = io.openInput(inputUri);
-        try (Stream<List<String>> rows = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
-            for (List<String> row : (Iterable<List<String>>) rows::iterator) {
-                if (row.size() < 5) {
-                    continue;
-                }
-                totalRows++;
-
-                String oldHpdsId = Strings.trimToNull(row.get(0));
-                if (oldHpdsId == null) {
-                    continue;
-                }
-
-                String newUuid = idMapping.get(oldHpdsId);
-                if (newUuid == null) {
-                    unmappedIds++;
-                    if (unmappedSample.size() < 10) {
-                        unmappedSample.add(oldHpdsId);
+        try {
+            InputStream in = io.openInput(inputUri);
+            try (Stream<List<String>> rows = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
+                for (List<String> row : (Iterable<List<String>>) rows::iterator) {
+                    if (row.size() < 5) {
+                        continue;
                     }
-                    continue;
-                }
+                    totalRows++;
 
-                String consentCode = consentByUuid.get(newUuid);
-                if (consentCode == null) {
-                    noConsentRows++;
-                    continue;
-                }
+                    String oldHpdsId = Strings.trimToNull(row.get(0));
+                    if (oldHpdsId == null) {
+                        continue;
+                    }
 
-                String line = formatCsvLine(newUuid, row.get(1), row.get(2), row.get(3), row.get(4));
-                linesByConsent.computeIfAbsent(consentCode, k -> new ArrayList<>()).add(line);
+                    String newUuid = idMapping.get(oldHpdsId);
+                    if (newUuid == null) {
+                        unmappedIds++;
+                        if (unmappedSample.size() < 10) {
+                            unmappedSample.add(oldHpdsId);
+                        }
+                        continue;
+                    }
+
+                    String consentCode = consentByUuid.get(newUuid);
+                    if (consentCode == null) {
+                        noConsentRows++;
+                        continue;
+                    }
+
+                    String line = formatCsvLine(newUuid, row.get(1), row.get(2), row.get(3), row.get(4));
+                    BufferedWriter writer = writerByConsent.get(consentCode);
+                    if (writer == null) {
+                        Path tmp = Files.createTempFile("split-" + studyId + "-c" + consentCode + "-", ".csv");
+                        tmpByConsent.put(consentCode, tmp);
+                        writer = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8);
+                        writerByConsent.put(consentCode, writer);
+                    }
+                    writer.write(line);
+                    writer.write('\n');
+                    rowsPerConsent.merge(consentCode, 1L, Long::sum);
+                }
+            }
+            for (BufferedWriter writer : writerByConsent.values()) {
+                writer.close();
+            }
+
+            log.info("Read {} row(s): {} mapped to consents, {} unmapped id(s), {} no-consent row(s)",
+                    totalRows, rowsPerConsent.values().stream().mapToLong(Long::longValue).sum(),
+                    unmappedIds, noConsentRows);
+
+            if (!unmappedSample.isEmpty()) {
+                log.warn("Sample unmapped hpds ids (up to 10): {}", unmappedSample);
+            }
+
+            String abvUpper = abbreviation.toUpperCase(Locale.ROOT);
+            Map<String, String> outputPaths = new LinkedHashMap<>();
+
+            for (Map.Entry<String, Path> entry : tmpByConsent.entrySet()) {
+                String code = entry.getKey();
+                Path tmp = entry.getValue();
+                String consentLabel = "c" + code;
+
+                String outputUri = joinPath(outputBase,
+                        "split_allconcepts", studyId, consentLabel,
+                        abvUpper + "_allConcepts_" + consentLabel + ".csv");
+
+                io.writeOutputFile(outputUri, tmp);
+                log.info("Wrote {} row(s) ({} bytes) to {}", rowsPerConsent.get(code), Files.size(tmp), outputUri);
+                outputPaths.put(code, outputUri);
+            }
+
+            return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows,
+                    rowsPerConsent, outputPaths);
+        } catch (IOException e) {
+            throw new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException(
+                    "Failed spooling split output for study " + studyId, e);
+        } finally {
+            for (BufferedWriter writer : writerByConsent.values()) {
+                try {
+                    writer.close();
+                } catch (IOException ignored) {
+                    // already closed on the happy path
+                }
+            }
+            for (Path tmp : tmpByConsent.values()) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException e) {
+                    log.warn("Could not delete temp file {}", tmp);
+                }
             }
         }
-
-        log.info("Read {} row(s): {} mapped to consents, {} unmapped id(s), {} no-consent row(s)",
-                totalRows, linesByConsent.values().stream().mapToInt(List::size).sum(),
-                unmappedIds, noConsentRows);
-
-        if (!unmappedSample.isEmpty()) {
-            log.warn("Sample unmapped hpds ids (up to 10): {}", unmappedSample);
-        }
-
-        String abvUpper = abbreviation.toUpperCase(Locale.ROOT);
-        Map<String, String> outputPaths = new LinkedHashMap<>();
-        Map<String, Long> rowsPerConsent = new LinkedHashMap<>();
-
-        for (Map.Entry<String, List<String>> entry : linesByConsent.entrySet()) {
-            String code = entry.getKey();
-            List<String> lines = entry.getValue();
-            String consentLabel = "c" + code;
-
-            String outputUri = joinPath(outputBase,
-                    "split_allconcepts", studyId, consentLabel,
-                    abvUpper + "_allConcepts_" + consentLabel + ".csv");
-
-            byte[] csv = String.join("\n", lines).concat("\n").getBytes(StandardCharsets.UTF_8);
-            io.writeOutput(outputUri, csv);
-            log.info("Wrote {} row(s) ({} bytes) to {}", lines.size(), csv.length, outputUri);
-
-            outputPaths.put(code, outputUri);
-            rowsPerConsent.put(code, (long) lines.size());
-        }
-
-        return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows,
-                rowsPerConsent, outputPaths);
     }
 
     private Map<String, String> readMappingCsv(String uri) {
