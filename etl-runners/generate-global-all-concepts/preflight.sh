@@ -33,10 +33,7 @@ fi
 if [[ "$OUTPUT" == s3://* ]]; then
     BUCKET="${OUTPUT#s3://}"
     BUCKET="${BUCKET%%/*}"
-    if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
-        fail "Cannot reach S3 bucket '$BUCKET' — check credentials and region."
-    fi
-    check "S3 bucket '$BUCKET' is reachable"
+    check "S3 bucket '$BUCKET' is reachable (else: check credentials and region)" aws s3api head-bucket --bucket "$BUCKET" --region "$REGION"
 else
     OUT_DIR="$OUTPUT"
     if [[ ! "$OUTPUT" == */ ]]; then
@@ -45,7 +42,7 @@ else
     if [[ ! -d "$OUT_DIR" ]]; then
         warn "Local output directory '$OUT_DIR' does not exist (the job will create it)"
     else
-        check "Local output directory '$OUT_DIR' exists"
+        check "Local output directory '$OUT_DIR' exists" true
     fi
 fi
 

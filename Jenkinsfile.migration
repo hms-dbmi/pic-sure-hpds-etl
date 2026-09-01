@@ -59,12 +59,12 @@ pipeline {
                description: 'Output location for split allConcepts files. Must be an s3:// URI: a local path resolves INSIDE the runner container (/app), which is destroyed with the instance, silently discarding every per-consent CSV.')
         string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
-        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
-               description: 'Output location for global_AllConcepts.csv (local path or s3:// URI)')
+        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/global_allconcepts/',
+               description: 'Output location for global_AllConcepts.csv. Must be an s3:// URI reachable by CONTAINER_ASSUME_ROLE_ARN.')
         string(name: 'VCF_INDEXES_JOB', defaultValue: 'create-vcf-indexes',
                description: 'Jenkins job that runs the create-vcf-indexes runner')
-        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
-               description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')
+        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/vcf_indexes/',
+               description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI reachable by CONTAINER_ASSUME_ROLE_ARN.')
         string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
                description: 'Cross-account IAM role ARN for containers to assume when reading S3 inputs from the 73 bucket. Passed to every downstream runner.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
@@ -192,6 +192,14 @@ EOF
                     }
                     if (!params.MAPPING_UPLOAD_BASE.trim().startsWith('s3://')) {
                         error("MAPPING_UPLOAD_BASE must be an s3:// URI, got '${params.MAPPING_UPLOAD_BASE}'.")
+                    }
+                    if (!params.ALL_CONCEPTS_OUTPUT.trim().startsWith('s3://')) {
+                        error("ALL_CONCEPTS_OUTPUT must be an s3:// URI, got '${params.ALL_CONCEPTS_OUTPUT}'. " +
+                              'The runner container writes it as CONTAINER_ASSUME_ROLE_ARN; use the 73 bucket.')
+                    }
+                    if (!params.VCF_INDEXES_OUTPUT.trim().startsWith('s3://')) {
+                        error("VCF_INDEXES_OUTPUT must be an s3:// URI, got '${params.VCF_INDEXES_OUTPUT}'. " +
+                              'The runner container writes it as CONTAINER_ASSUME_ROLE_ARN; use the 73 bucket.')
                     }
 
                     // Resolve the study list from managed inputs so we can loop per study.

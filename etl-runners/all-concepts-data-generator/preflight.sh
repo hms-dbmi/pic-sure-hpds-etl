@@ -39,24 +39,17 @@ echo ""
 # --- checks ---
 
 # Validate study id format
-if [[ ! "$STUDY_ID" =~ ^phs[0-9]{6}$ ]]; then
-    fail "study-id must match phs###### (6 digits), got: $STUDY_ID"
-fi
-check "study-id format is valid"
-
+check "study-id matches phs######: $STUDY_ID" bash -c '[[ "$1" =~ ^phs[0-9]{6}$ ]]' -- "$STUDY_ID"
 # Check data-dir reachability
 if [[ "$DATA_DIR" == s3://* ]]; then
     BUCKET="${DATA_DIR#s3://}"
     BUCKET="${BUCKET%%/*}"
-    if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
-        fail "Cannot reach S3 bucket '$BUCKET' for data-dir — check credentials and region."
-    fi
-    check "S3 bucket for data-dir is reachable"
+    check "S3 bucket for data-dir is reachable (else: check credentials and region)" aws s3api head-bucket --bucket "$BUCKET" --region "$REGION"
 else
     if [[ ! -d "$DATA_DIR" ]]; then
         warn "Local data directory '$DATA_DIR' does not exist yet"
     else
-        check "Local data directory exists"
+        check "Local data directory exists" true
     fi
 fi
 
@@ -64,20 +57,14 @@ fi
 if [[ "$MAPPING" == s3://* ]]; then
     BUCKET="${MAPPING#s3://}"
     BUCKET="${BUCKET%%/*}"
-    if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
-        fail "Cannot reach S3 bucket '$BUCKET' for mapping — check credentials and region."
-    fi
-    check "S3 bucket for mapping is reachable"
+    check "S3 bucket for mapping is reachable (else: check credentials and region)" aws s3api head-bucket --bucket "$BUCKET" --region "$REGION"
 fi
 
 # Check output reachability
 if [[ "$OUTPUT" == s3://* ]]; then
     BUCKET="${OUTPUT#s3://}"
     BUCKET="${BUCKET%%/*}"
-    if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
-        fail "Cannot reach S3 bucket '$BUCKET' for output — check credentials and region."
-    fi
-    check "S3 bucket for output is reachable"
+    check "S3 bucket for output is reachable (else: check credentials and region)" aws s3api head-bucket --bucket "$BUCKET" --region "$REGION"
 else
     OUT_DIR="$OUTPUT"
     if [[ ! "$OUTPUT" == */ ]]; then
@@ -86,7 +73,7 @@ else
     if [[ ! -d "$OUT_DIR" ]]; then
         warn "Local output directory '$OUT_DIR' does not exist (the job will create it)"
     else
-        check "Local output directory exists"
+        check "Local output directory exists" true
     fi
 fi
 
