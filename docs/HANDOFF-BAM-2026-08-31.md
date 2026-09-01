@@ -1,0 +1,102 @@
+# BAM Migration Pipeline — Handoff Notes (2026-08-31)
+
+Companion to the fix in this branch. Written for handback: everything here is
+readable without prior context, and every claim names its evidence.
+
+## What this branch changes
+
+**Two bugs, one root class: paths that resolve inside the runner container.**
+Each ETL job runs in a Docker container (`WORKDIR /app`, only `/reports`
+mounted) on its own ephemeral EC2 instance — so any non-`s3://` path a Jenkins
+pipeline passes it resolves against the container filesystem, not the Jenkins
+workspace.
+
+### 1. MAPPING handoff (ALS-12159) — pipeline-halting
+
+`Jenkinsfile.migration` passed each study's `{sid}_hpds_id_mapping.csv` to the
+`split-allconcepts` job as an orchestrator-workspace path. The container can
+never see that file → CONFIG_ERROR (exit 5) on every run. Commit `7c145bd`
+fixed file *discovery* in the orchestrator (copyArtifacts `flatten:true`) but
+not the handoff.
+
+**Evidence** (runner reports in the stack bucket,
+`etl-runner/reports/split-allconcepts/`): every split job in orchestrator
+builds #41/#42 (Aug 28) exited `5 / CONFIG_ERROR` with
+`S3 object not found: s3://avillach-73-bdcatalyst-etl/__migration__/current/{sid}_hpds_id_mapping.csv`
+— the pre-`7c145bd` fallback URI. That prefix has no object versions and no
+delete markers: nothing was ever uploaded there.
+
+**Fix:** the orchestrator uploads each mapping CSV to a new
+`MAPPING_UPLOAD_BASE` prefix (default
+`s3://avillach-73-bdcatalyst-etl/__migration__/mappings/<build-tag>/`) after
+the copyArtifacts gate, and passes the `s3://` URI.
+
+**Why this bucket:** the container performs ALL S3 I/O as
+`arn:aws:iam::736265540791:role/dbgap-etl` (single `S3Client`,
+`AwsConfig.java`). Policy `dbgap-etl` v10 grants Put/Get/DeleteObject on
+`avillach-73-bdcatalyst-etl/*`. The role can NOT read the stack bucket where
+runner reports land — do not route inter-runner artifacts through it, and the
+`-r2` infra-retry suffix makes the reports prefix non-deterministic anyway.
+
+### 2. Split output silently discarded (ALS-12160) — latent
+
+`SPLIT_OUTPUT` / `OUTPUT` defaulted to `./output` = `/app/output` in the
+container: unmounted, destroyed with the instance. A green run wrote its
+report, validated, and threw away every per-consent CSV. Defaults now point at
+`s3://avillach-73-bdcatalyst-etl/__migration__/split_allconcepts/`. (Friday's
+runs overrode output to `s3://…/BAM_testing/outputs/splits/`, so this bites
+only whoever trusts the default.)
+
+Also added: fail-fast guard in the split runner's Init stage — non-`s3://`
+INPUT/MAPPING/OUTPUT errors immediately instead of after ~20 minutes of
+provisioning.
+
+## Verification runbook (not yet run)
+
+Friday's real staging (recovered from `container-status.json` of build #37-r2):
+
+```
+MANAGED_INPUTS = s3://avillach-73-bdcatalyst-etl/BAM_testing/general/BAM_Managed_Inputs.csv
+DATA_FOLDER    = s3://avillach-73-bdcatalyst-etl/BAM_testing/
+```
+
+(The `__migration__/…` Jenkins defaults were never used and that prefix is empty.)
+
+1. `new-hpds-etl-participant-migration-pipeline` with the params above and
+   `PREFLIGHT_ONLY=true` — expect split preflight UNSTABLE (soft mapping
+   check), nothing provisioned.
+2. Single-study run (trim a copy of the managed-inputs CSV to one ready
+   study). Success = mapping object under `__migration__/mappings/<tag>/`,
+   split exit 0, non-zero `rowsPerConsent` in the report JSON, per-consent
+   CSVs present at the S3 output.
+3. Full sweep.
+
+**Watch item:** build #37-r2 (participants-migration) itself exited
+`4 / INFRASTRUCTURE_ERROR` — "Failed to list
+s3://avillach-73-bdcatalyst-etl/BAM_testing/whi/rawData" — after 64 min, yet
+that prefix exists and lists fine today. Likely transient credentials mid-run
+(the role-assume fixes landed afterwards). If it recurs, that's the next
+debugging thread. Its mapping CSVs for 23 studies are preserved under
+`etl-runner/reports/participants-migration/…-37-participants-r2/`.
+
+## Settled questions
+
+- **SSTR header contract (ALS-12158):** a real export
+  (`BAM_testing/whi/rawData/SSTR__sstr_phs000281.v8.txt`) carries
+  `SUBJECT_ID, SAMPLE_ID, CONSENT, SEX, consent_abbreviation,
+  dbgap_subject_repository, dbgap_subject_id, dbgap_sample_id, biosample_id, …`
+  — the job's required columns (`dbgap_subject_id`, `dbgap_sample_id`,
+  `CONSENT`, `consent_abbreviation`) all present verbatim. Code is correct;
+  the ticket's `submitted_subject_id`/`consent_code` wording was shorthand.
+
+## Known remaining work (tracked in Jira)
+
+- ALS-12163 recency-based merge: not implemented (design proposed on ticket).
+- Integration tests: sstr→global-concepts e2e (ALS-12176), VCF header (ALS-12178).
+- SSTR ragged-row test; non-standard cases (DCC-harmonized / tutorial-biolincc
+  / multi) parsed from managed inputs but acted on by no job — needs requirements.
+- No runner dir for `single-consent-data-populate-rds-participants` (job
+  exists and is enabled).
+- Stale docs: `Jenkinsfile.permanent` referenced in 7 places but doesn't exist
+  (permanent orchestrator is `/Jenkinsfile`); `etl-runners/README.md` lists 2
+  of 6 runners; `consents.csv` references in participants-migration docs.
