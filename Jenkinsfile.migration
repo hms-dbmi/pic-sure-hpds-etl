@@ -182,6 +182,18 @@ EOF
         stage('Split AllConcepts') {
             steps {
                 script {
+                    // Catch a stale form value (e.g. the pre-fix './output' default, which
+                    // Jenkins keeps serving until the job re-processes its parameters block,
+                    // and which Rebuild copies forward) here, once, instead of scheduling
+                    // 28 downstream builds that each fail the same runner-side guard.
+                    if (!params.SPLIT_OUTPUT.trim().startsWith('s3://')) {
+                        error("SPLIT_OUTPUT must be an s3:// URI, got '${params.SPLIT_OUTPUT}'. A local path " +
+                              'resolves inside the runner container and the split results are destroyed with the instance.')
+                    }
+                    if (!params.MAPPING_UPLOAD_BASE.trim().startsWith('s3://')) {
+                        error("MAPPING_UPLOAD_BASE must be an s3:// URI, got '${params.MAPPING_UPLOAD_BASE}'.")
+                    }
+
                     // Resolve the study list from managed inputs so we can loop per study.
                     def managedInputsUri = params.MANAGED_INPUTS?.trim()
                     if (!managedInputsUri) {
