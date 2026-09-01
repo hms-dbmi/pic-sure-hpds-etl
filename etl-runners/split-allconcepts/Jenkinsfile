@@ -83,16 +83,16 @@ pipeline {
 
         RUNNER_DIR = 'etl-runners/split-allconcepts'
 
-        TF_VAR_study_id                  = "${params.STUDY_ID}"
-        TF_VAR_abbreviation              = "${params.ABBREVIATION}"
-        TF_VAR_input_uri                 = "${params.INPUT}"
-        TF_VAR_mapping_uri               = "${params.MAPPING}"
-        TF_VAR_output_uri                = "${params.OUTPUT}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN}"
-        TF_VAR_instance_type             = "${params.INSTANCE_TYPE}"
+        TF_VAR_study_id                  = "${params.STUDY_ID.trim()}"
+        TF_VAR_abbreviation              = "${params.ABBREVIATION.trim()}"
+        TF_VAR_input_uri                 = "${params.INPUT.trim()}"
+        TF_VAR_mapping_uri               = "${params.MAPPING.trim()}"
+        TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
         TF_VAR_name_suffix   = "${env.BUILD_NUMBER}"
 
-        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
 
     stages {

@@ -67,11 +67,11 @@ pipeline {
 
         RUNNER_DIR = 'etl-runners/create-vcf-indexes'
 
-        TF_VAR_output_uri                = "${params.OUTPUT}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN}"
-        TF_VAR_instance_type             = "${params.INSTANCE_TYPE}"
+        TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
-        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
 
     stages {

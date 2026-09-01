@@ -19,10 +19,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../common/lib.sh"
 
 STUDY_ID="${TF_VAR_study_id:?TF_VAR_study_id is required}"
+STUDY_ID="$(trim "$STUDY_ID")"
 ABV="${TF_VAR_abbreviation:?TF_VAR_abbreviation is required}"
+ABV="$(trim "$ABV")"
 INPUT="${TF_VAR_input_uri:?TF_VAR_input_uri is required}"
+INPUT="$(trim "$INPUT")"
 MAPPING="${TF_VAR_mapping_uri:?TF_VAR_mapping_uri is required}"
+MAPPING="$(trim "$MAPPING")"
 OUTPUT="${TF_VAR_output_uri:?TF_VAR_output_uri is required}"
+OUTPUT="$(trim "$OUTPUT")"
 REGION="${AWS_REGION:-us-east-1}"
 
 uri_exists() {
@@ -50,15 +55,13 @@ check "study-id matches phs######" bash -c '[[ "$1" =~ ^phs[0-9]{6}$ ]]' -- "$ST
 check "abbreviation is non-empty" test -n "$ABV"
 
 # --- input allConcepts exists ------------------------------------------------
-check "allConcepts input exists" uri_exists "$INPUT"
-
+check "allConcepts input exists: $INPUT" uri_exists "$INPUT"
 # --- mapping CSV exists ------------------------------------------------------
 # The mapping CSV is uploaded by the orchestrator (MAPPING_UPLOAD_BASE) after
 # participants-migration completes; it does not exist yet when running
 # preflight-only, so this stays a soft check. This runs on the Jenkins agent
 # under the dbgap-etl profile, which can head-object the 73 bucket.
-soft "mapping CSV exists (uploaded by the orchestrator after participants-migration)" uri_exists "$MAPPING"
-
+soft "mapping CSV exists (uploaded by the orchestrator after participants-migration): $MAPPING" uri_exists "$MAPPING"
 # --- output looks reasonable -------------------------------------------------
 if [[ "$OUTPUT" == s3://* ]]; then
   check "output is an S3 URI" true

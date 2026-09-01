@@ -20,7 +20,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../common/lib.sh"
 
 MANAGED_INPUTS="${TF_VAR_managed_inputs_uri:?TF_VAR_managed_inputs_uri is required}"
+MANAGED_INPUTS="$(trim "$MANAGED_INPUTS")"
 DATA_FOLDER="${TF_VAR_data_folder_uri:?TF_VAR_data_folder_uri is required}"
+DATA_FOLDER="$(trim "$DATA_FOLDER")"
 REGION="${AWS_REGION:-us-east-1}"
 
 DATA_FOLDER="${DATA_FOLDER%/}"
@@ -60,7 +62,7 @@ echo "  data-folder:    $DATA_FOLDER"
 echo ""
 
 # --- managed-inputs ------------------------------------------------------
-check "managed-inputs exists" uri_exists "$MANAGED_INPUTS"
+check "managed-inputs exists: $MANAGED_INPUTS" uri_exists "$MANAGED_INPUTS"
 if ! uri_exists "$MANAGED_INPUTS"; then
   summary
   exit 1
@@ -117,8 +119,7 @@ note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process
 # Required unconditionally: execute() reads it before looking at any study, so a missing
 # one aborts the entire run rather than just the studies that would have used it.
 ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
-check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed)" uri_exists "$ALL_CONCEPTS"
-
+check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed): $ALL_CONCEPTS" uri_exists "$ALL_CONCEPTS"
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
 #         {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt (optional)
@@ -148,7 +149,7 @@ while IFS=$'\t' read -r abv sid state; do
   fi
 
   # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-uuid pairs.
-  check "$sid ($abv, $route): ${mapping##*/}" uri_exists "$mapping"
+  check "$sid ($abv, $route): $mapping" uri_exists "$mapping"
 done <<<"$STUDIES"
 
 echo ""

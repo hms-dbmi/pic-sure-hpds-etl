@@ -91,14 +91,14 @@ pipeline {
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
         // line (and so never in `ps` output or the console log's shell echo).
-        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS}"
-        TF_VAR_data_folder_uri           = "${params.DATA_FOLDER}"
-        TF_VAR_batch_size                = "${params.BATCH_SIZE}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN}"
-        TF_VAR_instance_type             = "${params.INSTANCE_TYPE}"
+        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
+        TF_VAR_data_folder_uri           = "${params.DATA_FOLDER.trim()}"
+        TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
         TF_VAR_name_suffix        = "${env.BUILD_NUMBER}"
 
-        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
 
     stages {

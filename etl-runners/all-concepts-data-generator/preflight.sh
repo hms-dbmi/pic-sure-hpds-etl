@@ -20,9 +20,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../common/lib.sh"
 
 STUDY_ID="${TF_VAR_study_id:?TF_VAR_study_id is required}"
+STUDY_ID="$(trim "$STUDY_ID")"
 DATA_DIR="${TF_VAR_data_dir:?TF_VAR_data_dir is required}"
+DATA_DIR="$(trim "$DATA_DIR")"
 MAPPING="${TF_VAR_mapping_uri:?TF_VAR_mapping_uri is required}"
+MAPPING="$(trim "$MAPPING")"
 OUTPUT="${TF_VAR_output_uri:?TF_VAR_output_uri is required}"
+OUTPUT="$(trim "$OUTPUT")"
 REGION="${AWS_REGION:-us-east-1}"
 
 echo "Pre-flight: all-concepts-data-generator"

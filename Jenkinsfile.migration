@@ -233,7 +233,7 @@ EOF
                     // out the stack bucket where runner reports land. Sequential on purpose:
                     // the env-var handoff into sh is not safe under `parallel`.
                     def mappingTag  = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
-                    def mappingBase = "${params.MAPPING_UPLOAD_BASE.replaceAll('/+$', '')}/${mappingTag}"
+                    def mappingBase = "${params.MAPPING_UPLOAD_BASE.trim().replaceAll('/+$', '')}/${mappingTag}"
                     for (study in studies) {
                         def sid = study.studyId
                         def remoteMapping = "${mappingBase}/${sid}_hpds_id_mapping.csv"

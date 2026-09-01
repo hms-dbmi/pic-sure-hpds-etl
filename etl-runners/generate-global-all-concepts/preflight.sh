@@ -17,6 +17,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../common/lib.sh"
 
 OUTPUT="${TF_VAR_output_uri:?TF_VAR_output_uri is required}"
+OUTPUT="$(trim "$OUTPUT")"
 REGION="${AWS_REGION:-us-east-1}"
 
 echo "Pre-flight: generate-global-all-concepts"

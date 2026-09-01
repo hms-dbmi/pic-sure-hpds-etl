@@ -96,16 +96,16 @@ pipeline {
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
         // line (and so never in `ps` output or the console log's shell echo).
-        TF_VAR_study_id                  = "${params.STUDY_ID}"
-        TF_VAR_input_uri                 = "${params.INPUT}"
-        TF_VAR_batch_size                = "${params.BATCH_SIZE}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN}"
-        TF_VAR_instance_type             = "${params.INSTANCE_TYPE}"
+        TF_VAR_study_id                  = "${params.STUDY_ID.trim()}"
+        TF_VAR_input_uri                 = "${params.INPUT.trim()}"
+        TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
-        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS}"
-        EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS}"
+        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS.trim()}"
+        EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS.trim()}"
 
-        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
 
     stages {
