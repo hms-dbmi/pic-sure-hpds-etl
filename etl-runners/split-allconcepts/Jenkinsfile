@@ -111,10 +111,15 @@ EOF
                     // Fail fast on paths the container cannot see. A non-s3 value resolves
                     // against the container CWD (/app); only /reports is mounted. Anything
                     // else burns ~20 minutes of provisioning and exits 5 (CONFIG_ERROR).
-                    [INPUT: params.INPUT, MAPPING: params.MAPPING, OUTPUT: params.OUTPUT].each { name, v ->
-                        if (v?.trim() && !v.startsWith('s3://') && !v.startsWith('/reports')) {
-                            error("${name} must be an s3:// URI (or a path under /reports): " +
-                                  "'${v}' would resolve inside the runner container and exit 5 (CONFIG_ERROR).")
+                    // Plain indexed loop: the error() step cannot be called from inside a
+                    // .each closure (CPS transformation breaks it and fails the build at Init).
+                    def guardedParams = [['INPUT', params.INPUT], ['MAPPING', params.MAPPING], ['OUTPUT', params.OUTPUT]]
+                    for (int gi = 0; gi < guardedParams.size(); gi++) {
+                        def gName = guardedParams[gi][0]
+                        def gVal  = guardedParams[gi][1]
+                        if (gVal?.trim() && !gVal.startsWith('s3://') && !gVal.startsWith('/reports')) {
+                            error("${gName} must be an s3:// URI (or a path under /reports): " +
+                                  "'${gVal}' would resolve inside the runner container and exit 5 (CONFIG_ERROR).")
                         }
                     }
 
