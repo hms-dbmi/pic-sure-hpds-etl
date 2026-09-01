@@ -3,7 +3,7 @@
 //
 // Runs one hpds-etl job on a Terraform-provisioned ephemeral EC2 runner that terminates itself
 // when the job exits. Triggered by the migration orchestrator's "Migrate participants" stage
-// (/Jenkinsfile); also runnable standalone.
+// (/Jenkinsfile.migration); also runnable standalone.
 //
 // Delete this file, its runner directory, and ParticipantsMigrationJob once the migration has run
 // in every environment.
@@ -14,7 +14,7 @@
 //     - {studyid}_sstr.tsv present: SstrPopulateRdsParticipantsJob loads RDS and this job only
 //       resolves legacy-hpds-id -> new-uuid pairs
 //     - otherwise: this job populates participants/consents itself, joining
-//       {ABV}_PatientMapping.v2.csv against the shared consents.csv
+//       {ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).
 //
 // Inputs
@@ -42,6 +42,10 @@
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk-25'
+    }
+
     options {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
@@ -57,42 +61,58 @@ pipeline {
                description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
         string(name: 'DATA_FOLDER',
                defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/current',
-               description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared consents.csv')
+               description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG. Appears in the report filename and the S3 report prefix.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
-               description: 'Runner instance type. Memory-bound: a study mapping file and consents.csv are joined in memory.')
+               description: 'Runner instance type. Memory-bound: a study mapping file and GLOBAL_allConcepts_merged.csv are joined in memory.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: loads are transactional and upserts are idempotent.')
+        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
+               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the input layout and stop, without provisioning anything')
+        choice(name: 'ENV', choices: ['integration'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        AWS_REGION = 'us-east-1'
+        ENV             = "${params.ENV ?: 'integration'}"
+        AWS_REGION      = 'us-east-1'
+        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
+
         RUNNER_DIR = 'etl-runners/participants-migration'
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
         // line (and so never in `ps` output or the console log's shell echo).
-        TF_VAR_managed_inputs_uri = "${params.MANAGED_INPUTS}"
-        TF_VAR_data_folder_uri    = "${params.DATA_FOLDER}"
-        TF_VAR_batch_size         = "${params.BATCH_SIZE}"
-        TF_VAR_instance_type      = "${params.INSTANCE_TYPE}"
+        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
+        TF_VAR_data_folder_uri           = "${params.DATA_FOLDER.trim()}"
+        TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
         TF_VAR_name_suffix        = "${env.BUILD_NUMBER}"
 
-        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
 
     stages {
 
         stage('Init') {
             steps {
+                sh '''
+                    cat > "$AWS_CONFIG_FILE" <<'EOF'
+[profile dbgap-etl]
+role_arn = arn:aws:iam::736265540791:role/dbgap-etl
+credential_source = Ec2InstanceMetadata
+role_session_name = jenkins-hpds-etl
+EOF
+                '''
                 script {
                     // BUILD_TAG can contain '/' for folder or multibranch jobs, and this
                     // value becomes both a filename and an S3 key.
@@ -111,7 +131,7 @@ pipeline {
                 sh '''
                     set -e
                     echo "--- tool versions ---"
-                    terraform version | head -1
+                    make -s -C $RUNNER_DIR ensure-terraform
                     aws --version
                     docker --version
                     jq --version
@@ -143,11 +163,13 @@ pipeline {
                     // Called directly, not through make: make collapses every failure to 2
                     // and would lose the validator's "10 = warnings" signal.
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                    if (rc == 10) {
-                        unstable('Pre-flight found warnings in the input layout')
-                    } else if (rc != 0) {
-                        error("Pre-flight failed (rc=${rc}): the input layout would fail studies at run time")
+                    withEnv(['AWS_PROFILE=dbgap-etl']) {
+                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                        if (rc == 10) {
+                            unstable('Pre-flight found warnings in the input layout')
+                        } else if (rc != 0) {
+                            error("Pre-flight failed (rc=${rc}): the input layout would fail studies at run time")
+                        }
                     }
                 }
             }
@@ -182,10 +204,11 @@ pipeline {
 
                         rc = sh(returnStatus: true, script: """
                             cd ${RUNNER_DIR}
+                            TF=\$(make -s tf-path)
                             ../common/monitor-runner.sh \
-                              "\$(terraform -chdir=terraform output -raw instance_id)" \
-                              "\$(terraform -chdir=terraform output -raw status_s3_uri)" \
-                              "\$(terraform -chdir=terraform output -raw log_s3_uri)"
+                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
                         """)
 
                         env.JOB_EXIT_CODE = "${rc}"
@@ -267,7 +290,7 @@ pipeline {
                 if (env.IMAGE_TAR) {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
-                          ${RUNNER_DIR}/terraform/participants-migration.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
                 }

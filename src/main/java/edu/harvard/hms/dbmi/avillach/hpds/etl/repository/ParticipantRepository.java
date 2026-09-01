@@ -106,7 +106,7 @@ public class ParticipantRepository {
     }
 
     /** Splits an IN (...) lookup so the JDBC driver's parameter limit is never the ceiling. */
-    private Map<String, UUID> findUuidsChunked(List<String> sourceIds, String source, int batchSize) {
+    public Map<String, UUID> findUuidsChunked(List<String> sourceIds, String source, int batchSize) {
         if (sourceIds.size() <= batchSize) {
             return findUuids(sourceIds, source);
         }
@@ -184,6 +184,25 @@ public class ParticipantRepository {
             return found;
         } catch (DataAccessException e) {
             throw new InfrastructureException("Batch lookup in participants failed", e);
+        }
+    }
+
+    public List<Participant> findByStudyId(String studyId) {
+        try {
+            return jdbc.query(
+                    """
+                    SELECT DISTINCT p.hpds_uuid, p.source_id, p.source
+                    FROM participants p
+                    JOIN consents c ON p.hpds_uuid = c.hpds_uuid
+                    WHERE c.study_id = :studyId
+                    """,
+                    new MapSqlParameterSource().addValue("studyId", studyId),
+                    (rs, n) -> new Participant(
+                            rs.getObject("hpds_uuid", UUID.class),
+                            rs.getString("source_id"),
+                            rs.getString("source")));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Query participants by study_id failed", e);
         }
     }
 

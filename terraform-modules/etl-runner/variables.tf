@@ -46,6 +46,12 @@ variable "subnet_id" {
   description = "Subnet to launch the instance in."
 }
 
+variable "vpc_security_group_ids" {
+  type        = list(string)
+  default     = []
+  description = "Security group IDs to attach to the instance. When empty, the VPC default security group is used."
+}
+
 variable "iam_role_name" {
   type        = string
   default     = "jenkins-s3-role"
@@ -130,6 +136,18 @@ variable "rds_secret_arn" {
   description = "ARN of the RDS secret. Only needed when manage_secret_access is true."
 }
 
+variable "rds_host" {
+  type        = string
+  default     = ""
+  description = "RDS endpoint hostname. Used to build the JDBC URL when the secret contains only username/password."
+}
+
+variable "rds_dbname" {
+  type        = string
+  default     = ""
+  description = "RDS database name. Used to build the JDBC URL when the secret contains only username/password."
+}
+
 variable "manage_secret_access" {
   type        = bool
   default     = false
@@ -147,6 +165,17 @@ variable "reports_s3_prefix" {
   description = <<-EOT
     S3 prefix (no bucket, no leading slash) the runner syncs the reports directory to.
     Defaults to etl-runner/reports/<module_name>/<run_id> when blank.
+  EOT
+}
+
+variable "container_assume_role_arn" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    When set, the runner writes an AWS CLI config that assumes this role using the
+    instance-profile credentials, mounts it into the container, and sets AWS_PROFILE.
+    Use this for cross-account access (e.g. reading inputs from a different account's
+    S3 bucket).
   EOT
 }
 

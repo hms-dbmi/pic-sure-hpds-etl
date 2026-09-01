@@ -3,7 +3,7 @@
 //
 // Loads one dbGaP study's SSTR subject/sample mapping TSV into RDS on a Terraform-provisioned
 // ephemeral EC2 runner that terminates itself when the job exits. Triggered per study by the
-// permanent orchestrator's "Load SSTR participants" stage (/Jenkinsfile.permanent); also runnable
+// permanent orchestrator's "Load SSTR participants" stage (/Jenkinsfile); also runnable
 // standalone to reload a single study.
 //
 // What the job does
@@ -43,6 +43,10 @@
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk-25'
+    }
+
     options {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
@@ -75,34 +79,50 @@ pipeline {
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: purge + load is one transaction and upserts are idempotent.')
+        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
+               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the study id and input header, then stop without provisioning anything')
+        choice(name: 'ENV', choices: ['integration'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        AWS_REGION = 'us-east-1'
+        ENV             = "${params.ENV ?: 'integration'}"
+        AWS_REGION      = 'us-east-1'
+        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
+
         RUNNER_DIR = 'etl-runners/sstr-populate-rds-participants'
 
         // Terraform reads TF_VAR_* natively, so job parameters never appear on a command
         // line (and so never in `ps` output or the console log's shell echo).
-        TF_VAR_study_id      = "${params.STUDY_ID}"
-        TF_VAR_input_uri     = "${params.INPUT}"
-        TF_VAR_batch_size    = "${params.BATCH_SIZE}"
-        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+        TF_VAR_study_id                  = "${params.STUDY_ID.trim()}"
+        TF_VAR_input_uri                 = "${params.INPUT.trim()}"
+        TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
-        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS}"
-        EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS}"
+        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS.trim()}"
+        EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS.trim()}"
 
-        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS}"
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
 
     stages {
 
         stage('Init') {
             steps {
+                sh '''
+                    cat > "$AWS_CONFIG_FILE" <<'EOF'
+[profile dbgap-etl]
+role_arn = arn:aws:iam::736265540791:role/dbgap-etl
+credential_source = Ec2InstanceMetadata
+role_session_name = jenkins-hpds-etl
+EOF
+                '''
                 script {
                     if (!params.STUDY_ID?.trim()) {
-                        error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile.permanent) to sweep every ready study from studies.tsv.')
+                        error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile) to sweep every ready study from managed inputs.')
                     }
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// URI or local path of this study\'s SSTR TSV.')
@@ -132,7 +152,7 @@ pipeline {
                 sh '''
                     set -e
                     echo "--- tool versions ---"
-                    terraform version | head -1
+                    make -s -C $RUNNER_DIR ensure-terraform
                     aws --version
                     docker --version
                     jq --version
@@ -145,7 +165,7 @@ pipeline {
             steps {
                 // `package` runs the unit suites; a failing test must stop the run before any
                 // infrastructure exists. The Testcontainers *IT suites bind on `verify` and
-                // are gated by the orchestrator (/Jenkinsfile.permanent) instead, so a
+                // are gated by the orchestrator (/Jenkinsfile) instead, so a
                 // single-study reload does not pay for Docker-backed Postgres and LocalStack.
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
@@ -162,11 +182,13 @@ pipeline {
                     // Called directly, not through make: make collapses every failure to 2 and
                     // would lose the validator's "10 = warnings" signal.
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                    if (rc == 10) {
-                        unstable('Pre-flight found warnings in the input file')
-                    } else if (rc != 0) {
-                        error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
+                    withEnv(['AWS_PROFILE=dbgap-etl']) {
+                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                        if (rc == 10) {
+                            unstable('Pre-flight found warnings in the input file')
+                        } else if (rc != 0) {
+                            error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
+                        }
                     }
                 }
             }
@@ -202,10 +224,11 @@ pipeline {
 
                         rc = sh(returnStatus: true, script: """
                             cd ${RUNNER_DIR}
+                            TF=\$(make -s tf-path)
                             ../common/monitor-runner.sh \
-                              "\$(terraform -chdir=terraform output -raw instance_id)" \
-                              "\$(terraform -chdir=terraform output -raw status_s3_uri)" \
-                              "\$(terraform -chdir=terraform output -raw log_s3_uri)"
+                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
                         """)
 
                         env.JOB_EXIT_CODE = "${rc}"
@@ -285,7 +308,7 @@ pipeline {
                 if (env.IMAGE_TAR) {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
-                          ${RUNNER_DIR}/terraform/sstr-populate-rds-participants.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
                 }

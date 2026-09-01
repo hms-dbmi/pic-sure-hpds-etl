@@ -11,6 +11,7 @@ spring:
     password: ${RDS_PASSWORD:}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
+      schema: ${DB_SCHEMA:etl}
       # Do NOT fail context startup when the DB is unreachable. Jobs that don't
       # touch the DB must still be able to run; DB-backed jobs surface the failure
       # as an INFRASTRUCTURE_ERROR exit code when they actually connect.
@@ -41,12 +42,23 @@ etl:
     single-consent-data-populate-rds-participants:
       enabled: ${ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
 
-    # TEMPORARY migration. Set this to false once the migration has run in every environment,
-    # then delete the job. NOTE: participants-migration also requires
+    generate-global-all-concepts:
+      enabled: ${ETL_JOB_GENERATE_GLOBAL_ALL_CONCEPTS_ENABLED:true}
+
+    all-concepts-data-generator:
+      enabled: ${ETL_JOB_ALL_CONCEPTS_DATA_GENERATOR_ENABLED:true}
+
+    create-vcf-indexes:
+      enabled: ${ETL_JOB_CREATE_VCF_INDEXES_ENABLED:true}
+
+    # TEMPORARY migration. Set these to false once the migration has run in every environment,
+    # then delete the jobs. NOTE: participants-migration also requires
     # sstr-populate-rds-participants to be enabled -- it injects that job to load the
     # sstr-backed studies, and its condition lists both flags.
     participants-migration:
       enabled: ${ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED:true}
+    split-allconcepts:
+      enabled: ${ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED:true}
 
   managed-inputs:
     uri: ${managed-inputs:${MANAGED_INPUTS_URI:}}
@@ -58,6 +70,9 @@ etl:
   pipelines:
     migrate-all:
       - participants-migration
+      - split-allconcepts
+      - generate-global-all-concepts
+      - create-vcf-indexes
   aws:
     region: ${AWS_REGION:us-east-1}
     s3:

@@ -13,6 +13,7 @@ Architecture, exit-code contract, AWS prerequisites, and the operations runbook 
 - [Runner Contents](#runner-contents)
 - [Make Targets](#make-targets)
 - [Environment Variables](#environment-variables)
+- [Environments](#environments)
 - [Creating a New Runner](#creating-a-new-runner)
 
 ---
@@ -25,6 +26,7 @@ etl-runners/
 ├── run-job.sh                          Container entrypoint
 ├── common.mk                           Shared build/deploy/monitor targets
 ├── common/                             Shared shell libraries
+├── environments/                       Per-environment tfvars (integration.tfvars, staging.tfvars, ...)
 ├── participants-migration/             TEMPORARY (JobType.MIGRATION)
 └── sstr-populate-rds-participants/     PERMANENT (JobType.PERMANENT)
 ```
@@ -97,9 +99,10 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `STATE_KEY`          | `tf_backend/etl-runners/hpds-etl/<name>/terraform.tfstate` | Terraform state key; set per run for concurrent builds                            |
 | `IMAGE_TAR`          | `hpds-etl-runner.tar.gz`                                   | Local tarball name, matched to `TF_VAR_image_tar`                                 |
 | `IMAGE_NAME`         | `hpds-etl-runner`                                          | Docker image name                                                                 |
+| `ENV`                | `integration`                                              | Target environment; selects `environments/<ENV>.tfvars`                            |
 | `SKIP_TESTS`         | `false`                                                    | Skip the JAR test suites in `make jar`                                            |
 | `REPORTS_DIR`        | `<runner>/reports`                                         | Where `fetch-reports` syncs to                                                    |
-| `AWS_REGION`         | from `<name>.tfvars`                                       | Region for AWS CLI calls                                                          |
+| `AWS_REGION`         | from environment tfvars                                    | Region for AWS CLI calls                                                          |
 
 ### Monitor
 
@@ -125,6 +128,76 @@ Read by the SSTR `validate.sh`; supplied per study from `studies.tsv` via the Je
 |-----------------------------|----------------------------------------------------------------|
 | `EXPECTED_consent_codeS`    | Comma-separated `CONSENT` values the study must produce        |
 | `EXPECTED_MIN_PARTICIPANTS` | Floor on distinct participants; catches a truncated input file |
+
+---
+
+## Environments
+
+Infrastructure settings that are the same across all runners (region, VPC, subnet, security
+groups, RDS secret) live in `environments/<ENV>.tfvars`. Each runner's own `<name>.tfvars`
+holds only runner-specific settings (instance type, volume size, tags). `common.mk` loads
+both files: the environment file first, then the runner file, so a runner can override any
+shared value if needed.
+
+The default environment is `integration` (`ENV ?= integration` in `common.mk`). Every
+Jenkinsfile exposes `ENV` as a build parameter and sets it in the pipeline's environment
+block so `make` picks it up automatically.
+
+### Current environments
+
+| Name          | File                               | Description                  |
+|---------------|------------------------------------|------------------------------|
+| `integration` | `environments/integration.tfvars`  | Integration/development      |
+
+### Adding a new environment
+
+1. Copy `environments/integration.tfvars` to `environments/<name>.tfvars`.
+
+2. Update the values for the new environment:
+
+   | Setting                  | What to change                                                |
+   |--------------------------|---------------------------------------------------------------|
+   | `subnet_id`              | A subnet in the target VPC with routes to RDS and S3          |
+   | `vpc_security_group_ids` | Security group(s) in the target VPC                           |
+   | `rds_secret_id`          | Secrets Manager secret holding the RDS credentials            |
+   | `rds_secret_arn`         | Full ARN of the same secret (for the IAM policy)              |
+   | `stack_s3_bucket`        | Deployment bucket for container images, logs, and reports     |
+   | `aws_region`             | Region (if different)                                         |
+   | `ami_owner_id`           | AMI owner (if using a custom AMI)                             |
+   | `ami_name_pattern`       | AMI name glob (if using a custom AMI)                         |
+
+   The RDS secret JSON must contain `host`, `port`, `dbname`, `username`, and `password`
+   (or a ready-made `url`/`jdbcUrl` field). An RDS-managed secret works unchanged.
+
+3. Add the new name to the `choices` list in every Jenkinsfile's `ENV` parameter. The files
+   to update:
+
+   - `Jenkinsfile` (permanent orchestrator)
+   - `Jenkinsfile.migration` (migration orchestrator)
+   - `etl-runners/*/Jenkinsfile` (all six downstream runners)
+
+   ```groovy
+   choice(name: 'ENV', choices: ['integration', 'staging'],
+          description: 'Target environment.')
+   ```
+
+4. Verify locally before the first Jenkins run:
+
+   ```bash
+   cd etl-runners/participants-migration
+   make plan ENV=staging
+   ```
+
+### Switching environments
+
+From Jenkins, select the environment in the build parameters dropdown. The orchestrator
+passes `ENV` to every downstream job it triggers.
+
+From the command line:
+
+```bash
+make -C etl-runners/participants-migration plan ENV=staging
+```
 
 ---
 

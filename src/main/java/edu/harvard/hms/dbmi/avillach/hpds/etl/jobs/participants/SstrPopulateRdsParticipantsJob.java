@@ -163,14 +163,13 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 String consentAbbreviation = row.get(COL_CONSENT_ABBREVIATION);
                 consentAbbreviation = (consentAbbreviation == null || consentAbbreviation.isBlank()) ? "" : consentAbbreviation.trim();
                 String dbgapSampleId = Strings.trimToNull(row.get(COL_DBGAP_SAMPLE_ID));
-                if (dbgapSampleId == null) {
-                    throw new DataException("Row " + rowsRead + " has a blank " + COL_DBGAP_SAMPLE_ID);
-                }
 
                 subjectIds.add(dbgapSubjectId);
                 firstRowBySubject.putIfAbsent(dbgapSubjectId,
-                        new Telemetry(dbgapSubjectId, dbgapSampleId, consent, consentAbbreviation));
-                samplePairs.add(new String[]{dbgapSubjectId, dbgapSampleId});
+                        new Telemetry(dbgapSubjectId, dbgapSampleId != null ? dbgapSampleId : "", consent, consentAbbreviation));
+                if (dbgapSampleId != null) {
+                    samplePairs.add(new String[]{dbgapSubjectId, dbgapSampleId});
+                }
             }
         }
 

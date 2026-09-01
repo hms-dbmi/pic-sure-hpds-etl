@@ -74,12 +74,13 @@ class ParticipantsMigrationJobTest {
                 mock(SstrPopulateRdsParticipantsJob.class), mock(JobExecutor.class));
     }
 
-    /** Writes each entry as a file into one shared temp directory and returns its path. */
-    private static String dataFolder(Map<String, String> filesByName) {
+    private static String baseUri(Map<String, String> filesByRelativePath) {
         try {
             Path dir = Files.createTempDirectory("migration-data");
-            for (Map.Entry<String, String> entry : filesByName.entrySet()) {
-                Files.writeString(dir.resolve(entry.getKey()), entry.getValue(), StandardCharsets.UTF_8);
+            for (Map.Entry<String, String> entry : filesByRelativePath.entrySet()) {
+                Path file = dir.resolve(entry.getKey());
+                Files.createDirectories(file.getParent());
+                Files.writeString(file, entry.getValue(), StandardCharsets.UTF_8);
             }
             return dir.toString();
         } catch (IOException e) {
@@ -112,34 +113,33 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
-    void fails_with_config_error_when_shared_consents_csv_is_missing() throws Exception {
+    void fails_with_config_error_when_shared_all_concepts_csv_is_missing() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
-                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        // data-folder deliberately has no consents.csv.
-        String folder = dataFolder(Map.of("placeholder.txt", ""));
+        String folder = baseUri(Map.of("placeholder.txt", ""));
 
         JobResult result = newExecutor().run(job,
-                Map.of("data-folder", folder), "unit-missing-consents");
+                Map.of("data-folder", folder), "unit-missing-all-concepts");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
-        assertThat(result.getErrorMessage()).contains("consents.csv");
+        assertThat(result.getErrorMessage()).contains("GLOBAL_allConcepts_merged.csv");
     }
 
     @Test
     void fails_study_when_patient_mapping_is_empty() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
-                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        String folder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"study-01.c1\"\n",
-                "ABV1_PatientMapping.v2.csv", ""));
+        String folder = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
+                "abv1/data/ABV1_PatientMapping.v2.csv", ""));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-empty-patient-mapping");
@@ -159,14 +159,14 @@ class ParticipantsMigrationJobTest {
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
         String managedInputs = tempFile("managed_inputs.csv",
-                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,true\n");
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");
         ParticipantsMigrationJob job = newJob(
                 managedInputsService(managedInputs),
                 participants, mock(ConsentRepository.class), mock(SampleRepository.class));
 
-        String folder = dataFolder(Map.of(
-                "consents.csv", "\"2002\",\"study-01.c1\"\n",
-                "ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
+        String folder = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
+                "abv1/data/ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-db-down");

@@ -20,7 +20,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../common/lib.sh"
 
 MANAGED_INPUTS="${TF_VAR_managed_inputs_uri:?TF_VAR_managed_inputs_uri is required}"
+MANAGED_INPUTS="$(trim "$MANAGED_INPUTS")"
 DATA_FOLDER="${TF_VAR_data_folder_uri:?TF_VAR_data_folder_uri is required}"
+DATA_FOLDER="$(trim "$DATA_FOLDER")"
 REGION="${AWS_REGION:-us-east-1}"
 
 DATA_FOLDER="${DATA_FOLDER%/}"
@@ -32,6 +34,16 @@ uri_exists() {
     aws s3api head-object --bucket "${rest%%/*}" --key "${rest#*/}" --region "$REGION" >/dev/null 2>&1
   else
     [[ -f "$uri" ]]
+  fi
+}
+
+# Lists file names under an S3 prefix or local directory.
+uri_ls() {
+  local uri="$1"
+  if [[ "$uri" == s3://* ]]; then
+    aws s3 ls "${uri%/}/" --region "$REGION" 2>/dev/null | awk '{print $NF}'
+  else
+    ls -1 "$uri" 2>/dev/null
   fi
 }
 
@@ -50,7 +62,7 @@ echo "  data-folder:    $DATA_FOLDER"
 echo ""
 
 # --- managed-inputs ------------------------------------------------------
-check "managed-inputs exists" uri_exists "$MANAGED_INPUTS"
+check "managed-inputs exists: $MANAGED_INPUTS" uri_exists "$MANAGED_INPUTS"
 if ! uri_exists "$MANAGED_INPUTS"; then
   summary
   exit 1
@@ -65,11 +77,17 @@ read_uri "$MANAGED_INPUTS" > "$MANIFEST"
 STUDIES=$(python3 - "$MANIFEST" <<'PY'
 import csv, sys
 
-ABV, SID, READY = "Study Abbreviated Name", "Study Identifier", "Data is ready to process"
+ABV       = "Study Abbreviated Name"
+SID       = "Study Identifier"
+READY     = "Data is ready to process"
+DATA_TYPE = "Data Type"
+PROCESSED = "Data Processed"
+
+REQUIRED = [ABV, SID, READY, DATA_TYPE, PROCESSED]
 
 with open(sys.argv[1], newline="", encoding="utf-8-sig") as fh:
     reader = csv.DictReader(fh)
-    missing = [c for c in (ABV, SID, READY) if c not in (reader.fieldnames or [])]
+    missing = [c for c in REQUIRED if c not in (reader.fieldnames or [])]
     if missing:
         print("MISSING_COLUMNS\t" + ", ".join(missing))
         sys.exit(0)
@@ -86,24 +104,25 @@ PY
 
 if [[ "$STUDIES" == MISSING_COLUMNS* ]]; then
   fail "managed-inputs is missing required column(s): ${STUDIES#MISSING_COLUMNS$'\t'}"
-  note "expected: 'Study Abbreviated Name', 'Study Identifier', 'Data is ready to process'"
+  note "expected: 'Study Abbreviated Name', 'Study Identifier', 'Data is ready to process', 'Data Type', 'Data Processed'"
   summary
   exit 1
 fi
 
-check "managed-inputs has the three required columns" true
+check "managed-inputs has the required columns" true
 
 READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
 check "at least one study is marked ready" test "$READY_COUNT" -gt 0
 note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
 
-# --- shared consents.csv -------------------------------------------------
-# Required unconditionally: execute() reads consents.csv before looking at any study, so a missing
+# --- shared GLOBAL_allConcepts_merged.csv --------------------------------
+# Required unconditionally: execute() reads it before looking at any study, so a missing
 # one aborts the entire run rather than just the studies that would have used it.
-CONSENTS="$DATA_FOLDER/consents.csv"
-check "shared consents.csv exists (read before any study is processed)" uri_exists "$CONSENTS"
-
+ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
+check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed): $ALL_CONCEPTS" uri_exists "$ALL_CONCEPTS"
 # --- per-study files -----------------------------------------------------
+# Layout: {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
+#         {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt (optional)
 echo ""
 echo "  Per-study inputs:"
 SSTR_STUDIES=0
@@ -112,25 +131,31 @@ DIRECT_STUDIES=0
 while IFS=$'\t' read -r abv sid state; do
   [[ "$state" != "ready" ]] && continue
 
-  sstr="$DATA_FOLDER/${sid}_sstr.tsv"
-  mapping="$DATA_FOLDER/$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')_PatientMapping.v2.csv"
+  abv_lower=$(printf '%s' "$abv" | tr '[:upper:]' '[:lower:]')
+  abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
+  mapping="$DATA_FOLDER/${abv_lower}/data/${abv_upper}_PatientMapping.v2.csv"
 
-  if uri_exists "$sstr"; then
+  # Find SSTR file by listing the rawData directory for a file matching SSTR_*{studyId}*.txt
+  raw_data_dir="$DATA_FOLDER/${abv_lower}/rawData"
+  sstr_file=$(uri_ls "$raw_data_dir" 2>/dev/null | grep -F "$sid" | grep "^SSTR_.*\.txt$" | head -1 || true)
+
+  if [[ -n "$sstr_file" ]]; then
     SSTR_STUDIES=$((SSTR_STUDIES + 1))
     route="sstr"
+    note "$sid ($abv): found SSTR file '$sstr_file'"
   else
     DIRECT_STUDIES=$((DIRECT_STUDIES + 1))
     route="direct"
   fi
 
   # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-uuid pairs.
-  check "$sid ($abv, $route): ${mapping##*/}" uri_exists "$mapping"
+  check "$sid ($abv, $route): $mapping" uri_exists "$mapping"
 done <<<"$STUDIES"
 
 echo ""
 note "$SSTR_STUDIES study/studies will load via the sstr sub-job, $DIRECT_STUDIES via direct population"
 if (( DIRECT_STUDIES > 0 )); then
-  note "the $DIRECT_STUDIES direct study/studies also need a consents.csv row per legacy hpds id, "
+  note "the $DIRECT_STUDIES direct study/studies also need a GLOBAL_allConcepts_merged.csv row per legacy hpds id, "
   note "formatted {studyid}.c{code} -- ids with no row are skipped with a log warning only"
 fi
 

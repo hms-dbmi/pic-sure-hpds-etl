@@ -78,17 +78,16 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void fails_and_rolls_back_on_blank_sample_id() {
+    void blank_sample_id_is_skipped_and_subject_still_populates() {
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"
                 + "SUBJ2\tSAMP3\t2\tHMB\tphs001412.v1.p2.c1\t\n");
 
         JobResult result = run(executor, job, input, "it-blank-sample");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
-        assertThat(result.getErrorMessage()).contains("dbgap_sample_id");
-        assertThat(participants.count()).isEqualTo(0);
-        assertThat(sampleCount()).isEqualTo(0);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(participants.count()).isEqualTo(2);
+        assertThat(sampleCount()).isEqualTo(1);
     }
 
     @Test

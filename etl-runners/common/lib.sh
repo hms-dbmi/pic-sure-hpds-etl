@@ -22,6 +22,17 @@ _WARN=0
 
 note() { echo "         $*"; }
 
+# Strip carriage returns and leading/trailing whitespace from a value. Use on every
+# externally supplied path or URI: one invisible character in a Jenkins form field
+# otherwise poisons every path constructed from it (see build #44, 2026-09-01).
+trim() {
+  local s="$1"
+  s="${s//$'\r'/}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
 check() {
   local label="$1"; shift
   if "$@" >/dev/null 2>&1; then

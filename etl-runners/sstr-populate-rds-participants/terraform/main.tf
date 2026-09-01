@@ -16,8 +16,9 @@ module "etl_runner" {
   ami_owner_id     = var.ami_owner_id
   ami_name_pattern = var.ami_name_pattern
   instance_type    = var.instance_type
-  subnet_id        = var.subnet_id
-  iam_role_name    = "jenkins-s3-role"
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = var.vpc_security_group_ids
+  iam_role_name          = "jenkins-s3-role"
   root_volume_size = var.root_volume_size
 
   job_name  = "sstr-populate-rds-participants"
@@ -29,6 +30,10 @@ module "etl_runner" {
   rds_secret_id        = var.rds_secret_id
   rds_secret_arn       = var.rds_secret_arn
   manage_secret_access = var.manage_secret_access
+  rds_host             = var.rds_host
+  rds_dbname           = var.rds_dbname
+
+  container_assume_role_arn = var.container_assume_role_arn
 
   # Keys use underscores; the runner converts them to --input, --study-id, --batch-size.
   # Names must match SstrPopulateRdsParticipantsJob.expectations().

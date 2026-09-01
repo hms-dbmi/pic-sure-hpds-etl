@@ -20,7 +20,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../common/lib.sh"
 
 STUDY_ID="${TF_VAR_study_id:?TF_VAR_study_id is required}"
+STUDY_ID="$(trim "$STUDY_ID")"
 INPUT="${TF_VAR_input_uri:?TF_VAR_input_uri is required}"
+INPUT="$(trim "$INPUT")"
 REGION="${AWS_REGION:-us-east-1}"
 
 echo "Pre-flight: sstr-populate-rds-participants"

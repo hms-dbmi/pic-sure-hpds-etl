@@ -46,6 +46,9 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
+# Terraform binary installed by common.mk ensure-terraform
+etl-runners/common/.terraform-bin/
+
 # IDE
 .idea/
 *.iml
