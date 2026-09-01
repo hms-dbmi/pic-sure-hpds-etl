@@ -160,6 +160,10 @@ monitor:
 run: apply monitor
 
 fetch-reports:
+	# The workspace persists between builds; start clean or validation counts
+	# stale reports from earlier runs (e.g. "one mapping CSV per succeeded
+	# study (found 28)" after a prior full sweep left its CSVs behind).
+	@rm -rf $(REPORTS_DIR)
 	@mkdir -p $(REPORTS_DIR)
 	aws s3 sync "$$($(TF) -chdir=$(TF_DIR) output -raw reports_s3_uri)" $(REPORTS_DIR) \
 		--region $(AWS_REGION) --no-progress
