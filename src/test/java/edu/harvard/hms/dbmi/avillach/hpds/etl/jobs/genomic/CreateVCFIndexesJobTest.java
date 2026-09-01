@@ -224,14 +224,16 @@ class CreateVCFIndexesJobTest {
     }
 
     @Test
-    void fails_when_no_genomic_studies_found() {
+    void warns_and_succeeds_when_no_genomic_studies_found() {
         when(managedInputsService.read()).thenReturn(List.of(nonGenomicStudy("PHE", "phs000999")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-no-genomic");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
-        assertThat(result.getInputValidation().hasErrors()).isTrue();
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getInputValidation().hasErrors()).isFalse();
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> "NO_GENOMIC_STUDIES".equals(i.code()));
     }
 
     @Test
@@ -284,8 +286,10 @@ class CreateVCFIndexesJobTest {
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-imaging");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
-        assertThat(result.getInputValidation().hasErrors()).isTrue();
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getInputValidation().hasErrors()).isFalse();
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> "NO_GENOMIC_STUDIES".equals(i.code()));
     }
 
     @Test

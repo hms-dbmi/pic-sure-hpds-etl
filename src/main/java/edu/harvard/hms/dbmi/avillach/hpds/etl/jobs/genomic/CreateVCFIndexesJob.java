@@ -87,7 +87,9 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
                 .filter(r -> isGenomic(r))
                 .count();
         if (genomicCount == 0) {
-            report.error("NO_GENOMIC_STUDIES",
+            // An empty workload is a legitimate state (e.g. a phenotype-only sweep or a
+            // single-study run), not a configuration mistake: flag it, don't fail on it.
+            report.warning("NO_GENOMIC_STUDIES",
                     "No unprocessed ready studies with genomic data type found in managed inputs (" + rows.size() + " total rows)");
         }
     }
@@ -234,7 +236,14 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
         if (output.outputFiles().isEmpty()) {
-            report.error("NO_FILES_WRITTEN", "No VCF index files were written");
+            if (output.studiesProcessed() == 0) {
+                // Nothing genomic to process (already flagged as NO_GENOMIC_STUDIES or
+                // SKIPPED_STUDY): an empty output is consistent, not a failure.
+                report.warning("NO_FILES_WRITTEN",
+                        "No VCF index files were written (no genomic studies were processed)");
+            } else {
+                report.error("NO_FILES_WRITTEN", "No VCF index files were written");
+            }
         }
         for (String studyId : output.skippedStudies()) {
             report.warning("SKIPPED_STUDY",
