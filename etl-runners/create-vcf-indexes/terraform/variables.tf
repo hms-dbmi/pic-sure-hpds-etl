@@ -108,6 +108,12 @@ variable "image_tar" {
   description = "Container tarball under s3://<stack_s3_bucket>/etl-runner/container/"
 }
 
+variable "managed_inputs_uri" {
+  type        = string
+  default     = ""
+  description = "--managed-inputs: CSV listing studies to include (local path or s3:// URI). When blank the job falls back to etl.managed-inputs.uri from its config."
+}
+
 variable "java_opts" {
   type        = string
   default     = "-XX:MaxRAMPercentage=75"

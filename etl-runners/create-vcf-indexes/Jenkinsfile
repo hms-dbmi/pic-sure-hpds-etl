@@ -42,6 +42,8 @@ pipeline {
     parameters {
         string(name: 'OUTPUT', defaultValue: '',
                description: 'REQUIRED. --output: where vcfIndex.tsv and SampleIds.csv are written (local path or s3:// URI). Appends filenames if it ends with /.')
+        string(name: 'MANAGED_INPUTS', defaultValue: '',
+               description: '--managed-inputs: CSV listing studies to include (local path or s3:// URI). When blank the job falls back to etl.managed-inputs.uri from its config.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'm5.large',
@@ -68,6 +70,7 @@ pipeline {
         RUNNER_DIR = 'etl-runners/create-vcf-indexes'
 
         TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
+        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
         TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
