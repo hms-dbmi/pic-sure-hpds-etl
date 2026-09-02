@@ -56,7 +56,12 @@ import java.util.stream.Stream;
 public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsParticipantsJob.Output> {
 
     public static final String SOURCE = "DBGap";
+    /** Source tag for samples taken from the SSTR's submitted {@code SAMPLE_ID} column —
+     * the names genomic tooling knows (TOPMed WGS {@code NWD…} ids live here, never in
+     * {@code dbgap_sample_id}), so VCF indexing depends on these rows. */
+    public static final String SOURCE_SUBMITTED = "submitted";
     static final String COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
+    static final String COL_SUBMITTED_SAMPLE_ID = "SAMPLE_ID";
     static final String COL_DBGAP_SAMPLE_ID = "dbgap_sample_id";
     static final String COL_CONSENT = "CONSENT";
     static final String COL_CONSENT_ABBREVIATION = "consent_abbreviation";
@@ -141,6 +146,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         Set<String> subjectIds = new LinkedHashSet<>();
         Map<String, Telemetry> firstRowBySubject = new LinkedHashMap<>();
         List<String[]> samplePairs = new ArrayList<>();
+        List<String[]> submittedSamplePairs = new ArrayList<>();
         boolean headerChecked = false;
         long rowsRead = 0;
 
@@ -170,6 +176,10 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 if (dbgapSampleId != null) {
                     samplePairs.add(new String[]{dbgapSubjectId, dbgapSampleId});
                 }
+                String submittedSampleId = Strings.trimToNull(row.get(COL_SUBMITTED_SAMPLE_ID));
+                if (submittedSampleId != null) {
+                    submittedSamplePairs.add(new String[]{dbgapSubjectId, submittedSampleId});
+                }
             }
         }
 
@@ -198,11 +208,18 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 .toList();
         long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
 
+        List<Sample> submittedSampleRows = submittedSamplePairs.stream()
+                .map(pair -> new Sample(uuidBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
+                .toList();
+        long submittedSamplesInserted =
+                BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize);
+
         log.info("Read {} row(s) for {} participant(s); {} new participant(s), {} consent row(s), "
-                        + "{} sample row(s) inserted",
-                rowsRead, subjectIds.size(), participantsInserted, consentsWritten, samplesInserted);
+                        + "{} dbGaP sample row(s) and {} submitted sample row(s) inserted",
+                rowsRead, subjectIds.size(), participantsInserted, consentsWritten,
+                samplesInserted, submittedSamplesInserted);
         return new Output(rowsRead, subjectIds.size(), participantsInserted, consentsWritten, samplesInserted,
-                countsByConsentGroup);
+                submittedSamplesInserted, countsByConsentGroup);
     }
 
     private void requireColumns(Map<String, String> firstRow) {
@@ -234,6 +251,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 .metric("participantsInserted", output.participantsInserted())
                 .metric("consentsWritten", output.consentsWritten())
                 .metric("samplesInserted", output.samplesInserted())
+                .metric("submittedSamplesInserted", output.submittedSamplesInserted())
                 .metric("countsByConsentGroup", output.countsByConsentGroup());
     }
 
@@ -243,6 +261,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                           long participantsInserted,
                           long consentsWritten,
                           long samplesInserted,
+                          long submittedSamplesInserted,
                           Map<String, Long> countsByConsentGroup) {
     }
 }

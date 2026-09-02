@@ -71,10 +71,30 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
                 .containsEntry("distinctParticipants", 2L)
                 .containsEntry("participantsInserted", 2L)
                 .containsEntry("consentsWritten", 2L)
-                .containsEntry("samplesInserted", 3L);
+                .containsEntry("samplesInserted", 3L)
+                .containsEntry("submittedSamplesInserted", 3L);
         assertThat(participants.count()).isEqualTo(2);
         assertThat(consentCountForStudy()).isEqualTo(2);
-        assertThat(sampleCount()).isEqualTo(3);
+        // 3 dbGaP-id rows + 3 submitted SAMPLE_ID rows
+        assertThat(sampleCount()).isEqualTo(6);
+    }
+
+    @Test
+    void submitted_sample_ids_land_verbatim_with_their_own_source() {
+        String input = JobTestSupport.tempFile("sstr.tsv", HEADER
+                + "SUBJ1\tNWD678650\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+
+        JobResult result = run(executor, job, input, "it-submitted-nwd");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        Long nwd = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM samples WHERE source_sample_id = 'NWD678650' AND sample_source = ?",
+                Long.class, SstrPopulateRdsParticipantsJob.SOURCE_SUBMITTED);
+        assertThat(nwd).isEqualTo(1);
+        Long dbgap = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM samples WHERE source_sample_id = 'phs001412.v1.p1.s1' AND sample_source = ?",
+                Long.class, SstrPopulateRdsParticipantsJob.SOURCE);
+        assertThat(dbgap).isEqualTo(1);
     }
 
     @Test
@@ -87,7 +107,8 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(participants.count()).isEqualTo(2);
-        assertThat(sampleCount()).isEqualTo(1);
+        // SUBJ1: dbGaP + submitted; SUBJ2: submitted only (blank dbgap_sample_id)
+        assertThat(sampleCount()).isEqualTo(3);
     }
 
     @Test
@@ -101,10 +122,11 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(second.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(second.getMetrics())
                 .containsEntry("participantsInserted", 0L)
-                .containsEntry("samplesInserted", 0L);
+                .containsEntry("samplesInserted", 0L)
+                .containsEntry("submittedSamplesInserted", 0L);
         assertThat(participants.count()).isEqualTo(1);
         assertThat(consentCountForStudy()).isEqualTo(1);
-        assertThat(sampleCount()).isEqualTo(1);
+        assertThat(sampleCount()).isEqualTo(2);
     }
 
     @Test
