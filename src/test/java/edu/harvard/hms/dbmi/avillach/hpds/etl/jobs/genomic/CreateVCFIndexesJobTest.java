@@ -164,6 +164,28 @@ class CreateVCFIndexesJobTest {
     }
 
     @Test
+    void include_processed_flag_indexes_processed_studies() {
+        UUID uuid1 = UUID.randomUUID();
+        String processedId = "phs000002";
+
+        when(managedInputsService.read()).thenReturn(List.of(
+                processedGenomicStudy("OLD", processedId)));
+        when(consentRepository.findByStudyId(processedId)).thenReturn(List.of(
+                new Consent(uuid1, processedId, "1", "GRU")));
+        when(sampleRepository.findByStudyId(processedId)).thenReturn(List.of(
+                new Sample(uuid1, "NWD700002", "TOPMed")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job,
+                Map.of("output", outputPath, "include-processed", "true"),
+                "test-include-processed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("studiesProcessed", 1);
+        verify(consentRepository).findByStudyId(processedId);
+    }
+
+    @Test
     void excludes_c0_consent_group() {
         UUID uuid1 = UUID.randomUUID();
         UUID uuid2 = UUID.randomUUID();

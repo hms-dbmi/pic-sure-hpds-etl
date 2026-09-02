@@ -420,6 +420,9 @@ EOF
 
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
+                        // The migration regenerates artifacts for studies the legacy
+                        // system already processed; without this the job sees zero work.
+                        booleanParam(name: 'INCLUDE_PROCESSED', value: true),
                         string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
                         string(name: 'ENV',    value: params.ENV),

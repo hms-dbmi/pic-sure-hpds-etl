@@ -29,6 +29,13 @@ fi
 
 STUDIES_PROCESSED=$(jq -r '.metrics.studiesProcessed // 0' "$REPORT")
 if [[ "$STUDIES_PROCESSED" -le 0 ]]; then
+    # An empty workload is legitimate when the job itself flagged it: the managed
+    # inputs simply held no matching genomic studies. The job exits
+    # SUCCESS_WITH_WARNINGS for that case; mirror it as a warning, not a failure.
+    if jq -e '(.inputValidation.issues // [])[] | select(.code == "NO_GENOMIC_STUDIES")' "$REPORT" >/dev/null 2>&1; then
+        echo "WARNING: no genomic studies in the managed inputs — nothing to index"
+        exit 10
+    fi
     echo "FAIL: studiesProcessed is $STUDIES_PROCESSED — expected at least 1"
     exit 1
 fi

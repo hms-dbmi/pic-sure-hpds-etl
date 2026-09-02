@@ -74,16 +74,22 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         return JobExpectations.of(
                 List.of(ParamSpec.required("output",
                         "Output location for VCF index and sample ID files (local path or s3:// URI).",
-                        "s3://bucket/etl-output/")),
+                        "s3://bucket/etl-output/"),
+                        ParamSpec.optional("include-processed",
+                                "When true, studies marked 'Data Processed' in managed inputs are included. "
+                                        + "The migration pipeline sets this: its inputs were all processed by the "
+                                        + "legacy system, which is exactly what is being regenerated.",
+                                "false")),
                 List.of("Per-consent-group _vcfIndex.tsv and _SampleIds.csv files for genomic studies"));
     }
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
         List<ManagedInputRow> rows = managedInputsService.read();
+        boolean includeProcessed = includeProcessed(ctx);
         long genomicCount = rows.stream()
                 .filter(ManagedInputRow::isReady)
-                .filter(r -> !r.isProcessed())
+                .filter(r -> includeProcessed || !r.isProcessed())
                 .filter(r -> isGenomic(r))
                 .count();
         if (genomicCount == 0) {
@@ -94,13 +100,18 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         }
     }
 
+    private static boolean includeProcessed(JobContext ctx) {
+        return Boolean.parseBoolean(ctx.get("include-processed", "false"));
+    }
+
     @Override
     protected Output execute(JobContext ctx) {
         String outputBase = normalizeOutputBase(ctx.require("output"));
         List<ManagedInputRow> allRows = managedInputsService.read();
+        boolean includeProcessed = includeProcessed(ctx);
         List<ManagedInputRow> genomicStudies = allRows.stream()
                 .filter(ManagedInputRow::isReady)
-                .filter(r -> !r.isProcessed())
+                .filter(r -> includeProcessed || !r.isProcessed())
                 .filter(r -> isGenomic(r))
                 .toList();
 
