@@ -137,7 +137,11 @@ while IFS=$'\t' read -r abv sid state; do
 
   # Find SSTR file by listing the rawData directory for a file matching SSTR_*{studyId}*.txt
   raw_data_dir="$DATA_FOLDER/${abv_lower}/rawData"
-  sstr_file=$(uri_ls "$raw_data_dir" 2>/dev/null | grep -F "$sid" | grep "^SSTR_.*\.txt$" | head -1 || true)
+  # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
+  # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
+  # case-insensitively, preferring the canonical name -- mirrors the job's discovery.
+  sstr_file=$(uri_ls "$raw_data_dir" 2>/dev/null | grep -iF "$sid" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
+              | awk '{ key = (tolower($0) ~ /^sstr_[^_]/) ? 0 : 1; print key "\t" $0 }' | sort | head -1 | cut -f2- || true)
 
   if [[ -n "$sstr_file" ]]; then
     SSTR_STUDIES=$((SSTR_STUDIES + 1))

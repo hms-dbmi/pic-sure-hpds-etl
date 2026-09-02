@@ -155,6 +155,25 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void sstr_discovery_accepts_all_three_naming_families_case_insensitively() {
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("sstr_phs000200.v13.txt", "phs000200")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("SSTR__sstr_phs000281.v8.txt", "phs000281")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("BDC-ingestion-only__sstr_phs000675.v4.txt", "phs000675")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("SSTR_phs000557.v7.txt", "phs000557")).isTrue();
+        // wrong study, wrong extension, unrelated names
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("sstr_phs000200.v13.txt", "phs000999")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("sstr_phs000200.v13.csv", "phs000200")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("notes_phs000200.txt", "phs000200")).isFalse();
+    }
+
+    @Test
+    void canonical_sstr_name_is_preferred_over_flattened_copies() {
+        assertThat(ParticipantsMigrationJob.isCanonicalSstrName("sstr_phs000557.v8.txt")).isTrue();
+        assertThat(ParticipantsMigrationJob.isCanonicalSstrName("SSTR__phs000557.v7.txt")).isFalse();
+        assertThat(ParticipantsMigrationJob.isCanonicalSstrName("BDC-ingestion-only__sstr_phs000675.v4.txt")).isFalse();
+    }
+
+    @Test
     void fails_study_when_patient_mapping_is_empty() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
                 "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");

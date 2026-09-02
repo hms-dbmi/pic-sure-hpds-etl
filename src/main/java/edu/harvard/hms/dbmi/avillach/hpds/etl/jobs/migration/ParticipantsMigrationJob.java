@@ -61,8 +61,10 @@ import java.util.stream.Stream;
  *       <ul>
  *         <li>{@code {base}/general/completed/GLOBAL_allConcepts_merged.csv} — shared across
  *             all studies (headerless, all-quoted AllConcepts format)</li>
- *         <li>{@code {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt} — optional dbGaP
- *             SSTR export (tab-delimited, found by prefix listing)</li>
+ *         <li>{@code {base}/{abv_lowercase}/rawData/sstr_{studyId}.{v}.txt} — optional dbGaP
+ *             SSTR export (tab-delimited; matched case-insensitively, including the legacy
+ *             folder-flattened {@code SSTR__sstr_*} and {@code BDC-ingestion-only__sstr_*}
+ *             names; the canonical lowercase name is preferred when several exist)</li>
  *         <li>{@code {base}/{abv_lowercase}/{ABV_UPPERCASE}_PatientMapping.v2.csv} — per-study
  *             patient mapping (headerless; columns: id, abv, legacy hpds id)</li>
  *       </ul>
@@ -174,7 +176,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                         ParamSpec.required("data-folder",
                                 "Base URI whose subfolders hold per-study data: "
                                         + "{base}/general/completed/GLOBAL_allConcepts_merged.csv, "
-                                        + "{base}/{abv_lower}/rawData/SSTR_*{studyId}*.txt, "
+                                        + "{base}/{abv_lower}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
                                         + "{base}/{abv_lower}/{ABV_UPPER}_PatientMapping.v2.csv "
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
@@ -257,9 +259,16 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         String rawDataDir = joinPath(joinPath(baseUri, abvLower), "rawData");
         List<String> rawDataFiles = io.listFileNames(rawDataDir);
+        // Staged SSTRs arrive under three naming families, all the same NHLBI artifact:
+        // the canonical 'sstr_{phs}.{v}.txt' filename, plus legacy folder-flattened copies
+        // 'SSTR__sstr_*' and 'BDC-ingestion-only__sstr_*' (an S3 sync collapsed the source
+        // folder into the basename). Match all three, case-insensitively; when a study has
+        // several, prefer the canonical name -- it is the freshest staging convention.
         List<String> sstrCandidates = rawDataFiles.stream()
-                .filter(name -> name.startsWith("SSTR_") && name.contains(studyId) && name.endsWith(".txt"))
-                .sorted()
+                .filter(name -> isSstrFileFor(name, studyId))
+                .sorted(java.util.Comparator
+                        .comparing((String name) -> !isCanonicalSstrName(name))
+                        .thenComparing(name -> name))
                 .toList();
         if (sstrCandidates.size() > 1) {
             log.warn("Study '{}': found {} SSTR candidates in {}: {}; using '{}'",
@@ -597,6 +606,20 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         } catch (IOException e) {
             throw new InfrastructureException("Failed to write unmatched report for " + abv, e);
         }
+    }
+
+    static boolean isSstrFileFor(String fileName, String studyId) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".txt")
+                && lower.contains(studyId.toLowerCase(Locale.ROOT))
+                && (lower.startsWith("sstr_") || lower.startsWith("bdc-ingestion-only__sstr_"));
+    }
+
+    /** The canonical NHLBI filename shape {@code sstr_{phs}.{v}.txt} — not a
+     * folder-flattened copy ({@code SSTR__sstr_*} lowercases to {@code sstr__…}). */
+    static boolean isCanonicalSstrName(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        return lower.startsWith("sstr_") && !lower.startsWith("sstr__");
     }
 
     private static Set<String> parseStudyFilter(String raw) {
