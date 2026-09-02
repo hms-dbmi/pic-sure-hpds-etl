@@ -131,13 +131,15 @@ EOF
                 script {
                     // Triggers etl-runners/participants-migration/Jenkinsfile, which
                     // provisions the ephemeral runner, monitors the job's exit code, fetches
-                    // the reports, and validates the mapping files. propagate: true means a
-                    // non-zero ETL exit code fails this stage and halts the pipeline, exactly
-                    // as an inline `sh java -jar` would have.
+                    // the reports, and validates the mapping files. propagate must be false:
+                    // the build step throws for ANY downstream result worse than SUCCESS --
+                    // including UNSTABLE, which here just means validation warnings (run #64
+                    // halted after a perfectly good 28/28 migration because of it). Failure
+                    // and instability are handled explicitly below instead.
                     def downstream = build(
                         job: params.PARTICIPANTS_MIGRATION_JOB,
                         wait: true,
-                        propagate: true,
+                        propagate: false,
                         parameters: [
                             string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS),
                             string(name: 'DATA_FOLDER',    value: params.DATA_FOLDER),
@@ -154,10 +156,13 @@ EOF
                     env.PARTICIPANTS_BUILD = "${downstream.number}"
 
                     // A downstream UNSTABLE means the job succeeded but its validation raised
-                    // warnings (rows skipped, a study reporting something unexpected).
-                    // propagate does not carry that across, so carry it deliberately.
+                    // warnings (rows skipped, a study reporting something unexpected): mark
+                    // this build unstable and keep going. Anything worse halts the pipeline,
+                    // exactly as an inline `sh java -jar` with a non-zero exit would have.
                     if (downstream.result == 'UNSTABLE') {
                         unstable('participants-migration completed with validation warnings')
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("participants-migration #${downstream.number} ended ${downstream.result}")
                     }
                 }
             }
@@ -435,11 +440,13 @@ EOF
                     def downstream = build(
                         job: params.VCF_INDEXES_JOB,
                         wait: true,
-                        propagate: true,
+                        propagate: false,
                         parameters: vcfParams)
 
                     if (downstream.result == 'UNSTABLE') {
                         unstable('Create VCF indexes completed with warnings')
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.VCF_INDEXES_JOB} #${downstream.number} ended ${downstream.result}")
                     }
 
                     try {
