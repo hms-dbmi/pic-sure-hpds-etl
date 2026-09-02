@@ -132,6 +132,12 @@ variable "image_tar" {
   EOT
 }
 
+variable "study_filter" {
+  type        = string
+  default     = ""
+  description = "--study-filter: comma-separated study ids to process; blank processes every ready study"
+}
+
 variable "java_opts" {
   type        = string
   default     = "-XX:MaxRAMPercentage=75"

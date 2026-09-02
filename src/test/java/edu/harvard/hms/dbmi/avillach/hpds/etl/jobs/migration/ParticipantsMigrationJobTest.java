@@ -130,6 +130,31 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void study_filter_limits_the_run_to_matching_studies() throws Exception {
+        String managedInputs = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process\n"
+                        + "ABV1,study-01,Yes\nABV2,study-02,Yes\n");
+        ParticipantsMigrationJob job = newJob(
+                managedInputsService(managedInputs),
+                mock(ParticipantRepository.class), mock(ConsentRepository.class), mock(SampleRepository.class));
+
+        String folder = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv",
+                "\"2002\",\"µ_consentsµ\",\"\",\"study-02.c1\",\"0\"\n",
+                "abv2/data/ABV2_PatientMapping.v2.csv", "\"p1\",\"ABV2\",\"2002\"\n"));
+
+        JobResult result = newExecutor().run(job,
+                Map.of("data-folder", folder, "study-filter", "study-02"),
+                "unit-study-filter");
+
+        // The filter's contract is selection: of the two ready studies only study-02
+        // is considered at all (study-01 is skipped before any staging). Whether the
+        // selected study then succeeds needs real repositories -- covered by the IT.
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 1L);
+        assertThat(result.getMetrics().toString()).contains("study-02").doesNotContain("study-01");
+    }
+
+    @Test
     void fails_study_when_patient_mapping_is_empty() throws Exception {
         String managedInputs = tempFile("managed_inputs.csv",
                 "Study Abbreviated Name,Study Identifier,Data is ready to process\nABV1,study-01,Yes\n");

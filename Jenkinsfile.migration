@@ -48,6 +48,8 @@ pipeline {
                description: 'participants-migration --data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every migration job')
+        string(name: 'STUDY_FILTER', defaultValue: '',
+               description: 'Comma-separated study ids; blank runs every ready study. Applies to the participants and split stages only -- the global AllConcepts and VCF stages always cover ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
@@ -140,6 +142,7 @@ EOF
                             string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS),
                             string(name: 'DATA_FOLDER',    value: params.DATA_FOLDER),
                             string(name: 'BATCH_SIZE',     value: params.BATCH_SIZE),
+                            string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
                             string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
                             string(name: 'ENV',            value: params.ENV),
@@ -236,6 +239,12 @@ EOF
                         if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
                             studies << [studyId: studyId, abv: abv]
                         }
+                    }
+
+                    def filterIds = params.STUDY_FILTER.split(',').collect { it.trim() }.findAll { it }
+                    if (filterIds) {
+                        studies = studies.findAll { filterIds.contains(it.studyId) }
+                        echo "STUDY_FILTER active: ${studies.size()} of the ready studies match ${filterIds}"
                     }
 
                     if (studies.isEmpty()) {

@@ -1,6 +1,7 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.core.io;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -8,12 +9,19 @@ import org.springframework.stereotype.Component;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
@@ -22,6 +30,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -94,7 +103,12 @@ public class IoResolver {
         return Files.exists(toLocalPath(uri));
     }
 
-    /** Writes bytes to the target location, creating parent dirs for local paths. */
+    /**
+     * Writes bytes to the target location, creating parent dirs for local paths.
+     * Small payloads only: the content is held in memory and sent as one PutObject
+     * (5 GiB S3 cap). For anything sizeable use {@link #writeOutputFile} or
+     * {@link #writeOutput(String, IoWriter)}, which stream and go multipart.
+     */
     public void writeOutput(String uri, byte[] content) {
         if (isS3(uri)) {
             S3Uri s3Uri = S3Uri.parse(uri);
@@ -103,7 +117,7 @@ public class IoResolver {
                         RequestBody.fromBytes(content));
                 log.info("Wrote {} bytes to S3 {}", content.length, uri);
             } catch (RuntimeException e) {
-                throw new InfrastructureException("Failed to write to S3: " + uri, e);
+                throw classifyS3WriteFailure(uri, e);
             }
             return;
         }
@@ -127,11 +141,12 @@ public class IoResolver {
         if (isS3(uri)) {
             S3Uri s3Uri = S3Uri.parse(uri);
             try {
-                s3.putObject(PutObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build(),
-                        RequestBody.fromFile(file));
+                uploadFile(s3Uri.bucket(), s3Uri.key(), file);
                 log.info("Uploaded {} bytes to S3 {}", Files.size(file), uri);
-            } catch (IOException | RuntimeException e) {
+            } catch (IOException e) {
                 throw new InfrastructureException("Failed to write to S3: " + uri, e);
+            } catch (RuntimeException e) {
+                throw classifyS3WriteFailure(uri, e);
             }
             return;
         }
@@ -147,6 +162,106 @@ public class IoResolver {
         }
     }
 
+    // A single PutObject caps at 5 GiB; above the threshold we go multipart. 4 GiB leaves
+    // comfortable margin under the cap. 512 MiB parts keep the part count tiny (a 34 GiB
+    // consent file is 68 parts; S3 allows 10,000) while each part stays a modest request.
+    // Non-final so the LocalStack IT can lower them and exercise multipart with small files.
+    private long multipartThresholdBytes = 4L * 1024 * 1024 * 1024;
+    private int multipartPartSizeBytes = 512 * 1024 * 1024;
+
+    void setMultipartThresholdBytes(long bytes) {
+        this.multipartThresholdBytes = bytes;
+    }
+
+    void setMultipartPartSizeBytes(int bytes) {
+        this.multipartPartSizeBytes = bytes;
+    }
+
+    /**
+     * Uploads a local file to S3, transparently switching to a multipart upload when the
+     * file exceeds the single-PutObject threshold. Parts are read sequentially through one
+     * reused buffer, so memory stays at one part regardless of file size.
+     */
+    private void uploadFile(String bucket, String key, Path file) throws IOException {
+        long size = Files.size(file);
+        if (size < multipartThresholdBytes) {
+            s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                    RequestBody.fromFile(file));
+            return;
+        }
+
+        String uploadId = s3.createMultipartUpload(
+                CreateMultipartUploadRequest.builder().bucket(bucket).key(key).build()).uploadId();
+        log.info("Multipart upload {} started for s3://{}/{} ({} bytes, {} byte parts)",
+                uploadId, bucket, key, size, multipartPartSizeBytes);
+        try {
+            List<CompletedPart> parts = new ArrayList<>();
+            byte[] buffer = new byte[multipartPartSizeBytes];
+            int partNumber = 1;
+            try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
+                while (true) {
+                    int filled = 0;
+                    while (filled < buffer.length) {
+                        int n = in.read(buffer, filled, buffer.length - filled);
+                        if (n < 0) {
+                            break;
+                        }
+                        filled += n;
+                    }
+                    if (filled == 0) {
+                        break;
+                    }
+                    String etag = s3.uploadPart(
+                            UploadPartRequest.builder()
+                                    .bucket(bucket).key(key)
+                                    .uploadId(uploadId).partNumber(partNumber)
+                                    .build(),
+                            RequestBody.fromInputStream(
+                                    new java.io.ByteArrayInputStream(buffer, 0, filled), filled))
+                            .eTag();
+                    parts.add(CompletedPart.builder().partNumber(partNumber).eTag(etag).build());
+                    partNumber++;
+                    if (filled < buffer.length) {
+                        break;
+                    }
+                }
+            }
+            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket).key(key).uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
+                    .build());
+            log.info("Multipart upload {} completed: {} part(s)", uploadId, parts.size());
+        } catch (IOException | RuntimeException e) {
+            // Best effort: without cleanup the parts sit invisibly, billed, until a
+            // lifecycle rule or manual abort removes them. Never mask the original failure.
+            try {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                        .bucket(bucket).key(key).uploadId(uploadId).build());
+                log.warn("Multipart upload {} aborted after failure", uploadId);
+            } catch (RuntimeException abortFailure) {
+                log.warn("Could not abort multipart upload {} for s3://{}/{}: {}",
+                        uploadId, bucket, key, abortFailure.getMessage());
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * A 4xx from S3 (bar 429 throttling) is a deterministic rejection of this request —
+     * retrying the run re-provisions an instance and re-streams the data only to be
+     * rejected identically, so it must not map to the retryable INFRASTRUCTURE exit.
+     */
+    private RuntimeException classifyS3WriteFailure(String uri, RuntimeException e) {
+        if (e instanceof S3Exception s3e) {
+            int status = s3e.statusCode();
+            if (status >= 400 && status < 500 && status != 429) {
+                return new DataException("S3 rejected the write (" + status + ") for " + uri
+                        + ": " + s3e.awsErrorDetails().errorMessage(), e);
+            }
+        }
+        return new InfrastructureException("Failed to write to S3: " + uri, e);
+    }
+
     /**
      * Streams output to the target location without materializing the full content in memory.
      * For S3, the content is spooled to a temp file first (S3 PutObject needs content length).
@@ -160,14 +275,15 @@ public class IoResolver {
                     try (OutputStream out = Files.newOutputStream(tmp)) {
                         writer.writeTo(out);
                     }
-                    s3.putObject(PutObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build(),
-                            RequestBody.fromFile(tmp));
+                    uploadFile(s3Uri.bucket(), s3Uri.key(), tmp);
                     log.info("Streamed {} bytes to S3 {}", Files.size(tmp), uri);
                 } finally {
                     Files.deleteIfExists(tmp);
                 }
             } catch (IOException e) {
                 throw new InfrastructureException("Failed to write to S3: " + uri, e);
+            } catch (RuntimeException e) {
+                throw classifyS3WriteFailure(uri, e);
             }
             return;
         }

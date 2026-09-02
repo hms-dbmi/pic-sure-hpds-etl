@@ -62,6 +62,8 @@ pipeline {
         string(name: 'DATA_FOLDER',
                defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/current',
                description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
+        string(name: 'STUDY_FILTER', defaultValue: '',
+               description: '--study-filter: comma-separated study ids to process; blank processes every ready study')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
         string(name: 'RUN_ID', defaultValue: '',
@@ -94,6 +96,7 @@ pipeline {
         TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
         TF_VAR_data_folder_uri           = "${params.DATA_FOLDER.trim()}"
         TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_study_filter              = "${params.STUDY_FILTER.trim()}"
         TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
         TF_VAR_name_suffix        = "${env.BUILD_NUMBER}"

@@ -36,11 +36,14 @@ module "etl_runner" {
 
   # Keys use underscores; the runner converts them to --managed-inputs, --data-folder,
   # --batch-size. Names must match ParticipantsMigrationJob.expectations().
-  job_params = {
-    managed_inputs = var.managed_inputs_uri
-    data_folder    = var.data_folder_uri
-    batch_size     = var.batch_size
-  }
+  job_params = merge(
+    {
+      managed_inputs = var.managed_inputs_uri
+      data_folder    = var.data_folder_uri
+      batch_size     = var.batch_size
+    },
+    var.study_filter != "" ? { study_filter = var.study_filter } : {}
+  )
 
   tags = merge({
     Project   = "PIC-SURE HPDS ETL"

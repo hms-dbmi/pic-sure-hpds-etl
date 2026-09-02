@@ -178,7 +178,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                         + "{base}/{abv_lower}/{ABV_UPPER}_PatientMapping.v2.csv "
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
-                        ParamSpec.optional("batch-size", "Rows per batch insert", "1000")),
+                        ParamSpec.optional("batch-size", "Rows per batch insert", "1000"),
+                        ParamSpec.optional("study-filter",
+                                "Comma-separated study ids to process; blank processes every ready study",
+                                "phs000200,phs000280")),
                 List.of("participants/consents/samples upserted in RDS for every ready study; "
                         + "one {studyid}_hpds_id_mapping.csv written per processed study to the reports dir"));
     }
@@ -203,6 +206,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         List<ManagedInputRow> managedInputs = managedInputsService.read();
 
+        Set<String> studyFilter = parseStudyFilter(ctx.get("study-filter", ""));
+        if (!studyFilter.isEmpty()) {
+            log.info("Study filter active: only processing {}", studyFilter);
+        }
+
         Path stagingDir;
         try {
             stagingDir = Files.createTempDirectory("migration-staging");
@@ -220,6 +228,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             List<StudyResult> results = new ArrayList<>();
             for (ManagedInputRow row : managedInputs) {
                 if (!row.isReady()) {
+                    continue;
+                }
+                if (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId())) {
                     continue;
                 }
                 try {
@@ -586,6 +597,17 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         } catch (IOException e) {
             throw new InfrastructureException("Failed to write unmatched report for " + abv, e);
         }
+    }
+
+    private static Set<String> parseStudyFilter(String raw) {
+        Set<String> filter = new LinkedHashSet<>();
+        for (String part : raw.split(",")) {
+            String id = part.trim();
+            if (!id.isEmpty()) {
+                filter.add(id);
+            }
+        }
+        return filter;
     }
 
     private static String joinPath(String folder, String fileName) {
