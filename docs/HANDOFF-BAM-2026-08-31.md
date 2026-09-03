@@ -100,3 +100,38 @@ debugging thread. Its mapping CSVs for 23 studies are preserved under
 - Stale docs: `Jenkinsfile.permanent` referenced in 7 places but doesn't exist
   (permanent orchestrator is `/Jenkinsfile`); `etl-runners/README.md` lists 2
   of 6 runners; `consents.csv` references in participants-migration docs.
+
+---
+
+# Update 2026-09-03: migration pipeline verified end-to-end
+
+Full-sweep run (orchestrator #65, 2026-09-02) completed: **28/28 studies via the
+SSTR sub-job, 0 direct; all 28 splits SUCCESS; global allConcepts fully green
+(consent abbreviations now complete from SSTRs); VCF indexes green for all 9
+genomic studies.** Artifacts verified in S3: 28 mapping CSVs
+(`__migration__/mappings/…-65/`), 28 split study prefixes, 426 MB
+`global_AllConcepts.csv`, 36 VCF index/sample files.
+
+Defects found and fixed since the original handoff (each with its own commit
+message telling the story): MAPPING handoff (local path to a container),
+split output discarded (unmounted default), stale Jenkins parameter defaults
+(trim + guards), phantom `avillach-etl` output bucket, hollow preflight checks,
+workspace report accumulation, missing managed-inputs wiring in the vcf runner,
+hard-failure on empty genomic workloads, split OOM on parent studies
+(streaming rewrite), S3 5 GiB PutObject cap (multipart), deterministic-4xx
+retry misclassification, SSTR discovery casing (three naming families),
+missing submitted SAMPLE_ID/NWD sample loading, and `build(propagate:true)`
+halting the orchestrator on a merely-UNSTABLE downstream.
+
+Operational conventions now in force: STUDY_FILTER for per-study reruns;
+staging filename convention `sstr_{phs}.{v}.txt` verbatim from NHLBI
+(`BDC-ingestion-only/` key in the per-study ingest buckets, accounts
+600168050588/714862078411); parameter changes to a Jenkinsfile take effect via
+a PREFLIGHT_ONLY run; artifacts between runners travel only through the 73
+bucket (the container role cannot read the stack bucket).
+
+Known open items: one benign validation warning (phs003946: 156 SSTR subjects
+have no legacy ids — new to HPDS, nothing to migrate); cohort-wide
+PatientMapping warning noise (refinement queued); remaining test contract
+(ALS-12172/12176/12178); ALS-12163 merge job unbuilt; docs refresh; WHI WGS
+SSTR question (D-format sample ids carry no NWD names).
