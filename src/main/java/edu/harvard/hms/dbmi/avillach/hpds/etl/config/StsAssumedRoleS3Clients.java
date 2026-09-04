@@ -3,7 +3,9 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProviderChain;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
@@ -36,9 +38,18 @@ public class StsAssumedRoleS3Clients implements AssumedRoleS3Clients {
         Region region = Region.of(props.getAws().getRegion());
         log.info("Building S3 client under assumed role {}", roleArn);
 
+        // The assume MUST be made by the EC2 instance role, not the container's default
+        // chain: on a runner the env sets AWS_PROFILE to the cross-account dbgap-etl
+        // profile, and dbgap-etl carries no sts:AssumeRole — run identity-mapping-5
+        // failed exactly there with an STS 403. The instance role (jenkins-s3-role) is
+        // the principal the NHLBI exchange roles trust, and the runner's IMDS hop limit
+        // of 2 makes it reachable from inside the container. Off EC2 (tests, LocalStack)
+        // the chain falls back to the default provider.
         StsClient stsClient = StsClient.builder()
                 .region(region)
-                .credentialsProvider(DefaultCredentialsProvider.create())
+                .credentialsProvider(AwsCredentialsProviderChain.of(
+                        InstanceProfileCredentialsProvider.create(),
+                        DefaultCredentialsProvider.create()))
                 .build();
 
         S3ClientBuilder builder = S3Client.builder()
