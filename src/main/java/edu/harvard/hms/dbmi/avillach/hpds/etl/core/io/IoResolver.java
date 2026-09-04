@@ -354,7 +354,7 @@ public class IoResolver {
     public List<String> listDirectoryNames(String directoryUri) {
         if (isS3(directoryUri)) {
             String prefix = directoryUri.endsWith("/") ? directoryUri : directoryUri + "/";
-            S3Uri s3Uri = S3Uri.parse(prefix);
+            S3Uri s3Uri = S3Uri.parsePrefix(prefix);
             try {
                 var request = ListObjectsV2Request.builder()
                         .bucket(s3Uri.bucket()).prefix(s3Uri.key()).delimiter("/").build();
@@ -392,7 +392,7 @@ public class IoResolver {
     public List<String> listFilesRecursive(String directoryUri) {
         if (isS3(directoryUri)) {
             String prefix = directoryUri.endsWith("/") ? directoryUri : directoryUri + "/";
-            S3Uri s3Uri = S3Uri.parse(prefix);
+            S3Uri s3Uri = S3Uri.parsePrefix(prefix);
             try {
                 var request = ListObjectsV2Request.builder()
                         .bucket(s3Uri.bucket()).prefix(s3Uri.key()).build();
@@ -452,6 +452,23 @@ public class IoResolver {
                 throw new ConfigException("Malformed S3 URI (expected s3://bucket/key): " + uri);
             }
             return new S3Uri(rest.substring(0, slash), rest.substring(slash + 1));
+        }
+
+        /**
+         * Like {@link #parse} but for prefix listings, where the bucket root is a legal
+         * location: {@code s3://bucket} and {@code s3://bucket/} yield an empty key.
+         */
+        static S3Uri parsePrefix(String uri) {
+            String rest = uri.substring(S3_PREFIX.length());
+            int slash = rest.indexOf('/');
+            if (slash < 0) {
+                slash = rest.length();
+            }
+            if (slash == 0) {
+                throw new ConfigException("Malformed S3 URI (expected s3://bucket[/prefix]): " + uri);
+            }
+            String key = slash == rest.length() ? "" : rest.substring(slash + 1);
+            return new S3Uri(rest.substring(0, slash), key);
         }
     }
 }
