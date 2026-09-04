@@ -51,6 +51,10 @@ etl:
     create-vcf-indexes:
       enabled: ${ETL_JOB_CREATE_VCF_INDEXES_ENABLED:true}
 
+    # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
+    generate-identity-consent-mapping:
+      enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}
+
     # TEMPORARY migration. Set these to false once the migration has run in every environment,
     # then delete the jobs. NOTE: participants-migration also requires
     # sstr-populate-rds-participants to be enabled -- it injects that job to load the

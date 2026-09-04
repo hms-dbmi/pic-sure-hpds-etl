@@ -1,10 +1,10 @@
 // Generate the harmonized-data consent mapping file (ALS-12727).
 //
-// Runs generate_identity_consent_mapping.py on the Jenkins agent itself —
-// no EC2 provisioning, no Docker. All AWS access is read-only under the
-// role passed in ROLE_ARN (sts assume-role, s3 ls, s3 cp streamed).
-// The CSV output is archived as a build artifact; staging it onward
-// (S3 vs RDS) is decided on the ticket.
+// Runs the generate-identity-consent-mapping ETL job on the Jenkins agent
+// itself — no EC2 provisioning, no Docker. All AWS access is read-only under
+// the role passed in ROLE_ARN (sts assume-role, s3 list/get). The CSV output
+// and the run's JSON report are archived as build artifacts; staging the
+// mapping onward (S3 vs RDS) is decided on the ticket.
 
 pipeline {
     agent any
@@ -31,14 +31,13 @@ pipeline {
     }
 
     stages {
-        stage('Preflight') {
+        stage('Build') {
             steps {
                 sh '''
                     set -e
-                    aws --version
-                    python3 --version
                     [ -n "$ROLE_ARN" ] || { echo "ROLE_ARN is required" >&2; exit 1; }
-                    python3 "etl-runners/generate-identity-consent-mapping/generate_identity_consent_mapping.py" --selftest
+                    ./mvnw -B -q test -Dtest=GenerateIdentityConsentMappingJobTest
+                    ./mvnw -B -q package -DskipTests
                 '''
             }
         }
@@ -47,11 +46,11 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    rm -rf output && mkdir -p output
-                    ARGS="--role-arn $ROLE_ARN --s3-base $S3_BASE --output-dir output"
-                    [ -n "$DATASET_PREFIX" ] && ARGS="$ARGS --dataset-prefix $DATASET_PREFIX"
-                    [ "$PER_STUDY" = "true" ] && ARGS="$ARGS --per-study"
-                    python3 "etl-runners/generate-identity-consent-mapping/generate_identity_consent_mapping.py" $ARGS
+                    rm -rf output reports && mkdir -p output reports
+                    ARGS="--base=$S3_BASE --role-arn=$ROLE_ARN --output=output"
+                    [ -n "$DATASET_PREFIX" ] && ARGS="$ARGS --dataset-prefix=$DATASET_PREFIX"
+                    [ "$PER_STUDY" = "true" ] && ARGS="$ARGS --per-study=true"
+                    java -jar target/hpds-etl.jar --job=generate-identity-consent-mapping $ARGS
                 '''
             }
         }
@@ -59,7 +58,7 @@ pipeline {
 
     post {
         success {
-            archiveArtifacts artifacts: 'output/*.csv', fingerprint: true
+            archiveArtifacts artifacts: 'output/*.csv, reports/**', fingerprint: true
         }
     }
 }

@@ -345,6 +345,84 @@ public class IoResolver {
         }
     }
 
+    /**
+     * Lists the names of the immediate subdirectories of the given directory URI.
+     * For S3 these are the common prefixes one level below the given prefix; for the
+     * local filesystem, its child directories. Returns an empty list if the location
+     * does not exist or has no subdirectories.
+     */
+    public List<String> listDirectoryNames(String directoryUri) {
+        if (isS3(directoryUri)) {
+            String prefix = directoryUri.endsWith("/") ? directoryUri : directoryUri + "/";
+            S3Uri s3Uri = S3Uri.parse(prefix);
+            try {
+                var request = ListObjectsV2Request.builder()
+                        .bucket(s3Uri.bucket()).prefix(s3Uri.key()).delimiter("/").build();
+                List<String> names = new ArrayList<>();
+                for (var page : s3.listObjectsV2Paginator(request)) {
+                    page.commonPrefixes().stream()
+                            .map(p -> p.prefix().substring(s3Uri.key().length()))
+                            .map(name -> name.endsWith("/") ? name.substring(0, name.length() - 1) : name)
+                            .filter(name -> !name.isEmpty())
+                            .forEach(names::add);
+                }
+                return List.copyOf(names);
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to list S3 prefix: " + directoryUri, e);
+            }
+        }
+        Path dir = toLocalPath(directoryUri);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (Stream<Path> stream = Files.list(dir)) {
+            return stream.filter(Files::isDirectory)
+                    .map(p -> p.getFileName().toString())
+                    .sorted()
+                    .toList();
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to list directory: " + dir, e);
+        }
+    }
+
+    /**
+     * Lists the relative paths (with {@code /} separators) of every file anywhere below
+     * the given directory URI. Returns an empty list if the location does not exist.
+     */
+    public List<String> listFilesRecursive(String directoryUri) {
+        if (isS3(directoryUri)) {
+            String prefix = directoryUri.endsWith("/") ? directoryUri : directoryUri + "/";
+            S3Uri s3Uri = S3Uri.parse(prefix);
+            try {
+                var request = ListObjectsV2Request.builder()
+                        .bucket(s3Uri.bucket()).prefix(s3Uri.key()).build();
+                List<String> keys = new ArrayList<>();
+                for (var page : s3.listObjectsV2Paginator(request)) {
+                    page.contents().stream()
+                            .map(S3Object::key)
+                            .map(k -> k.substring(s3Uri.key().length()))
+                            .filter(name -> !name.isEmpty())
+                            .forEach(keys::add);
+                }
+                return List.copyOf(keys);
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to list S3 prefix: " + directoryUri, e);
+            }
+        }
+        Path dir = toLocalPath(directoryUri);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (Stream<Path> stream = Files.walk(dir)) {
+            return stream.filter(Files::isRegularFile)
+                    .map(p -> dir.relativize(p).toString().replace('\\', '/'))
+                    .sorted()
+                    .toList();
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to walk directory: " + dir, e);
+        }
+    }
+
     /** Downloads a remote (or local) file to a local path, creating parent directories as needed. */
     public void copyToLocal(String sourceUri, Path target) {
         try {
