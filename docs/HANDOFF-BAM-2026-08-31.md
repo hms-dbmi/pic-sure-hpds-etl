@@ -169,11 +169,47 @@ container's default chain (`dbgap-etl`, tied to the instance profile) into the
 73 bucket. The agent-side preflight checks the exchange bucket under an
 `nhlbi-exchange` profile and the output bucket under `dbgap-etl`.
 
-**Running it.** Jenkins job `generate-identity-consent-mapping` pointing at the
-runner Jenkinsfile; first run `PREFLIGHT_ONLY=true` to register parameters,
-then a real run. Default output
+**Running it.** Jenkins job `generate-identity-consent-mapping` (top level, NOT
+inside a folder — see shakeout #2) pointing at the runner Jenkinsfile; first run
+`PREFLIGHT_ONLY=true` to register parameters, then a real run. Default output
 `s3://avillach-73-bdcatalyst-etl/dmcharmonizedexamples/output/` is a
 **temporary location** — where the mapping should permanently live (S3 file vs
 RDS table in the `etl` schema) is the open decision on ALS-12727. The RDS
 credential fetch in the shared runner user-data still happens even though this
 job never touches the database; harmless, but a known inefficiency.
+
+**Shakeout ledger (2026-09-04, real Jenkins runs #2–#5):**
+
+1. **Run #2 — workspace path with a space.** The job was created inside the
+   Jenkins folder `__Harmonization Work`, so the workspace path contained a
+   space and the whole make layer (`common.mk` unquoted paths) broke at
+   `ensure-terraform`. Not fixed in code (every runner assumes space-free
+   workspaces); the job was **moved to the Jenkins top level** like the other
+   seven. Keep it there.
+2. **Run #4 — bucket-root listing.** `IoResolver.S3Uri.parse` requires a key
+   after the bucket, and this is the first job to LIST a bucket root
+   (`s3://nih-nhlbi-bdc-harmdata-exchange/`) → CONFIG_ERROR in 56 ms. Fixed in
+   `77b78ac`: `S3Uri.parsePrefix` accepts the bucket root for prefix listings;
+   object addressing stays strict.
+3. **Run #5 — STS 403 on the in-process assume.** The container's env sets
+   `AWS_PROFILE=etl-cross-account` (the dbgap-etl chain), so the job's STS call
+   ran as `dbgap-etl` — which carries **no sts:AssumeRole at all** (policy
+   verified). The principal the NHLBI exchange roles actually trust is the
+   **instance role** `jenkins-s3-role` (900): its `sts-etl-cicd-policy`
+   explicitly allows AssumeRole on both `nih-nhlbi-TopMed-EC2Access-S3` roles
+   (714862078411 and 600168050588) plus `dbgap-etl` — which is also why the
+   agent-side preflight passed. Fixed in code (no IAM change):
+   `StsAssumedRoleS3Clients` now makes the STS call with the instance-profile
+   credentials (IMDS, hop limit already 2), falling back to the default chain
+   off-EC2. Output writes are untouched: still the dbgap-etl default chain into
+   the 73 bucket (`jenkins-s3-role` itself can only write the deployments
+   stack bucket).
+
+**Next step (not yet run):** re-run the Jenkins job with default parameters —
+no PREFLIGHT_ONLY needed, nothing about parameters changed. Expected green:
+dataset `BDC-DMC-Harmonization-Examples-20260804`, 19 consent groups across
+8 studies, `identity_consent_mapping.csv` at the temp output prefix, and the
+Validate stage printing the row counts. UNSTABLE means identities spanning
+consent groups of one study — mapping still written; raise the count with the
+DMC. See also `docs/TEMP-ALS-12727-HANDBACK.md` (temporary, delete before
+merge) for the zero-context version of all of this.
