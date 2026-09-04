@@ -28,7 +28,12 @@ etl-runners/
 ├── common/                             Shared shell libraries
 ├── environments/                       Per-environment tfvars (integration.tfvars, staging.tfvars, ...)
 ├── participants-migration/             TEMPORARY (JobType.MIGRATION)
-└── sstr-populate-rds-participants/     PERMANENT (JobType.PERMANENT)
+├── split-allconcepts/                  TEMPORARY (JobType.MIGRATION)
+├── sstr-populate-rds-participants/     PERMANENT (JobType.PERMANENT)
+├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT)
+├── generate-global-all-concepts/       PERMANENT (JobType.PERMANENT)
+├── create-vcf-indexes/                 PERMANENT (JobType.PERMANENT)
+└── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone
 ```
 
 ## Shared Components
@@ -115,10 +120,15 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 
 ### Job Parameters
 
-| Runner                           | Variables                                                                  |
-|----------------------------------|----------------------------------------------------------------------------|
-| `participants-migration`         | `TF_VAR_managed_inputs_uri`, `TF_VAR_data_folder_uri`, `TF_VAR_batch_size` |
-| `sstr-populate-rds-participants` | `TF_VAR_study_id`, `TF_VAR_input_uri`, `TF_VAR_batch_size`                 |
+| Runner                              | Variables                                                                  |
+|-------------------------------------|----------------------------------------------------------------------------|
+| `participants-migration`            | `TF_VAR_managed_inputs_uri`, `TF_VAR_data_folder_uri`, `TF_VAR_batch_size` |
+| `split-allconcepts`                 | `TF_VAR_study_id`, `TF_VAR_abbreviation`, `TF_VAR_input_uri`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri` |
+| `sstr-populate-rds-participants`    | `TF_VAR_study_id`, `TF_VAR_input_uri`, `TF_VAR_batch_size`                 |
+| `all-concepts-data-generator`       | `TF_VAR_study_id`, `TF_VAR_data_dir`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri`, `TF_VAR_skip_analysis` |
+| `generate-global-all-concepts`      | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_allow_empty`     |
+| `create-vcf-indexes`                | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_include_processed` |
+| `generate-identity-consent-mapping` | `TF_VAR_base_uri`, `TF_VAR_dataset_prefix`, `TF_VAR_input_role_arn`, `TF_VAR_output_uri`, `TF_VAR_per_study` |
 
 ### Validation Expectations
 

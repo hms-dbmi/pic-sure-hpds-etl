@@ -135,3 +135,45 @@ have no legacy ids — new to HPDS, nothing to migrate); cohort-wide
 PatientMapping warning noise (refinement queued); remaining test contract
 (ALS-12172/12176/12178); ALS-12163 merge job unbuilt; docs refresh; WHI WGS
 SSTR question (D-format sample ids carry no NWD names).
+
+---
+
+# Update 2026-09-04: harmonized consent mapping job (ALS-12727)
+
+New PERMANENT job `generate-identity-consent-mapping` + standard ephemeral-EC2
+runner, readable cold:
+
+**What it does.** The DMC harmonization drops in
+`s3://nih-nhlbi-bdc-harmdata-exchange/BDC-DMC-Harmonization-Examples-YYYYMMDD/`
+are partitioned by consent group, and each group's directory name carries the
+study accession and consent code (e.g.
+`nih-nhlbi-topmed-parent-aric-phs000280-v8-r1-c1`). The job streams each
+group's `mapped-data/Person.tsv` and emits
+`Person.Identity,study_id,consent_code` — the mapping ALS-12727 asks for —
+without any SSTR or RDS join. With no `--dataset-prefix` it selects the newest
+drop deterministically (max date). One combined CSV by default; `--per-study`
+splits per accession. An identity appearing in more than one consent group of
+the same study is a warning (SUCCESS_WITH_WARNINGS), not a failure.
+
+**Where.** Job: `jobs/harmonized/GenerateIdentityConsentMappingJob` (11 unit
+tests; they mock the pull with local trees shaped like the drop). Runner:
+`etl-runners/generate-identity-consent-mapping/` (full pattern: Jenkinsfile /
+Makefile / preflight / validate / terraform; standalone — deliberately NOT in
+the orchestrator DAG). Enablement flag in `application.yml`.
+
+**Credentials.** The exchange bucket is readable only under
+`arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3` (same role name
+in both NHLBI accounts); the job assumes it in-process via `--role-arn`
+(`AssumedRoleS3Clients`) for input reads only. Output writes go through the
+container's default chain (`dbgap-etl`, tied to the instance profile) into the
+73 bucket. The agent-side preflight checks the exchange bucket under an
+`nhlbi-exchange` profile and the output bucket under `dbgap-etl`.
+
+**Running it.** Jenkins job `generate-identity-consent-mapping` pointing at the
+runner Jenkinsfile; first run `PREFLIGHT_ONLY=true` to register parameters,
+then a real run. Default output
+`s3://avillach-73-bdcatalyst-etl/dmcharmonizedexamples/output/` is a
+**temporary location** — where the mapping should permanently live (S3 file vs
+RDS table in the `etl` schema) is the open decision on ALS-12727. The RDS
+credential fetch in the shared runner user-data still happens even though this
+job never touches the database; harmless, but a known inefficiency.

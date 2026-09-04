@@ -44,7 +44,7 @@ runs every week.
 
 ## Jenkins Jobs
 
-Seven jobs, all pointing at this repository:
+Eight jobs, all pointing at this repository:
 
 | Jenkins job                               | Script path                                              |
 |-------------------------------------------|----------------------------------------------------------|
@@ -55,6 +55,10 @@ Seven jobs, all pointing at this repository:
 | `sstr-populate-rds-participants` | `etl-runners/sstr-populate-rds-participants/Jenkinsfile` |
 | `generate-global-all-concepts`   | `etl-runners/generate-global-all-concepts/Jenkinsfile`   |
 | `create-vcf-indexes`             | `etl-runners/create-vcf-indexes/Jenkinsfile`             |
+| `generate-identity-consent-mapping` | `etl-runners/generate-identity-consent-mapping/Jenkinsfile` |
+
+`generate-identity-consent-mapping` is standalone — no orchestrator triggers it; run it
+when a new DMC harmonization drop lands (ALS-12727).
 
 The orchestrators' job-name parameters (`PARTICIPANTS_MIGRATION_JOB`, `SSTR_JOB`,
 `ALL_CONCEPTS_JOB`, etc.) default to these names. If your naming differs, change the
