@@ -18,9 +18,9 @@ import java.util.List;
 public class SampleRepository {
 
     private static final String UPSERT = """
-            INSERT INTO samples (hpds_uuid, source_sample_id, sample_source)
-            VALUES (:hpdsUuid, :sourceSampleId, :sampleSource)
-            ON CONFLICT (hpds_uuid, source_sample_id, sample_source) DO NOTHING
+            INSERT INTO samples (hpds_id, source_sample_id, sample_source)
+            VALUES (:hpdsId, :sourceSampleId, :sampleSource)
+            ON CONFLICT (hpds_id, source_sample_id, sample_source) DO NOTHING
             """;
 
     private final NamedParameterJdbcTemplate jdbc;
@@ -35,7 +35,7 @@ public class SampleRepository {
         }
         SqlParameterSource[] batch = samples.stream()
                 .map(s -> new MapSqlParameterSource()
-                        .addValue("hpdsUuid", s.hpdsUuid())
+                        .addValue("hpdsId", s.hpdsId())
                         .addValue("sourceSampleId", s.sourceSampleId())
                         .addValue("sampleSource", s.sampleSource()))
                 .toArray(SqlParameterSource[]::new);
@@ -55,14 +55,14 @@ public class SampleRepository {
         try {
             return jdbc.query(
                     """
-                    SELECT DISTINCT s.hpds_uuid, s.source_sample_id, s.sample_source
+                    SELECT DISTINCT s.hpds_id, s.source_sample_id, s.sample_source
                     FROM samples s
-                    JOIN consents c ON s.hpds_uuid = c.hpds_uuid
+                    JOIN consents c ON s.hpds_id = c.hpds_id
                     WHERE c.study_id = :studyId
                     """,
                     new MapSqlParameterSource().addValue("studyId", studyId),
                     (rs, n) -> new Sample(
-                            rs.getObject("hpds_uuid", java.util.UUID.class),
+                            rs.getLong("hpds_id"),
                             rs.getString("source_sample_id"),
                             rs.getString("sample_source")));
         } catch (DataAccessException e) {

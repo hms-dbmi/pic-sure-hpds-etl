@@ -24,7 +24,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -77,19 +76,19 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void generates_vcf_index_and_sample_ids_for_genomic_study() {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
         String studyId = "phs000123";
 
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU"),
-                new Consent(uuid2, studyId, "2", "HMB")));
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "2", "HMB")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD100001", "TOPMed"),
-                new Sample(uuid2, "NWD100002", "TOPMed")));
+                new Sample(id1, "NWD100001", "TOPMed"),
+                new Sample(id2, "NWD100002", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-happy");
@@ -112,16 +111,16 @@ class CreateVCFIndexesJobTest {
         assertThat(vcfContent).startsWith("phs000123.c1\n");
         assertThat(vcfContent).contains("vcf_path\tchromosome\tisAnnotated");
         assertThat(vcfContent).contains("NWD100001");
-        assertThat(vcfContent).contains(uuid1.toString());
+        assertThat(vcfContent).contains(String.valueOf(id1));
 
         int csvIdx = uris.indexOf(outputPath + "phs000123.c1_SampleIds.csv");
         String csvContent = new String(contentCaptor.getAllValues().get(csvIdx), StandardCharsets.UTF_8);
-        assertThat(csvContent).contains(uuid1 + ",TST,NWD100001");
+        assertThat(csvContent).contains(id1 + ",TST,NWD100001");
     }
 
     @Test
     void skips_non_genomic_studies() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String genomicId = "phs000001";
         String phenoId = "phs000002";
 
@@ -130,9 +129,9 @@ class CreateVCFIndexesJobTest {
                 nonGenomicStudy("PHE", phenoId)));
 
         when(consentRepository.findByStudyId(genomicId)).thenReturn(List.of(
-                new Consent(uuid1, genomicId, "1", "GRU")));
+                new Consent(id1, genomicId, "1", "GRU")));
         when(sampleRepository.findByStudyId(genomicId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD200001", "TOPMed")));
+                new Sample(id1, "NWD200001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-skip-pheno");
@@ -143,7 +142,7 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void skips_already_processed_studies() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String unprocessedId = "phs000001";
         String processedId = "phs000002";
 
@@ -152,9 +151,9 @@ class CreateVCFIndexesJobTest {
                 processedGenomicStudy("OLD", processedId)));
 
         when(consentRepository.findByStudyId(unprocessedId)).thenReturn(List.of(
-                new Consent(uuid1, unprocessedId, "1", "GRU")));
+                new Consent(id1, unprocessedId, "1", "GRU")));
         when(sampleRepository.findByStudyId(unprocessedId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD700001", "TOPMed")));
+                new Sample(id1, "NWD700001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-skip-processed");
@@ -165,15 +164,15 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void include_processed_flag_indexes_processed_studies() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String processedId = "phs000002";
 
         when(managedInputsService.read()).thenReturn(List.of(
                 processedGenomicStudy("OLD", processedId)));
         when(consentRepository.findByStudyId(processedId)).thenReturn(List.of(
-                new Consent(uuid1, processedId, "1", "GRU")));
+                new Consent(id1, processedId, "1", "GRU")));
         when(sampleRepository.findByStudyId(processedId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD700002", "TOPMed")));
+                new Sample(id1, "NWD700002", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job,
@@ -187,19 +186,19 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void excludes_c0_consent_group() {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
         String studyId = "phs000456";
 
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "0", "NONE"),
-                new Consent(uuid2, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "0", "NONE"),
+                new Consent(id2, studyId, "1", "GRU")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD300001", "TOPMed"),
-                new Sample(uuid2, "NWD300002", "TOPMed")));
+                new Sample(id1, "NWD300001", "TOPMed"),
+                new Sample(id2, "NWD300002", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-c0");
@@ -216,19 +215,19 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void excludes_non_nwd_samples() {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
         String studyId = "phs000789";
 
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU"),
-                new Consent(uuid2, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "1", "GRU")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD400001", "TOPMed"),
-                new Sample(uuid2, "OTHER123", "Other")));
+                new Sample(id1, "NWD400001", "TOPMed"),
+                new Sample(id2, "OTHER123", "Other")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-non-nwd");
@@ -260,7 +259,7 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void skips_study_with_no_consents() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String studyWithConsents = "phs000001";
         String studyNoConsents = "phs000002";
 
@@ -269,11 +268,11 @@ class CreateVCFIndexesJobTest {
                 genomicStudy("S2", studyNoConsents)));
 
         when(consentRepository.findByStudyId(studyWithConsents)).thenReturn(List.of(
-                new Consent(uuid1, studyWithConsents, "1", "GRU")));
+                new Consent(id1, studyWithConsents, "1", "GRU")));
         when(consentRepository.findByStudyId(studyNoConsents)).thenReturn(List.of());
 
         when(sampleRepository.findByStudyId(studyWithConsents)).thenReturn(List.of(
-                new Sample(uuid1, "NWD500001", "TOPMed")));
+                new Sample(id1, "NWD500001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-no-consents");
@@ -290,7 +289,7 @@ class CreateVCFIndexesJobTest {
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(UUID.randomUUID(), studyId, "1", "GRU")));
+                new Consent(99L, studyId, "1", "GRU")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of());
 
         String outputPath = tempDir.resolve("output").toString() + "/";
@@ -316,15 +315,15 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void vcf_index_has_23_chromosome_rows() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs000111";
 
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD600001", "TOPMed")));
+                new Sample(id1, "NWD600001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-chroms");
@@ -366,22 +365,22 @@ class CreateVCFIndexesJobTest {
 
     @Test
     void sample_ids_and_patient_ids_counts_match_on_every_row() {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
-        UUID uuid3 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
+        long id3 = 3L;
         String studyId = "phs000222";
 
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU"),
-                new Consent(uuid2, studyId, "1", "GRU"),
-                new Consent(uuid3, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "1", "GRU"),
+                new Consent(id3, studyId, "1", "GRU")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(uuid1, "NWD800001", "TOPMed"),
-                new Sample(uuid2, "NWD800002", "TOPMed"),
-                new Sample(uuid3, "NWD800003", "TOPMed")));
+                new Sample(id1, "NWD800001", "TOPMed"),
+                new Sample(id2, "NWD800002", "TOPMed"),
+                new Sample(id3, "NWD800003", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-id-counts");
@@ -410,7 +409,7 @@ class CreateVCFIndexesJobTest {
                 assertThat(sid).startsWith("NWD");
             }
             for (String pid : patientIds) {
-                assertThat(pid).matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+                assertThat(pid).matches("\\d+");
             }
         }
     }

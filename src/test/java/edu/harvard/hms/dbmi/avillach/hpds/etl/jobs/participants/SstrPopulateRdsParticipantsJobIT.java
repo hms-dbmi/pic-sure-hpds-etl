@@ -12,7 +12,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -112,7 +111,7 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void is_idempotent_on_rerun_and_reuses_existing_participant_uuid() {
+    void is_idempotent_on_rerun_and_reuses_existing_participant_id() {
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
 
@@ -131,8 +130,8 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
 
     @Test
     void purges_stale_consent_rows_for_the_study_before_repopulating() {
-        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
-                + "VALUES (?, ?, ?, ?)", UUID.randomUUID(), STUDY_ID, "9", "STALE");
+        jdbc.update("INSERT INTO consents (hpds_id, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (nextval('hpds_id_seq'), ?, ?, ?)", STUDY_ID, "9", "STALE");
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
 
@@ -207,9 +206,8 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
      */
     @Test
     void refuses_to_purge_consents_when_input_has_no_data_rows() {
-        UUID existing = UUID.randomUUID();
-        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
-                + "VALUES (?, ?, ?, ?)", existing, STUDY_ID, "1", "GRU");
+        jdbc.update("INSERT INTO consents (hpds_id, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (nextval('hpds_id_seq'), ?, ?, ?)", STUDY_ID, "1", "GRU");
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER);
 
         JobResult result = run(executor, job, input, "it-empty");

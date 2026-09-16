@@ -7,7 +7,7 @@
 // standalone to reload a single study.
 //
 // What the job does
-//   - one participants row per distinct dbgap_subject_id, reusing the existing HPDS uuid if the
+//   - one participants row per distinct dbgap_subject_id, reusing the existing HPDS id if the
 //     subject was already loaded, source = "DBGap"
 //   - one consents row per participant, study_id = --study-id, consent/abbreviation from that
 //     subject's first row
@@ -53,7 +53,7 @@ pipeline {
         // Concurrency is deliberately ALLOWED so the orchestrator can load several studies at
         // once. Study-scoped work is isolated (the purge is scoped to one study_id; resource
         // names and the Terraform state key are per-run), and the cross-study hazard -- two
-        // studies racing for a shared dbgap_subject_id's uuid, since all of them use
+        // studies racing for a shared dbgap_subject_id's hpds_id, since all of them use
         // source = "DBGap" -- is handled by ParticipantRepository.resolveOrCreate.
         timeout(time: 4, unit: 'HOURS')
     }

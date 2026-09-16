@@ -12,7 +12,7 @@
 //   Moves every ready study's participant identities off the legacy system into the
 //   participants / consents / samples RDS tables. Per study:
 //     - {studyid}_sstr.tsv present: SstrPopulateRdsParticipantsJob loads RDS and this job only
-//       resolves legacy-hpds-id -> new-uuid pairs
+//       resolves legacy-hpds-id -> new-hpds-id pairs
 //     - otherwise: this job populates participants/consents itself, joining
 //       {ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).

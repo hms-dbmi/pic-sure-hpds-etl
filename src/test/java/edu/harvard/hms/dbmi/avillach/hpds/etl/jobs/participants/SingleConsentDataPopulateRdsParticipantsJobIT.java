@@ -12,14 +12,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Integration tests for {@link SingleConsentDataPopulateRdsParticipantsJob} against a real
  * Postgres. Exercises success (both consent types, with/without sample population),
- * uuid-reuse for pre-existing participants, and every failure mode.
+ * id-reuse for pre-existing participants, and every failure mode.
  *
  * <p>{@code STUDY_ID} deliberately does NOT match the {@code phs######} shape used by
  * {@link SstrPopulateRdsParticipantsJob} -- this job's {@code --study-id} is used verbatim
@@ -119,10 +118,12 @@ class SingleConsentDataPopulateRdsParticipantsJobIT extends AbstractIntegrationT
     }
 
     @Test
-    void reuses_existing_participant_uuid_for_the_same_source() {
-        UUID existingUuid = UUID.randomUUID();
-        jdbc.update("INSERT INTO participants (hpds_uuid, source_id, source) VALUES (?, ?, ?)",
-                existingUuid, "SUBJ1", STUDY_ID);
+    void reuses_existing_participant_id_for_the_same_source() {
+        jdbc.update("INSERT INTO participants (source_id, source) VALUES (?, ?)",
+                "SUBJ1", STUDY_ID);
+        long existingId = jdbc.queryForObject(
+                "SELECT hpds_id FROM participants WHERE source_id = ? AND source = ?",
+                Long.class, "SUBJ1", STUDY_ID);
         String input = JobTestSupport.tempFile("subjects.csv", "subject_id\nSUBJ1\nSUBJ2\n");
 
         JobResult result = run(executor, job, input, "single", false, "it-reuse");
@@ -132,16 +133,16 @@ class SingleConsentDataPopulateRdsParticipantsJobIT extends AbstractIntegrationT
                 .containsEntry("distinctSubjects", 2L)
                 .containsEntry("participantsInserted", 1L); // only SUBJ2 is new
         assertThat(participants.count()).isEqualTo(2);
-        UUID consentUuidForSubj1 = jdbc.queryForObject(
-                "SELECT c.hpds_uuid FROM consents c JOIN participants p ON p.hpds_uuid = c.hpds_uuid "
-                        + "WHERE p.source_id = ? AND p.source = ?", UUID.class, "SUBJ1", STUDY_ID);
-        assertThat(consentUuidForSubj1).isEqualTo(existingUuid);
+        Long consentIdForSubj1 = jdbc.queryForObject(
+                "SELECT c.hpds_id FROM consents c JOIN participants p ON p.hpds_id = c.hpds_id "
+                        + "WHERE p.source_id = ? AND p.source = ?", Long.class, "SUBJ1", STUDY_ID);
+        assertThat(consentIdForSubj1).isEqualTo(existingId);
     }
 
     @Test
     void purges_stale_consent_rows_for_the_study_before_repopulating() {
-        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
-                + "VALUES (?, ?, ?, ?)", UUID.randomUUID(), STUDY_ID, "9", "STALE");
+        jdbc.update("INSERT INTO consents (hpds_id, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (nextval('hpds_id_seq'), ?, ?, ?)", STUDY_ID, "9", "STALE");
         String input = JobTestSupport.tempFile("subjects.csv", "subject_id\nSUBJ1\n");
 
         JobResult result = run(executor, job, input, "single", false, "it-purge");
@@ -185,8 +186,8 @@ class SingleConsentDataPopulateRdsParticipantsJobIT extends AbstractIntegrationT
      */
     @Test
     void refuses_to_purge_consents_when_input_has_no_data_rows() {
-        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
-                + "VALUES (?, ?, ?, ?)", UUID.randomUUID(), STUDY_ID, "1", "GRU");
+        jdbc.update("INSERT INTO consents (hpds_id, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (nextval('hpds_id_seq'), ?, ?, ?)", STUDY_ID, "1", "GRU");
         String input = JobTestSupport.tempFile("subjects.csv", "subject_id\n");
 
         JobResult result = run(executor, job, input, "single", false, "it-empty");

@@ -20,7 +20,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -51,13 +50,13 @@ class SplitAllConceptsJobTest {
 
     @Test
     void splits_rows_by_consent_code() throws Exception {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
         String studyId = "phs001412";
 
         Path mappingCsv = writeMappingCsv(
-                "100," + uuid1 + ",SUBJ1",
-                "200," + uuid2 + ",SUBJ2");
+                "100," + id1 + ",SUBJ1",
+                "200," + id2 + ",SUBJ2");
 
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"100\",\"µphs001412µdemographicsµAGEµ\",\"42\",\"\",\"0\"",
@@ -65,8 +64,8 @@ class SplitAllConceptsJobTest {
                 "\"200\",\"µphs001412µdemographicsµAGEµ\",\"55\",\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU"),
-                new Consent(uuid2, studyId, "2", "HMB")));
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "2", "HMB")));
 
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
@@ -85,28 +84,28 @@ class SplitAllConceptsJobTest {
 
         List<String> c1Lines = Files.readAllLines(c1File, StandardCharsets.UTF_8);
         assertThat(c1Lines).hasSize(2);
-        assertThat(c1Lines.get(0)).contains(uuid1.toString());
+        assertThat(c1Lines.get(0)).contains(String.valueOf(id1));
         assertThat(c1Lines.get(0)).contains("µphs001412µdemographicsµAGEµ");
-        assertThat(c1Lines.get(1)).contains(uuid1.toString());
+        assertThat(c1Lines.get(1)).contains(String.valueOf(id1));
         assertThat(c1Lines.get(1)).contains("Male");
 
         List<String> c2Lines = Files.readAllLines(c2File, StandardCharsets.UTF_8);
         assertThat(c2Lines).hasSize(1);
-        assertThat(c2Lines.get(0)).contains(uuid2.toString());
+        assertThat(c2Lines.get(0)).contains(String.valueOf(id2));
         assertThat(c2Lines.get(0)).contains("55");
     }
 
     @Test
     void abbreviation_is_uppercased_in_filename() throws Exception {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs000999";
 
-        Path mappingCsv = writeMappingCsv("42," + uuid1 + ",S1");
+        Path mappingCsv = writeMappingCsv("42," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"42\",\"µtestµ\",\"\",\"val\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         executor.run(job, Map.of(
@@ -122,15 +121,15 @@ class SplitAllConceptsJobTest {
 
     @Test
     void old_hpds_ids_are_not_present_in_output() throws Exception {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs000111";
 
-        Path mappingCsv = writeMappingCsv("old-legacy-id-999," + uuid1 + ",S1");
+        Path mappingCsv = writeMappingCsv("old-legacy-id-999," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"old-legacy-id-999\",\"µtestµ\",\"\",\"data\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         executor.run(job, Map.of(
@@ -143,21 +142,21 @@ class SplitAllConceptsJobTest {
         Path outFile = outputDir.resolve("split_allconcepts/phs000111/c1/TST_allConcepts_c1.csv");
         String content = Files.readString(outFile, StandardCharsets.UTF_8);
         assertThat(content).doesNotContain("old-legacy-id-999");
-        assertThat(content).contains(uuid1.toString());
+        assertThat(content).contains(String.valueOf(id1));
     }
 
     @Test
     void warns_on_unmapped_hpds_ids() throws Exception {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs000222";
 
-        Path mappingCsv = writeMappingCsv("100," + uuid1 + ",S1");
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"100\",\"µtestµ\",\"\",\"mapped\",\"0\"",
                 "\"999\",\"µtestµ\",\"\",\"unmapped\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
@@ -173,20 +172,20 @@ class SplitAllConceptsJobTest {
     }
 
     @Test
-    void warns_on_no_consent_for_uuid() throws Exception {
-        UUID uuidWithConsent = UUID.randomUUID();
-        UUID uuidWithout = UUID.randomUUID();
+    void warns_on_no_consent_for_hpds_id() throws Exception {
+        long idWithConsent = 1L;
+        long idWithout = 2L;
         String studyId = "phs000333";
 
         Path mappingCsv = writeMappingCsv(
-                "100," + uuidWithConsent + ",S1",
-                "200," + uuidWithout + ",S2");
+                "100," + idWithConsent + ",S1",
+                "200," + idWithout + ",S2");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"100\",\"µtestµ\",\"\",\"val1\",\"0\"",
                 "\"200\",\"µtestµ\",\"\",\"val2\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuidWithConsent, studyId, "1", "GRU")));
+                new Consent(idWithConsent, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
@@ -206,13 +205,13 @@ class SplitAllConceptsJobTest {
         String studyId = "phs000444";
 
         Path mappingCsv = tempDir.resolve("empty_mapping.csv");
-        Files.writeString(mappingCsv, "old_hpds_id,new_uuid,common_dbgap_id\n");
+        Files.writeString(mappingCsv, "old_hpds_id,new_hpds_id,common_dbgap_id\n");
 
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"100\",\"µtestµ\",\"\",\"val\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(UUID.randomUUID(), studyId, "1", "GRU")));
+                new Consent(99L, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
@@ -228,9 +227,9 @@ class SplitAllConceptsJobTest {
     @Test
     void fails_on_no_consents_in_database() throws Exception {
         String studyId = "phs000555";
-        UUID uuid = UUID.randomUUID();
+        long id1 = 1L;
 
-        Path mappingCsv = writeMappingCsv("100," + uuid + ",S1");
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"100\",\"µtestµ\",\"\",\"val\",\"0\"");
 
@@ -267,13 +266,13 @@ class SplitAllConceptsJobTest {
     void fails_when_all_rows_unmapped_produces_no_output() throws Exception {
         String studyId = "phs000666";
 
-        Path mappingCsv = writeMappingCsv("999," + UUID.randomUUID() + ",S1");
+        Path mappingCsv = writeMappingCsv("999,99,S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"100\",\"µtestµ\",\"\",\"val\",\"0\"",
                 "\"200\",\"µtestµ\",\"\",\"val2\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(UUID.randomUUID(), studyId, "1", "GRU")));
+                new Consent(99L, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
@@ -290,15 +289,15 @@ class SplitAllConceptsJobTest {
 
     @Test
     void output_preserves_all_five_columns_quoted() throws Exception {
-        UUID uuid = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs000777";
 
-        Path mappingCsv = writeMappingCsv("42," + uuid + ",S1");
+        Path mappingCsv = writeMappingCsv("42," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"42\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         executor.run(job, Map.of(
@@ -311,20 +310,20 @@ class SplitAllConceptsJobTest {
         Path outFile = outputDir.resolve("split_allconcepts/phs000777/c1/TST_allConcepts_c1.csv");
         String line = Files.readAllLines(outFile, StandardCharsets.UTF_8).getFirst();
         assertThat(line).isEqualTo(
-                "\"%s\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"".formatted(uuid));
+                "\"%s\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"".formatted(id1));
     }
 
     @Test
     void handles_quotes_in_values() throws Exception {
-        UUID uuid = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs000888";
 
-        Path mappingCsv = writeMappingCsv("42," + uuid + ",S1");
+        Path mappingCsv = writeMappingCsv("42," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"42\",\"µpathµ\",\"\",\"value with \"\"quotes\"\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid, studyId, "1", "GRU")));
+                new Consent(id1, studyId, "1", "GRU")));
 
         Path outputDir = tempDir.resolve("output");
         executor.run(job, Map.of(
@@ -341,24 +340,24 @@ class SplitAllConceptsJobTest {
 
     @Test
     void multiple_consents_produce_separate_files() throws Exception {
-        UUID u1 = UUID.randomUUID();
-        UUID u2 = UUID.randomUUID();
-        UUID u3 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
+        long id3 = 3L;
         String studyId = "phs000123";
 
         Path mappingCsv = writeMappingCsv(
-                "10," + u1 + ",S1",
-                "20," + u2 + ",S2",
-                "30," + u3 + ",S3");
+                "10," + id1 + ",S1",
+                "20," + id2 + ",S2",
+                "30," + id3 + ",S3");
         Path allConceptsCsv = writeAllConceptsCsv(
                 "\"10\",\"µaµ\",\"\",\"a\",\"0\"",
                 "\"20\",\"µbµ\",\"\",\"b\",\"0\"",
                 "\"30\",\"µcµ\",\"\",\"c\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(u1, studyId, "1", "GRU"),
-                new Consent(u2, studyId, "1", "GRU"),
-                new Consent(u3, studyId, "2", "HMB")));
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "1", "GRU"),
+                new Consent(id3, studyId, "2", "HMB")));
 
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
@@ -382,7 +381,7 @@ class SplitAllConceptsJobTest {
 
     private Path writeMappingCsv(String... dataRows) throws Exception {
         Path path = tempDir.resolve("mapping_" + System.nanoTime() + ".csv");
-        StringBuilder sb = new StringBuilder("old_hpds_id,new_uuid,common_dbgap_id\n");
+        StringBuilder sb = new StringBuilder("old_hpds_id,new_hpds_id,common_dbgap_id\n");
         for (String row : dataRows) {
             sb.append(row).append('\n');
         }

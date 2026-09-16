@@ -90,7 +90,7 @@ if [[ "$NEW" == "0" && "$SUBJECTS" != "0" ]]; then
 fi
 
 # One sample row per input row that has a non-blank dbgap_sample_id, deduplicated by the
-# (uuid, sample id, source) constraint -- so at most rowsRead.
+# (hpds_id, sample id, source) constraint -- so at most rowsRead.
 check "no more samples than rows"                        test "$SAMPLES" -le "$ROWS"
 if [[ "$SAMPLES" == "0" ]]; then
   warn "no sample rows written: every dbgap_sample_id in the file was blank"

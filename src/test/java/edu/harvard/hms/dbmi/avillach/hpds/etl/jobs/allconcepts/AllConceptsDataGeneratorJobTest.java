@@ -25,7 +25,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -49,8 +48,8 @@ class AllConceptsDataGeneratorJobTest {
     private AllConceptsDataGeneratorJob job;
     private JobExecutor executor;
 
-    private UUID uuid1;
-    private UUID uuid2;
+    private long id1;
+    private long id2;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -67,8 +66,8 @@ class AllConceptsDataGeneratorJobTest {
         executor = new JobExecutor(
                 new ReportWriter(new ObjectMapper().registerModule(new JavaTimeModule())), properties);
 
-        uuid1 = UUID.randomUUID();
-        uuid2 = UUID.randomUUID();
+        id1 = 1L;
+        id2 = 2L;
     }
 
     private Map<String, String> params(String outputDir) {
@@ -82,12 +81,12 @@ class AllConceptsDataGeneratorJobTest {
 
     private void setupStudyData() {
         when(consentRepository.findByStudyId(STUDY_ID)).thenReturn(List.of(
-                new Consent(uuid1, STUDY_ID, "1", "GRU"),
-                new Consent(uuid2, STUDY_ID, "2", "HMB")));
+                new Consent(id1, STUDY_ID, "1", "GRU"),
+                new Consent(id2, STUDY_ID, "2", "HMB")));
 
         when(participantRepository.findByStudyId(STUDY_ID)).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ001", "DBGap"),
-                new Participant(uuid2, "SUBJ002", "DBGap")));
+                new Participant(id1, "SUBJ001", "DBGap"),
+                new Participant(id2, "SUBJ002", "DBGap")));
     }
 
     private void setupMappingFile(String mappingContent) {
@@ -132,12 +131,12 @@ class AllConceptsDataGeneratorJobTest {
         for (int i = 0; i < uris.size(); i++) {
             String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
             if (uris.get(i).contains("_allConcepts_c1.csv")) {
-                assertThat(csv).contains("\"" + uuid1 + "\"");
+                assertThat(csv).contains("\"" + String.valueOf(id1) + "\"");
                 assertThat(csv).contains("\"µStudyµAgeµ\"");
                 assertThat(csv).contains("\"25\"");
             }
             if (uris.get(i).contains("_allConcepts_c2.csv")) {
-                assertThat(csv).contains("\"" + uuid2 + "\"");
+                assertThat(csv).contains("\"" + String.valueOf(id2) + "\"");
                 assertThat(csv).contains("\"30\"");
             }
         }
@@ -196,9 +195,9 @@ class AllConceptsDataGeneratorJobTest {
     @Test
     void skips_rows_with_unmapped_patients_and_warns() {
         when(consentRepository.findByStudyId(STUDY_ID)).thenReturn(List.of(
-                new Consent(uuid1, STUDY_ID, "1", "GRU")));
+                new Consent(id1, STUDY_ID, "1", "GRU")));
         when(participantRepository.findByStudyId(STUDY_ID)).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ001", "DBGap")));
+                new Participant(id1, "SUBJ001", "DBGap")));
 
         setupMappingFile("\"datafile.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n");
 
@@ -219,7 +218,7 @@ class AllConceptsDataGeneratorJobTest {
     void fails_when_no_consents_for_study() {
         when(consentRepository.findByStudyId(STUDY_ID)).thenReturn(List.of());
         when(participantRepository.findByStudyId(STUDY_ID)).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ001", "DBGap")));
+                new Participant(id1, "SUBJ001", "DBGap")));
 
         setupMappingFile("\"datafile.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n");
 
@@ -233,7 +232,7 @@ class AllConceptsDataGeneratorJobTest {
     @Test
     void fails_when_no_participants_for_study() {
         when(consentRepository.findByStudyId(STUDY_ID)).thenReturn(List.of(
-                new Consent(uuid1, STUDY_ID, "1", "GRU")));
+                new Consent(id1, STUDY_ID, "1", "GRU")));
         when(participantRepository.findByStudyId(STUDY_ID)).thenReturn(List.of());
 
         setupMappingFile("\"datafile.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n");

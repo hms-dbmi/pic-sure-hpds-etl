@@ -41,7 +41,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.Locale;
@@ -73,7 +72,7 @@ import java.util.stream.Stream;
  * </ul>
  *
  * <p>For each ready study: if its sstr file exists, {@link SstrPopulateRdsParticipantsJob}
- * populates RDS directly and this job only resolves legacy-hpds-id &rarr; new-uuid pairs
+ * populates RDS directly and this job only resolves legacy-hpds-id &rarr; new-hpds-id pairs
  * for the mapping file (joining the patient mapping file's id against the sstr file's
  * {@code SUBJECT_ID}/{@code dbgap_subject_id} columns, since the mapping file's id may be
  * either). Otherwise, this job populates {@code participants}/{@code consents} itself by
@@ -82,7 +81,7 @@ import java.util.stream.Stream;
  * id doubles as the sample id).
  *
  * <p>Every processed study writes {@code {studyid}_hpds_id_mapping.csv} to the reports
- * directory: {@code old_hpds_id,new_uuid,common_dbgap_id} (the latter is the best
+ * directory: {@code old_hpds_id,new_hpds_id,common_dbgap_id} (the latter is the best
  * available cross-reference id -- a real dbgap id when resolved via an sstr file,
  * otherwise the patient mapping file's id verbatim).
  *
@@ -361,7 +360,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * For sstr-driven studies: {@link SstrPopulateRdsParticipantsJob} already populated
      * RDS keyed by {@code dbgap_subject_id}. This resolves each patient-mapping row's id
      * (which may be a dbgap id or the study's own subject id) to that same dbgap id, so the
-     * mapping file can report the new uuid RDS actually assigned.
+     * mapping file can report the new hpds_id RDS actually assigned.
      */
     private SstrMappingResult buildSstrMapping(String studyId, String sstrPath,
                                               List<PatientMappingRow> patientMappings, int batchSize) {
@@ -383,7 +382,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             }
         }
 
-        Map<String, UUID> uuidByDbgapId = participants.findUuidsChunked(
+        Map<String, Long> idByDbgapId = participants.findIdsChunked(
                 new ArrayList<>(dbgapIds), SstrPopulateRdsParticipantsJob.SOURCE, batchSize);
 
         List<MappingRow> rows = new ArrayList<>();
@@ -396,14 +395,14 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 skippedHpdsIds.add(pm.oldHpdsId());
                 continue;
             }
-            UUID uuid = uuidByDbgapId.get(dbgapId);
-            if (uuid == null) {
-                log.warn("Study '{}': no participant uuid found for dbgap id '{}' (old hpds id {}); skipping",
+            Long hpdsId = idByDbgapId.get(dbgapId);
+            if (hpdsId == null) {
+                log.warn("Study '{}': no participant id found for dbgap id '{}' (old hpds id {}); skipping",
                         studyId, dbgapId, pm.oldHpdsId());
                 skippedHpdsIds.add(pm.oldHpdsId());
                 continue;
             }
-            rows.add(new MappingRow(pm.oldHpdsId(), uuid, dbgapId));
+            rows.add(new MappingRow(pm.oldHpdsId(), hpdsId, dbgapId));
         }
         return new SstrMappingResult(rows, skippedHpdsIds);
     }
@@ -424,9 +423,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 subjectIds.add(pm.id());
             }
 
-            // resolveOrCreate rather than findUuids + batchUpsert; see ParticipantRepository.
-            Map<String, UUID> uuidBySubject =
-                    participants.resolveOrCreate(subjectIds, studyId, batchSize).uuidsBySourceId();
+            // resolveOrCreate rather than findIds + batchUpsert; see ParticipantRepository.
+            Map<String, Long> idBySubject =
+                    participants.resolveOrCreate(subjectIds, studyId, batchSize).idsBySourceId();
 
             boolean populateSamples = OPEN_ACCESS_1000_GENOMES_ABV.equals(abv);
             List<Consent> consentRows = new ArrayList<>();
@@ -442,13 +441,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     skippedHpdsIds.add(pm.oldHpdsId());
                     continue;
                 }
-                UUID uuid = uuidBySubject.get(pm.id());
+                long hpdsId = idBySubject.get(pm.id());
                 String abbreviation = consentData.abbreviationByHpdsId().getOrDefault(pm.oldHpdsId(), "");
-                consentRows.add(new Consent(uuid, studyId, code, abbreviation));
+                consentRows.add(new Consent(hpdsId, studyId, code, abbreviation));
                 if (populateSamples) {
-                    sampleRows.add(new Sample(uuid, pm.id(), studyId));
+                    sampleRows.add(new Sample(hpdsId, pm.id(), studyId));
                 }
-                mappingRows.add(new MappingRow(pm.oldHpdsId(), uuid, pm.id()));
+                mappingRows.add(new MappingRow(pm.oldHpdsId(), hpdsId, pm.id()));
             }
             BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
             if (!sampleRows.isEmpty()) {
@@ -580,9 +579,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     private void writeMappingFile(JobContext ctx, String studyId, List<MappingRow> mappingRows) {
-        StringBuilder csv = new StringBuilder("old_hpds_id,new_uuid,common_dbgap_id\n");
+        StringBuilder csv = new StringBuilder("old_hpds_id,new_hpds_id,common_dbgap_id\n");
         for (MappingRow row : mappingRows) {
-            csv.append(Strings.csvQuote(row.oldHpdsId())).append(',').append(row.newUuid()).append(',')
+            csv.append(Strings.csvQuote(row.oldHpdsId())).append(',').append(row.newHpdsId()).append(',')
                     .append(Strings.csvQuote(row.commonDbgapId())).append('\n');
         }
         try {
@@ -661,7 +660,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 if (!result.skippedHpdsIdsWithNoConsent().isEmpty()) {
                     List<String> sample = result.skippedHpdsIdsWithNoConsent().stream().limit(10).toList();
                     report.warning("SUBJECTS_WITHOUT_CONSENT", result.studyId() + ": "
-                            + result.skippedHpdsIdsWithNoConsent().size() + " subject(s) had no row in "
+                            + result.skippedHpdsIdsWithNoConsent().size() + " subject(s) had no entry in "
                             + ALL_CONCEPTS_FILE_NAME + " and were NOT migrated. First: " + sample);
                 }
             } else {
@@ -708,7 +707,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     private record PatientMappingRow(String id, String oldHpdsId) {
     }
 
-    private record MappingRow(String oldHpdsId, UUID newUuid, String commonDbgapId) {
+    private record MappingRow(String oldHpdsId, long newHpdsId, String commonDbgapId) {
     }
 
     /** What {@link #populateDirectly} loaded, plus what it could not. */

@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Component
@@ -139,14 +138,14 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
                 continue;
             }
 
-            Map<UUID, String> uuidToConsentCode = new LinkedHashMap<>();
+            Map<Long, String> idToConsentCode = new LinkedHashMap<>();
             for (Consent c : consents) {
-                uuidToConsentCode.put(c.hpdsUuid(), c.consentCode());
+                idToConsentCode.put(c.hpdsId(), c.consentCode());
             }
 
             Map<String, List<Sample>> samplesByConsent = new LinkedHashMap<>();
             for (Sample s : samples) {
-                String code = uuidToConsentCode.get(s.hpdsUuid());
+                String code = idToConsentCode.get(s.hpdsId());
                 if (code == null || code.equals("0")) {
                     continue;
                 }
@@ -169,7 +168,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
                         .map(Sample::sourceSampleId)
                         .collect(Collectors.joining(","));
                 String patientIds = nwdSamples.stream()
-                        .map(s -> s.hpdsUuid().toString())
+                        .map(s -> String.valueOf(s.hpdsId()))
                         .collect(Collectors.joining(","));
 
                 long sampleIdCount = sampleIds.chars().filter(c -> c == ',').count() + 1;
@@ -220,7 +219,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
     private String buildSampleIdsCsv(List<Sample> nwdSamples, String studyAbv) {
         StringBuilder sb = new StringBuilder();
         for (Sample s : nwdSamples) {
-            sb.append(s.hpdsUuid()).append(',')
+            sb.append(s.hpdsId()).append(',')
                     .append(studyAbv).append(',')
                     .append(s.sourceSampleId())
                     .append('\n');

@@ -18,7 +18,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -190,14 +189,14 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics()).containsEntry("succeededStudies", 1L).containsEntry("failedStudies", 0L);
         assertThat(participants.count()).isEqualTo(1);
-        UUID newUuid = jdbc.queryForObject(
-                "SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
-                UUID.class, "phs001412.v1.p1.c1", "DBGap");
+        long newHpdsId = jdbc.queryForObject(
+                "SELECT hpds_id FROM participants WHERE source_id = ? AND source = ?",
+                Long.class, "phs001412.v1.p1.c1", "DBGap");
         assertThat(countWhere("consents", "study_id = ? AND consent_code = '1' AND consent_abbreviation = 'GRU'",
                 "phs001412")).isEqualTo(1);
 
         String mapping = readMappingFile("phs001412");
-        assertThat(mapping).isEqualTo("old_hpds_id,new_uuid,common_dbgap_id\n1001," + newUuid + ",phs001412.v1.p1.c1\n");
+        assertThat(mapping).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n1001," + newHpdsId + ",phs001412.v1.p1.c1\n");
     }
 
     @Test
@@ -215,15 +214,15 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(participants.count()).isEqualTo(1);
-        UUID newUuid = jdbc.queryForObject(
-                "SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
-                UUID.class, "SUBJ42", "other-study-01");
+        long newHpdsId = jdbc.queryForObject(
+                "SELECT hpds_id FROM participants WHERE source_id = ? AND source = ?",
+                Long.class, "SUBJ42", "other-study-01");
         assertThat(countWhere("consents",
                 "study_id = ? AND consent_code = '1' AND consent_abbreviation = 'GRU-IRB'", "other-study-01")).isEqualTo(1);
         assertThat(countWhere("samples", "sample_source = ?", "other-study-01")).isZero();
 
         String mapping = readMappingFile("other-study-01");
-        assertThat(mapping).isEqualTo("old_hpds_id,new_uuid,common_dbgap_id\n2002," + newUuid + ",SUBJ42\n");
+        assertThat(mapping).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n2002," + newHpdsId + ",SUBJ42\n");
     }
 
     @Test

@@ -29,7 +29,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -191,25 +190,25 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         consents.deleteByStudyId(studyId);
 
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
-        Map<String, UUID> uuidBySubject = resolution.uuidsBySourceId();
+        Map<String, Long> idBySubject = resolution.idsBySourceId();
         long participantsInserted = resolution.inserted();
 
         List<Consent> consentRows = new ArrayList<>();
         Map<String, Long> countsByConsentGroup = new LinkedHashMap<>();
         for (Telemetry row : firstRowBySubject.values()) {
-            consentRows.add(new Consent(uuidBySubject.get(row.dbgapSubjectId()), studyId,
+            consentRows.add(new Consent(idBySubject.get(row.dbgapSubjectId()), studyId,
                     row.consent(), row.consentAbbreviation()));
             countsByConsentGroup.merge(row.consent(), 1L, Long::sum);
         }
         long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
 
         List<Sample> sampleRows = samplePairs.stream()
-                .map(pair -> new Sample(uuidBySubject.get(pair[0]), pair[1], SOURCE))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE))
                 .toList();
         long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
 
         List<Sample> submittedSampleRows = submittedSamplePairs.stream()
-                .map(pair -> new Sample(uuidBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
                 .toList();
         long submittedSamplesInserted =
                 BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize);

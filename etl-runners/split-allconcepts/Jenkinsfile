@@ -10,7 +10,7 @@
 //
 // What the job does
 //   For a single study: reads the legacy allConcepts CSV from S3, replaces old hpds integer
-//   IDs with the new UUIDs produced by participants-migration, then splits the result into
+//   IDs with the new hpds_ids produced by participants-migration, then splits the result into
 //   per-consent files using the consent assignments in the database.
 //
 // Inputs

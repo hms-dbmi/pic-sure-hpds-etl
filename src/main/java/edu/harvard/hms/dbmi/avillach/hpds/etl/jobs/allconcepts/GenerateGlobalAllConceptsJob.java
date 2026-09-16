@@ -143,7 +143,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
     private void addConsentsConcept(AllConceptsCsvBuilder builder, List<Consent> consents, String studyId) {
         for (Consent c : consents) {
             builder.add(AllConceptsRow.nonNumeric(
-                    c.hpdsUuid().toString(),
+                    String.valueOf(c.hpdsId()),
                     ConceptPaths.CONSENTS,
                     studyId + ".c" + c.consentCode()));
         }
@@ -153,7 +153,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         List<Participant> participants = participantRepository.findByStudyId(studyId);
         for (Participant p : participants) {
             builder.add(AllConceptsRow.nonNumeric(
-                    p.hpdsUuid().toString(),
+                    String.valueOf(p.hpdsId()),
                     ConceptPaths.SOURCE_SUBJECT_ID,
                     p.sourceId()));
         }
@@ -163,7 +163,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         List<Sample> samples = sampleRepository.findByStudyId(studyId);
         for (Sample s : samples) {
             builder.add(AllConceptsRow.nonNumeric(
-                    s.hpdsUuid().toString(),
+                    String.valueOf(s.hpdsId()),
                     ConceptPaths.SOURCE_SAMPLE_ID,
                     s.sourceSampleId()));
         }
@@ -178,7 +178,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
 
         for (Consent c : consents) {
             builder.add(AllConceptsRow.nonNumeric(
-                    c.hpdsUuid().toString(),
+                    String.valueOf(c.hpdsId()),
                     ConceptPaths.STUDIES_CONSENTS_PREFIX + studyId + "µ",
                     "TRUE"));
 
@@ -190,7 +190,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
             }
 
             builder.add(AllConceptsRow.nonNumeric(
-                    c.hpdsUuid().toString(),
+                    String.valueOf(c.hpdsId()),
                     ConceptPaths.STUDIES_CONSENTS_PREFIX + studyId + "µ" + c.consentAbbreviation() + "µ",
                     "TRUE"));
         }

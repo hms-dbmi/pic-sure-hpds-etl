@@ -152,7 +152,7 @@ while IFS=$'\t' read -r abv sid state; do
     route="direct"
   fi
 
-  # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-uuid pairs.
+  # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-hpds-id pairs.
   check "$sid ($abv, $route): $mapping" uri_exists "$mapping"
 done <<<"$STUDIES"
 

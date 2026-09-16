@@ -29,7 +29,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -122,9 +121,9 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             throw new DataException("No consents found for study " + studyId + " in the database");
         }
 
-        Map<UUID, Consent> consentByUuid = new LinkedHashMap<>();
+        Map<Long, Consent> consentById = new LinkedHashMap<>();
         for (Consent c : consents) {
-            consentByUuid.put(c.hpdsUuid(), c);
+            consentById.put(c.hpdsId(), c);
         }
 
         List<Participant> participants = participantRepository.findByStudyId(studyId);
@@ -132,9 +131,9 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             throw new DataException("No participants found for study " + studyId + " in the database");
         }
 
-        Map<String, UUID> uuidBySourceId = new LinkedHashMap<>();
+        Map<String, Long> idBySourceId = new LinkedHashMap<>();
         for (Participant p : participants) {
-            uuidBySourceId.put(p.sourceId(), p.hpdsUuid());
+            idBySourceId.put(p.sourceId(), p.hpdsId());
         }
 
         log.info("Study {} has {} consent group(s) and {} participant(s)",
@@ -155,7 +154,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         }
 
         List<FileResult> fileResults = processFilesInParallel(
-                mappingsByFile, dataDir, uuidBySourceId, consentByUuid);
+                mappingsByFile, dataDir, idBySourceId, consentById);
 
         Map<String, AllConceptsCsvBuilder> buildersByConsent = new LinkedHashMap<>();
         for (Consent c : consents) {
@@ -232,8 +231,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
     private List<FileResult> processFilesInParallel(
             Map<String, List<ConceptMapping>> mappingsByFile,
             String dataDir,
-            Map<String, UUID> uuidBySourceId,
-            Map<UUID, Consent> consentByUuid) {
+            Map<String, Long> idBySourceId,
+            Map<Long, Consent> consentById) {
 
         List<FileResult> results = new ArrayList<>();
 
@@ -252,7 +251,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 }
 
                 futures.add(executor.submit(() ->
-                        processFile(fileUri, fileMappings, uuidBySourceId, consentByUuid)));
+                        processFile(fileUri, fileMappings, idBySourceId, consentById)));
             }
 
             for (Future<FileResult> future : futures) {
@@ -275,8 +274,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
 
     private FileResult processFile(String fileUri,
                                    List<ConceptMapping> fileMappings,
-                                   Map<String, UUID> uuidBySourceId,
-                                   Map<UUID, Consent> consentByUuid) {
+                                   Map<String, Long> idBySourceId,
+                                   Map<Long, Consent> consentById) {
         Map<String, List<AllConceptsRow>> rowsByConsent = new LinkedHashMap<>();
         Set<String> unmappedPatients = new LinkedHashSet<>();
         long rowsProcessed = 0;
@@ -307,21 +306,21 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                         continue;
                     }
 
-                    UUID uuid = uuidBySourceId.get(patientId);
-                    if (uuid == null) {
+                    Long hpdsId = idBySourceId.get(patientId);
+                    if (hpdsId == null) {
                         unmappedPatients.add(patientId);
                         rowsSkipped++;
                         continue;
                     }
 
-                    Consent consent = consentByUuid.get(uuid);
+                    Consent consent = consentById.get(hpdsId);
                     if (consent == null) {
                         rowsSkipped++;
                         continue;
                     }
 
                     String cellValue = row.get(mapping.columnIndex()).trim();
-                    AllConceptsRow conceptRow = buildConceptRow(uuid.toString(), mapping, cellValue);
+                    AllConceptsRow conceptRow = buildConceptRow(String.valueOf(hpdsId), mapping, cellValue);
                     if (conceptRow != null) {
                         rowsByConsent.computeIfAbsent(consent.consentCode(), k -> new ArrayList<>())
                                 .add(conceptRow);
@@ -428,7 +427,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         if (output.unmappedPatientCount() > 0) {
             report.warning("UNMAPPED_PATIENTS",
                     output.unmappedPatientCount() + " patient(s) in data files could not be resolved "
-                            + "to an hpds_uuid via the participants table");
+                            + "to an hpds_id via the participants table");
         }
         output.rowsPerConsent().forEach((consent, count) ->
                 report.info("CONSENT_ROW_COUNT", consent + ": " + count + " row(s)"));

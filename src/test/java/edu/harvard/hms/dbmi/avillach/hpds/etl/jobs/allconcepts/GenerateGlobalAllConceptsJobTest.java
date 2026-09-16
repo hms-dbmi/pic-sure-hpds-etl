@@ -29,7 +29,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -73,23 +72,23 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void succeeds_with_all_concept_types() {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
         String studyId = "phs001412";
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("STUDY1", studyId, true)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "GRU"),
-                new Consent(uuid2, studyId, "2", "HMB")));
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "2", "HMB")));
 
         when(participantRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ1", "DBGap"),
-                new Participant(uuid2, "SUBJ2", "DBGap")));
+                new Participant(id1, "SUBJ1", "DBGap"),
+                new Participant(id2, "SUBJ2", "DBGap")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(uuid1, "SAMP1", "DBGap")));
+                new Sample(id1, "SAMP1", "DBGap")));
 
         String outputPath = tempDir.resolve("output/").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-success");
@@ -127,17 +126,17 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void skips_individual_consent_path_when_abbreviation_is_empty() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
         String studyId = "phs001412";
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("STUDY1", studyId, true)));
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Consent(uuid1, studyId, "1", "")));
+                new Consent(id1, studyId, "1", "")));
 
         when(participantRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ1", "DBGap")));
+                new Participant(id1, "SUBJ1", "DBGap")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of());
 
@@ -208,8 +207,8 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void processes_multiple_ready_studies() {
-        UUID uuid1 = UUID.randomUUID();
-        UUID uuid2 = UUID.randomUUID();
+        long id1 = 1L;
+        long id2 = 2L;
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("S1", "phs000001", true),
@@ -217,14 +216,14 @@ class GenerateGlobalAllConceptsJobTest {
                 ManagedInputRow.of("S3", "phs000003", false)));
 
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
-                new Consent(uuid1, "phs000001", "1", "GRU")));
+                new Consent(id1, "phs000001", "1", "GRU")));
         when(consentRepository.findByStudyId("phs000002")).thenReturn(List.of(
-                new Consent(uuid2, "phs000002", "public", "PUB")));
+                new Consent(id2, "phs000002", "public", "PUB")));
 
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ1", "DBGap")));
+                new Participant(id1, "SUBJ1", "DBGap")));
         when(participantRepository.findByStudyId("phs000002")).thenReturn(List.of(
-                new Participant(uuid2, "SUBJ2", "DBGap")));
+                new Participant(id2, "SUBJ2", "DBGap")));
 
         when(sampleRepository.findByStudyId("phs000001")).thenReturn(List.of());
         when(sampleRepository.findByStudyId("phs000002")).thenReturn(List.of());
@@ -247,7 +246,7 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void skips_study_with_no_consents_in_database() {
-        UUID uuid2 = UUID.randomUUID();
+        long id2 = 2L;
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("S1", "phs000001", true),
@@ -255,10 +254,10 @@ class GenerateGlobalAllConceptsJobTest {
 
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of());
         when(consentRepository.findByStudyId("phs000002")).thenReturn(List.of(
-                new Consent(uuid2, "phs000002", "1", "GRU")));
+                new Consent(id2, "phs000002", "1", "GRU")));
 
         when(participantRepository.findByStudyId("phs000002")).thenReturn(List.of(
-                new Participant(uuid2, "SUBJ2", "DBGap")));
+                new Participant(id2, "SUBJ2", "DBGap")));
         when(sampleRepository.findByStudyId("phs000002")).thenReturn(List.of());
 
         String outputPath = tempDir.resolve("output.csv").toString();
@@ -278,12 +277,12 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void all_fields_are_quoted_in_output() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("S1", "phs000001", true)));
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
-                new Consent(uuid1, "phs000001", "1", "GRU")));
+                new Consent(id1, "phs000001", "1", "GRU")));
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of());
         when(sampleRepository.findByStudyId("phs000001")).thenReturn(List.of());
 
@@ -304,14 +303,14 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void timestamp_is_always_zero() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("S1", "phs000001", true)));
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
-                new Consent(uuid1, "phs000001", "1", "GRU")));
+                new Consent(id1, "phs000001", "1", "GRU")));
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of(
-                new Participant(uuid1, "SUBJ1", "DBGap")));
+                new Participant(id1, "SUBJ1", "DBGap")));
         when(sampleRepository.findByStudyId("phs000001")).thenReturn(List.of());
 
         String outputPath = tempDir.resolve("output.csv").toString();
@@ -328,12 +327,12 @@ class GenerateGlobalAllConceptsJobTest {
 
     @Test
     void output_uri_appends_filename_when_ending_with_slash() {
-        UUID uuid1 = UUID.randomUUID();
+        long id1 = 1L;
 
         when(managedInputsService.read()).thenReturn(List.of(
                 ManagedInputRow.of("S1", "phs000001", true)));
         when(consentRepository.findByStudyId("phs000001")).thenReturn(List.of(
-                new Consent(uuid1, "phs000001", "1", "GRU")));
+                new Consent(id1, "phs000001", "1", "GRU")));
         when(participantRepository.findByStudyId("phs000001")).thenReturn(List.of());
         when(sampleRepository.findByStudyId("phs000001")).thenReturn(List.of());
 

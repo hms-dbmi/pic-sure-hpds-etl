@@ -32,7 +32,7 @@ import java.util.stream.Stream;
 
 /**
  * Temporary migration job: takes a study's legacy allConcepts CSV from S3,
- * replaces old hpds integer IDs with the new UUIDs produced by
+ * replaces old hpds integer IDs with the new hpds IDs produced by
  * {@link ParticipantsMigrationJob}, then splits the result into per-consent
  * output files using the consent assignments already in the database.
  *
@@ -77,13 +77,13 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                                 "S3 URI of the study's allConcepts CSV",
                                 "s3://avillach-73-bdcatalyst-etl/fhs/completed/phs000123/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
                         ParamSpec.required("mapping",
-                                "S3 URI of the hpds_id_mapping.csv from participants-migration",
+                                "S3 URI of the hpds_id_mapping.csv from participants-migration (columns: old_hpds_id, new_hpds_id, common_dbgap_id)",
                                 "s3://bucket/reports/phs000123_hpds_id_mapping.csv"),
                         ParamSpec.required("output",
                                 "Output directory for split files (local path or s3:// URI). "
                                         + "Structure: {output}/split_allconcepts/{study_id}/c{code}/{ABV}_allConcepts_c{code}.csv",
                                 "./output")),
-                List.of("Per-consent allConcepts files with UUIDs replacing legacy hpds IDs"));
+                List.of("Per-consent allConcepts files with new hpds IDs replacing legacy hpds IDs"));
     }
 
     @Override
@@ -113,11 +113,11 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         }
         log.info("Loaded {} id mapping(s) from {}", idMapping.size(), mappingUri);
 
-        Map<String, String> consentByUuid = loadConsentMap(studyId);
-        if (consentByUuid.isEmpty()) {
+        Map<String, String> consentByHpdsId = loadConsentMap(studyId);
+        if (consentByHpdsId.isEmpty()) {
             throw new DataException("No consents found in the database for study " + studyId);
         }
-        log.info("Loaded {} consent assignment(s) for study {}", consentByUuid.size(), studyId);
+        log.info("Loaded {} consent assignment(s) for study {}", consentByHpdsId.size(), studyId);
 
         // Rows are spooled to one local temp file per consent group rather than held in
         // heap: parent studies' inputs run to tens of GB (phs000200 is 34 GB) and the
@@ -144,8 +144,8 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                         continue;
                     }
 
-                    String newUuid = idMapping.get(oldHpdsId);
-                    if (newUuid == null) {
+                    String newHpdsId = idMapping.get(oldHpdsId);
+                    if (newHpdsId == null) {
                         unmappedIds++;
                         if (unmappedSample.size() < 10) {
                             unmappedSample.add(oldHpdsId);
@@ -153,13 +153,13 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                         continue;
                     }
 
-                    String consentCode = consentByUuid.get(newUuid);
+                    String consentCode = consentByHpdsId.get(newHpdsId);
                     if (consentCode == null) {
                         noConsentRows++;
                         continue;
                     }
 
-                    String line = formatCsvLine(newUuid, row.get(1), row.get(2), row.get(3), row.get(4));
+                    String line = formatCsvLine(newHpdsId, row.get(1), row.get(2), row.get(3), row.get(4));
                     BufferedWriter writer = writerByConsent.get(consentCode);
                     if (writer == null) {
                         Path tmp = Files.createTempFile("split-" + studyId + "-c" + consentCode + "-", ".csv");
@@ -230,9 +230,9 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         try (Stream<Map<String, String>> rows = delimitedReader.stream(in, DelimitedReader.COMMA)) {
             for (Map<String, String> row : (Iterable<Map<String, String>>) rows::iterator) {
                 String oldId = Strings.trimToNull(row.get("old_hpds_id"));
-                String newUuid = Strings.trimToNull(row.get("new_uuid"));
-                if (oldId != null && newUuid != null) {
-                    mapping.put(oldId, newUuid);
+                String newHpdsId = Strings.trimToNull(row.get("new_hpds_id"));
+                if (oldId != null && newHpdsId != null) {
+                    mapping.put(oldId, newHpdsId);
                 }
             }
         }
@@ -242,7 +242,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
     private Map<String, String> loadConsentMap(String studyId) {
         Map<String, String> map = new HashMap<>();
         for (Consent c : consentRepository.findByStudyId(studyId)) {
-            map.put(c.hpdsUuid().toString(), c.consentCode());
+            map.put(String.valueOf(c.hpdsId()), c.consentCode());
         }
         return map;
     }
@@ -286,7 +286,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         }
         if (output.noConsentRows() > 0) {
             report.warning("NO_CONSENT",
-                    output.noConsentRows() + " row(s) had UUIDs with no consent assignment in the database");
+                    output.noConsentRows() + " row(s) had hpds IDs with no consent assignment in the database");
         }
         output.rowsPerConsent().forEach((code, count) ->
                 report.info("CONSENT_ROWS", "c" + code + ": " + count + " row(s)"));

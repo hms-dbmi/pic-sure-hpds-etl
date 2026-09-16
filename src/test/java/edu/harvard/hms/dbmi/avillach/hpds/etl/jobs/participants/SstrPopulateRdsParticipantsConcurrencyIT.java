@@ -11,7 +11,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -24,15 +23,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Concurrent study loads. The permanent pipeline may load several studies at once and every load
  * shares {@code source = "DBGap"}, so two studies containing the same {@code dbgap_subject_id} race
- * for that subject's HPDS uuid.
+ * for that subject's HPDS id.
  *
  * <p>Without
  * {@link edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository#resolveOrCreate}, both
- * runs find no participant, generate different uuids, and {@code ON CONFLICT DO NOTHING} discards
+ * runs find no participant, and {@code ON CONFLICT DO NOTHING} discards
  * one insert without reporting the winner, leaving the losing run to write consents and samples
- * against a uuid that is not in {@code participants}.
+ * against an id that is not in {@code participants}.
  *
- * <p>{@link #every_consent_and_sample_uuid_exists_in_participants()} holds regardless of how the
+ * <p>{@link #every_consent_and_sample_id_exists_in_participants()} holds regardless of how the
  * interleaving lands, so it does not depend on timing.
  */
 class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
@@ -65,13 +64,13 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
         return n == null ? 0 : n;
     }
 
-    private UUID storedUuid(String dbgapSubjectId) {
-        return jdbc.queryForObject("SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
-                UUID.class, dbgapSubjectId, SOURCE);
+    private long storedId(String dbgapSubjectId) {
+        return jdbc.queryForObject("SELECT hpds_id FROM participants WHERE source_id = ? AND source = ?",
+                Long.class, dbgapSubjectId, SOURCE);
     }
 
-    private long consentRowsForUuid(UUID uuid) {
-        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM consents WHERE hpds_uuid = ?", Long.class, uuid);
+    private long consentRowsForId(long hpdsId) {
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM consents WHERE hpds_id = ?", Long.class, hpdsId);
         return n == null ? 0 : n;
     }
 
@@ -97,9 +96,9 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
         }
     }
 
-    /** Two studies loaded at once, sharing a dbgap_subject_id, must agree on its HPDS uuid. */
+    /** Two studies loaded at once, sharing a dbgap_subject_id, must agree on its HPDS id. */
     @Test
-    void concurrent_study_loads_sharing_a_subject_use_the_same_hpds_uuid() throws Exception {
+    void concurrent_study_loads_sharing_a_subject_use_the_same_hpds_id() throws Exception {
         String shared = "phs_shared.v1.p1.c1";
 
         String inputA = JobTestSupport.tempFile("sstr-a.tsv", HEADER
@@ -118,24 +117,24 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
         // The unique constraint guarantees this even without the fix, so it is not sufficient alone.
         assertThat(participantRowsFor(shared)).isEqualTo(1);
 
-        // Both studies wrote their consent row against that uuid. Without the fix the losing run
-        // used its own discarded uuid and this would be 1.
-        UUID sharedUuid = storedUuid(shared);
-        assertThat(consentRowsForUuid(sharedUuid))
-                .as("both studies should have a consent row for the shared subject's uuid")
+        // Both studies wrote their consent row against that id. Without the fix the losing run
+        // used its own discarded id and this would be 1.
+        long sharedId = storedId(shared);
+        assertThat(consentRowsForId(sharedId))
+                .as("both studies should have a consent row for the shared subject's id")
                 .isEqualTo(2);
 
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM consents WHERE hpds_uuid = ? AND study_id = ?", Long.class,
-                sharedUuid, STUDY_A)).isEqualTo(1);
+                "SELECT COUNT(*) FROM consents WHERE hpds_id = ? AND study_id = ?", Long.class,
+                sharedId, STUDY_A)).isEqualTo(1);
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM consents WHERE hpds_uuid = ? AND study_id = ?", Long.class,
-                sharedUuid, STUDY_B)).isEqualTo(1);
+                "SELECT COUNT(*) FROM consents WHERE hpds_id = ? AND study_id = ?", Long.class,
+                sharedId, STUDY_B)).isEqualTo(1);
     }
 
     /** The referential invariant, which holds however the race lands. */
     @Test
-    void every_consent_and_sample_uuid_exists_in_participants() throws Exception {
+    void every_consent_and_sample_id_exists_in_participants() throws Exception {
         String shared1 = "phs_shared.v1.p1.c1";
         String shared2 = "phs_shared.v1.p2.c1";
 
@@ -151,15 +150,15 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
 
         Long orphanedConsents = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM consents c
-                WHERE NOT EXISTS (SELECT 1 FROM participants p WHERE p.hpds_uuid = c.hpds_uuid)
+                WHERE NOT EXISTS (SELECT 1 FROM participants p WHERE p.hpds_id = c.hpds_id)
                 """, Long.class);
         Long orphanedSamples = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM samples s
-                WHERE NOT EXISTS (SELECT 1 FROM participants p WHERE p.hpds_uuid = s.hpds_uuid)
+                WHERE NOT EXISTS (SELECT 1 FROM participants p WHERE p.hpds_id = s.hpds_id)
                 """, Long.class);
 
-        assertThat(orphanedConsents).as("consents referencing a uuid with no participant").isZero();
-        assertThat(orphanedSamples).as("samples referencing a uuid with no participant").isZero();
+        assertThat(orphanedConsents).as("consents referencing an id with no participant").isZero();
+        assertThat(orphanedSamples).as("samples referencing an id with no participant").isZero();
 
         // Two subjects, one identity each, shared by both studies.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM participants", Long.class)).isEqualTo(2);
@@ -191,7 +190,7 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
                 .isTrue());
         assertThat(participantRowsFor(first)).isEqualTo(1);
         assertThat(participantRowsFor(second)).isEqualTo(1);
-        assertThat(consentRowsForUuid(storedUuid(first))).isEqualTo(2);
-        assertThat(consentRowsForUuid(storedUuid(second))).isEqualTo(2);
+        assertThat(consentRowsForId(storedId(first))).isEqualTo(2);
+        assertThat(consentRowsForId(storedId(second))).isEqualTo(2);
     }
 }
