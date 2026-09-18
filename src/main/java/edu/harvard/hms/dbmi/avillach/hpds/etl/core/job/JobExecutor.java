@@ -41,6 +41,8 @@ public class JobExecutor {
         Path reportsDir = Path.of(properties.getReports().getDir());
         JobContext ctx = new JobContext(job.name(), runId, reportsDir, params);
 
+        String previousJob = MDC.get("job");
+        String previousRunId = MDC.get("runId");
         MDC.put("job", job.name());
         MDC.put("runId", runId);
         Instant start = Instant.now();
@@ -57,8 +59,16 @@ public class JobExecutor {
             }
             return result;
         } finally {
-            MDC.remove("job");
-            MDC.remove("runId");
+            if (previousJob != null) {
+                MDC.put("job", previousJob);
+            } else {
+                MDC.remove("job");
+            }
+            if (previousRunId != null) {
+                MDC.put("runId", previousRunId);
+            } else {
+                MDC.remove("runId");
+            }
         }
     }
 

@@ -12,7 +12,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -71,28 +70,48 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
                 .containsEntry("distinctParticipants", 2L)
                 .containsEntry("participantsInserted", 2L)
                 .containsEntry("consentsWritten", 2L)
-                .containsEntry("samplesInserted", 3L);
+                .containsEntry("samplesInserted", 3L)
+                .containsEntry("submittedSamplesInserted", 3L);
         assertThat(participants.count()).isEqualTo(2);
         assertThat(consentCountForStudy()).isEqualTo(2);
-        assertThat(sampleCount()).isEqualTo(3);
+        // 3 dbGaP-id rows + 3 submitted SAMPLE_ID rows
+        assertThat(sampleCount()).isEqualTo(6);
     }
 
     @Test
-    void fails_and_rolls_back_on_blank_sample_id() {
+    void submitted_sample_ids_land_verbatim_with_their_own_source() {
+        String input = JobTestSupport.tempFile("sstr.tsv", HEADER
+                + "SUBJ1\tNWD678650\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+
+        JobResult result = run(executor, job, input, "it-submitted-nwd");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        Long nwd = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM samples WHERE source_sample_id = 'NWD678650' AND sample_source = ?",
+                Long.class, SstrPopulateRdsParticipantsJob.SOURCE_SUBMITTED);
+        assertThat(nwd).isEqualTo(1);
+        Long dbgap = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM samples WHERE source_sample_id = 'phs001412.v1.p1.s1' AND sample_source = ?",
+                Long.class, SstrPopulateRdsParticipantsJob.SOURCE);
+        assertThat(dbgap).isEqualTo(1);
+    }
+
+    @Test
+    void blank_sample_id_is_skipped_and_subject_still_populates() {
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"
                 + "SUBJ2\tSAMP3\t2\tHMB\tphs001412.v1.p2.c1\t\n");
 
         JobResult result = run(executor, job, input, "it-blank-sample");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
-        assertThat(result.getErrorMessage()).contains("dbgap_sample_id");
-        assertThat(participants.count()).isEqualTo(0);
-        assertThat(sampleCount()).isEqualTo(0);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(participants.count()).isEqualTo(2);
+        // SUBJ1: dbGaP + submitted; SUBJ2: submitted only (blank dbgap_sample_id)
+        assertThat(sampleCount()).isEqualTo(3);
     }
 
     @Test
-    void is_idempotent_on_rerun_and_reuses_existing_participant_uuid() {
+    void is_idempotent_on_rerun_and_reuses_existing_participant_id() {
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
 
@@ -102,16 +121,17 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(second.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(second.getMetrics())
                 .containsEntry("participantsInserted", 0L)
-                .containsEntry("samplesInserted", 0L);
+                .containsEntry("samplesInserted", 0L)
+                .containsEntry("submittedSamplesInserted", 0L);
         assertThat(participants.count()).isEqualTo(1);
         assertThat(consentCountForStudy()).isEqualTo(1);
-        assertThat(sampleCount()).isEqualTo(1);
+        assertThat(sampleCount()).isEqualTo(2);
     }
 
     @Test
     void purges_stale_consent_rows_for_the_study_before_repopulating() {
-        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
-                + "VALUES (?, ?, ?, ?)", UUID.randomUUID(), STUDY_ID, "9", "STALE");
+        jdbc.update("INSERT INTO consents (hpds_id, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (nextval('hpds_id_seq'), ?, ?, ?)", STUDY_ID, "9", "STALE");
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER
                 + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
 
@@ -186,9 +206,8 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
      */
     @Test
     void refuses_to_purge_consents_when_input_has_no_data_rows() {
-        UUID existing = UUID.randomUUID();
-        jdbc.update("INSERT INTO consents (hpds_uuid, study_id, consent_code, consent_abbreviation) "
-                + "VALUES (?, ?, ?, ?)", existing, STUDY_ID, "1", "GRU");
+        jdbc.update("INSERT INTO consents (hpds_id, study_id, consent_code, consent_abbreviation) "
+                + "VALUES (nextval('hpds_id_seq'), ?, ?, ?)", STUDY_ID, "1", "GRU");
         String input = JobTestSupport.tempFile("sstr.tsv", HEADER);
 
         JobResult result = run(executor, job, input, "it-empty");

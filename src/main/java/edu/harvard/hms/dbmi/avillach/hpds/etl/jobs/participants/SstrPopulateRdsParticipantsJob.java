@@ -29,7 +29,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -56,7 +55,12 @@ import java.util.stream.Stream;
 public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsParticipantsJob.Output> {
 
     public static final String SOURCE = "DBGap";
+    /** Source tag for samples taken from the SSTR's submitted {@code SAMPLE_ID} column —
+     * the names genomic tooling knows (TOPMed WGS {@code NWD…} ids live here, never in
+     * {@code dbgap_sample_id}), so VCF indexing depends on these rows. */
+    public static final String SOURCE_SUBMITTED = "submitted";
     static final String COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
+    static final String COL_SUBMITTED_SAMPLE_ID = "SAMPLE_ID";
     static final String COL_DBGAP_SAMPLE_ID = "dbgap_sample_id";
     static final String COL_CONSENT = "CONSENT";
     static final String COL_CONSENT_ABBREVIATION = "consent_abbreviation";
@@ -141,6 +145,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         Set<String> subjectIds = new LinkedHashSet<>();
         Map<String, Telemetry> firstRowBySubject = new LinkedHashMap<>();
         List<String[]> samplePairs = new ArrayList<>();
+        List<String[]> submittedSamplePairs = new ArrayList<>();
         boolean headerChecked = false;
         long rowsRead = 0;
 
@@ -163,14 +168,17 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 String consentAbbreviation = row.get(COL_CONSENT_ABBREVIATION);
                 consentAbbreviation = (consentAbbreviation == null || consentAbbreviation.isBlank()) ? "" : consentAbbreviation.trim();
                 String dbgapSampleId = Strings.trimToNull(row.get(COL_DBGAP_SAMPLE_ID));
-                if (dbgapSampleId == null) {
-                    throw new DataException("Row " + rowsRead + " has a blank " + COL_DBGAP_SAMPLE_ID);
-                }
 
                 subjectIds.add(dbgapSubjectId);
                 firstRowBySubject.putIfAbsent(dbgapSubjectId,
-                        new Telemetry(dbgapSubjectId, dbgapSampleId, consent, consentAbbreviation));
-                samplePairs.add(new String[]{dbgapSubjectId, dbgapSampleId});
+                        new Telemetry(dbgapSubjectId, dbgapSampleId != null ? dbgapSampleId : "", consent, consentAbbreviation));
+                if (dbgapSampleId != null) {
+                    samplePairs.add(new String[]{dbgapSubjectId, dbgapSampleId});
+                }
+                String submittedSampleId = Strings.trimToNull(row.get(COL_SUBMITTED_SAMPLE_ID));
+                if (submittedSampleId != null) {
+                    submittedSamplePairs.add(new String[]{dbgapSubjectId, submittedSampleId});
+                }
             }
         }
 
@@ -182,28 +190,35 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         consents.deleteByStudyId(studyId);
 
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
-        Map<String, UUID> uuidBySubject = resolution.uuidsBySourceId();
+        Map<String, Long> idBySubject = resolution.idsBySourceId();
         long participantsInserted = resolution.inserted();
 
         List<Consent> consentRows = new ArrayList<>();
         Map<String, Long> countsByConsentGroup = new LinkedHashMap<>();
         for (Telemetry row : firstRowBySubject.values()) {
-            consentRows.add(new Consent(uuidBySubject.get(row.dbgapSubjectId()), studyId,
+            consentRows.add(new Consent(idBySubject.get(row.dbgapSubjectId()), studyId,
                     row.consent(), row.consentAbbreviation()));
             countsByConsentGroup.merge(row.consent(), 1L, Long::sum);
         }
         long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
 
         List<Sample> sampleRows = samplePairs.stream()
-                .map(pair -> new Sample(uuidBySubject.get(pair[0]), pair[1], SOURCE))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE))
                 .toList();
         long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
 
+        List<Sample> submittedSampleRows = submittedSamplePairs.stream()
+                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
+                .toList();
+        long submittedSamplesInserted =
+                BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize);
+
         log.info("Read {} row(s) for {} participant(s); {} new participant(s), {} consent row(s), "
-                        + "{} sample row(s) inserted",
-                rowsRead, subjectIds.size(), participantsInserted, consentsWritten, samplesInserted);
+                        + "{} dbGaP sample row(s) and {} submitted sample row(s) inserted",
+                rowsRead, subjectIds.size(), participantsInserted, consentsWritten,
+                samplesInserted, submittedSamplesInserted);
         return new Output(rowsRead, subjectIds.size(), participantsInserted, consentsWritten, samplesInserted,
-                countsByConsentGroup);
+                submittedSamplesInserted, countsByConsentGroup);
     }
 
     private void requireColumns(Map<String, String> firstRow) {
@@ -235,6 +250,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 .metric("participantsInserted", output.participantsInserted())
                 .metric("consentsWritten", output.consentsWritten())
                 .metric("samplesInserted", output.samplesInserted())
+                .metric("submittedSamplesInserted", output.submittedSamplesInserted())
                 .metric("countsByConsentGroup", output.countsByConsentGroup());
     }
 
@@ -244,6 +260,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                           long participantsInserted,
                           long consentsWritten,
                           long samplesInserted,
+                          long submittedSamplesInserted,
                           Map<String, Long> countsByConsentGroup) {
     }
 }

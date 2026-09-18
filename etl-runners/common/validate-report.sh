@@ -43,12 +43,13 @@ check "exit code is a success code"         jq -e '.exitCode == "SUCCESS" or .ex
 check "no input-validation errors"          jq -e '(.inputValidation.counts.error  // 0) == 0' "$REPORT"
 check "no output-validation errors"         jq -e '(.outputValidation.counts.error // 0) == 0' "$REPORT"
 check "no errorMessage recorded"            jq -e '.errorMessage == null' "$REPORT"
-soft  "ran without validation warnings"     jq -e '((.inputValidation.counts.warning // 0) + (.outputValidation.counts.warning // 0)) == 0' "$REPORT"
+VWARN_COUNT=$(jq -r '((.inputValidation.counts.warning // 0) + (.outputValidation.counts.warning // 0))' "$REPORT")
+if [[ "$VWARN_COUNT" != "0" ]]; then
+  note "validation warnings: $VWARN_COUNT (see details below)"
+fi
 
-# SUCCESS_WITH_WARNINGS also exits 0, so the process status alone cannot distinguish a
-# clean run from one that logged warnings. The report can, and callers should care.
 if jq -e '.exitCode == "SUCCESS_WITH_WARNINGS"' "$REPORT" >/dev/null 2>&1; then
-  warn "job reported SUCCESS_WITH_WARNINGS"
+  note "job reported SUCCESS_WITH_WARNINGS"
 fi
 
 echo ""

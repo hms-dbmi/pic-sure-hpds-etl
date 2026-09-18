@@ -24,7 +24,7 @@ import java.nio.file.Files;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -86,7 +86,7 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
     @Test
     void fails_with_infrastructure_error_when_the_database_is_unreachable() throws Exception {
         ParticipantRepository participants = mock(ParticipantRepository.class);
-        // resolveOrCreate replaced findUuids + batchUpsert; see ParticipantRepository.
+        // resolveOrCreate replaced findIds + batchUpsert; see ParticipantRepository.
         when(participants.resolveOrCreate(any(), any(), anyInt()))
                 .thenThrow(new InfrastructureException("Batch lookup in participants failed: connection refused"));
 
@@ -161,11 +161,12 @@ class SingleConsentDataPopulateRdsParticipantsJobTest {
     /** Runs the job with the given flag value and reports whether any samples row was written. */
     private boolean samplesWrittenWith(String flagValue) throws Exception {
         ParticipantRepository participants = mock(ParticipantRepository.class);
+        AtomicLong idSeq = new AtomicLong(1);
         when(participants.resolveOrCreate(any(), any(), anyInt())).thenAnswer(invocation -> {
             Collection<String> ids = invocation.getArgument(0);
-            Map<String, UUID> uuids = new LinkedHashMap<>();
-            ids.forEach(id -> uuids.put(id, UUID.randomUUID()));
-            return new ParticipantRepository.Resolution(uuids, uuids.size());
+            Map<String, Long> hpdsIds = new LinkedHashMap<>();
+            ids.forEach(id -> hpdsIds.put(id, idSeq.getAndIncrement()));
+            return new ParticipantRepository.Resolution(hpdsIds, hpdsIds.size());
         });
         SampleRepository samples = mock(SampleRepository.class);
 

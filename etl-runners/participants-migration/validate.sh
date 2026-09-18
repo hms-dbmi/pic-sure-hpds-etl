@@ -29,7 +29,7 @@ if [[ -z "$REPORTS" || -z "$RUN_ID" ]]; then
 fi
 
 REPORT="$REPORTS/participants-migration-$RUN_ID.json"
-UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+INTEGER_RE='^[0-9]+$'
 
 # Folds a validate-report.sh run into this script's tally (0 clean / 10 warn / other fail).
 fold_generic() {
@@ -92,15 +92,15 @@ for csv in ${MAPPINGS[@]+"${MAPPINGS[@]}"}; do
   header=$(head -1 "$csv")
   rows=$(($(wc -l < "$csv") - 1))
 
-  check "$study: header is old_hpds_id,new_uuid,common_dbgap_id" \
-    test "$header" = "old_hpds_id,new_uuid,common_dbgap_id"
+  check "$study: header is old_hpds_id,new_hpds_id,common_dbgap_id" \
+    test "$header" = "old_hpds_id,new_hpds_id,common_dbgap_id"
   check "$study: has at least one mapping row" test "$rows" -gt 0
 
-  bad_uuids=$(awk -F, -v re="$UUID_RE" 'NR>1 && $2 !~ re' "$csv" | grep -c . || true)
-  check "$study: every new_uuid is a UUID ($rows row(s))" test "$bad_uuids" -eq 0
-  [[ "$bad_uuids" != "0" ]] && note "$bad_uuids row(s) with a malformed uuid"
+  bad_ids=$(awk -F, -v re="$INTEGER_RE" 'NR>1 && $2 !~ re' "$csv" | grep -c . || true)
+  check "$study: every new_hpds_id is an integer ($rows row(s))" test "$bad_ids" -eq 0
+  [[ "$bad_ids" != "0" ]] && note "$bad_ids row(s) with a malformed hpds_id"
 
-  # A duplicated legacy id would mean one old patient mapped to two new uuids -- the exact
+  # A duplicated legacy id would mean one old patient mapped to two new hpds ids -- the exact
   # corruption this migration exists to avoid.
   dupes=$(tail -n +2 "$csv" | cut -d, -f1 | sort | uniq -d | grep -c . || true)
   check "$study: no duplicated old_hpds_id" test "$dupes" -eq 0
@@ -147,7 +147,7 @@ for sub in ${SUBREPORTS[@]+"${SUBREPORTS[@]}"}; do
   if [[ -f "$csv" ]]; then
     mapped=$(($(wc -l < "$csv") - 1))
     soft "$study: mapping rows ($mapped) cover the $subjects sstr subject(s)" test "$mapped" -ge "$subjects"
-    (( mapped < subjects )) && note "$((subjects - mapped)) fewer mapping row(s) than sstr subjects -- check the log for 'not found in sstr file' / 'no participant uuid found' warnings"
+    (( mapped < subjects )) && note "$((subjects - mapped)) fewer mapping row(s) than sstr subjects -- check the log for 'not found in sstr file' / 'no participant id found' warnings"
   fi
 done
 

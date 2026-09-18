@@ -27,7 +27,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.stream.Stream;
 
 /**
@@ -214,21 +213,21 @@ public class SingleConsentDataPopulateRdsParticipantsJob
         // this one writing consents against a discarded uuid. Here source is the study id, so only
         // two runs of the same study can collide.
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, studyId, batchSize);
-        Map<String, UUID> uuidBySubject = resolution.uuidsBySourceId();
+        Map<String, Long> idBySubject = resolution.idsBySourceId();
         long participantsInserted = resolution.inserted();
 
         boolean isSingle = CONSENT_TYPE_SINGLE.equalsIgnoreCase(consentType);
         String consentCode = isSingle ? SINGLE_CONSENT_CODE : PUBLIC_CONSENT_CODE;
         String consentAbbreviation = isSingle ? SINGLE_CONSENT_ABBREVIATION : PUBLIC_CONSENT_ABBREVIATION;
         List<Consent> consentRows = subjectIds.stream()
-                .map(id -> new Consent(uuidBySubject.get(id), studyId, consentCode, consentAbbreviation))
+                .map(id -> new Consent(idBySubject.get(id), studyId, consentCode, consentAbbreviation))
                 .toList();
         long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
 
         long samplesInserted = 0;
         if (subjectIdIsSampleId) {
             List<Sample> sampleRows = subjectIds.stream()
-                    .map(id -> new Sample(uuidBySubject.get(id), id, studyId))
+                    .map(id -> new Sample(idBySubject.get(id), id, studyId))
                     .toList();
             samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
         }

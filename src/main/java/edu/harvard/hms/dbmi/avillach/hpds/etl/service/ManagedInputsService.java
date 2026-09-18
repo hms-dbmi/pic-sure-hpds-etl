@@ -37,7 +37,29 @@ public class ManagedInputsService {
 
     static final String COL_ABV = "Study Abbreviated Name";
     static final String COL_STUDY_ID = "Study Identifier";
+    static final String COL_VERSION = "Version";
+    static final String COL_PHASE = "Phase";
+    static final String COL_VERSION_UPDATE = "Version Update";
+    static final String COL_PREVIOUS_VERSION = "Previous Version";
+    static final String COL_PREVIOUS_PHASE = "Previous Phase";
+    static final String COL_STUDY_FULL_NAME = "Study Full Name";
+    static final String COL_STUDY_TYPE = "Study Type";
+    static final String COL_BDC_PROGRAMS = "BDC Program(s)";
+    static final String COL_DATA_TYPE = "Data Type";
+    static final String COL_DCC_HARMONIZED = "DCC Harmonized";
+    static final String COL_HAS_MULTI = "Has Multi";
+    static final String COL_USE_MANUAL_TABLE_METHODS = "Use Manual Table Methods";
+    static final String COL_MORE_INFO_LINK = "More Info Link";
+    static final String COL_ADDITIONAL_INFO_URL = "Additional Information Link (URL)";
+    static final String COL_ADDITIONAL_INFO_LABEL = "Additional Information Link (Label)";
+    static final String COL_REQUEST_ACCESS_TEXT = "Request Access Text";
+    static final String COL_PHENO_INGEST_NHLBI_ACCOUNT = "Pheno Ingest NHLBI Account";
+    static final String COL_PHENO_INGEST_BUCKETS = "Pheno Ingest buckets";
+    static final String COL_GEN3_AUTHZ_PROGRAM_NAME = "Gen3 Authz Program Name";
+    static final String COL_GEN3_AUTHZ_PROJECT_NAME = "Gen3 Authz Project Name";
+    static final String COL_SUBJECT_TYPES = "Subject Type(s)";
     static final String COL_IS_READY = "Data is ready to process";
+    static final String COL_DATA_PROCESSED = "Data Processed";
 
     private final IoResolver io;
     private final DelimitedReader delimitedReader;
@@ -97,23 +119,54 @@ public class ManagedInputsService {
                     log.warn("managed-inputs: skipping row with a blank '{}' or '{}': {}", COL_ABV, COL_STUDY_ID, row);
                     continue;
                 }
-                rows.add(new ManagedInputRow(abv, studyId, parseReady(row.get(COL_IS_READY))));
+                rows.add(new ManagedInputRow(
+                        abv, studyId,
+                        col(row, COL_VERSION),
+                        col(row, COL_PHASE),
+                        col(row, COL_VERSION_UPDATE),
+                        col(row, COL_PREVIOUS_VERSION),
+                        col(row, COL_PREVIOUS_PHASE),
+                        col(row, COL_STUDY_FULL_NAME),
+                        col(row, COL_STUDY_TYPE),
+                        col(row, COL_BDC_PROGRAMS),
+                        col(row, COL_DATA_TYPE),
+                        col(row, COL_DCC_HARMONIZED),
+                        col(row, COL_HAS_MULTI),
+                        col(row, COL_USE_MANUAL_TABLE_METHODS),
+                        col(row, COL_MORE_INFO_LINK),
+                        col(row, COL_ADDITIONAL_INFO_URL),
+                        col(row, COL_ADDITIONAL_INFO_LABEL),
+                        col(row, COL_REQUEST_ACCESS_TEXT),
+                        col(row, COL_PHENO_INGEST_NHLBI_ACCOUNT),
+                        col(row, COL_PHENO_INGEST_BUCKETS),
+                        col(row, COL_GEN3_AUTHZ_PROGRAM_NAME),
+                        col(row, COL_GEN3_AUTHZ_PROJECT_NAME),
+                        col(row, COL_SUBJECT_TYPES),
+                        parseYesNo(row.get(COL_IS_READY), COL_IS_READY, studyId),
+                        parseYesNo(row.get(COL_DATA_PROCESSED), COL_DATA_PROCESSED, studyId)));
             }
         }
         return List.copyOf(rows);
     }
 
-    /**
-     * The sheet's ready column is hand-maintained, so anything that is not an affirmative
-     * ("Yes"/"true"/"1") -- including a blank cell or a note typed into it -- means not ready.
-     * Processing a study nobody marked ready is the more expensive mistake.
-     */
-    private static boolean parseReady(String raw) {
-        if (raw == null) {
+    private static String col(Map<String, String> row, String column) {
+        String v = row.getOrDefault(column, "");
+        return v == null ? "" : v.trim();
+    }
+
+    private static boolean parseYesNo(String raw, String column, String studyId) {
+        if (raw == null || raw.isBlank()) {
             return false;
         }
         String v = raw.trim();
-        return v.equalsIgnoreCase("true") || v.equalsIgnoreCase("yes") || v.equals("1");
+        if (v.equalsIgnoreCase("yes")) {
+            return true;
+        }
+        if (v.equalsIgnoreCase("no")) {
+            return false;
+        }
+        throw new ConfigException("managed-inputs: study " + studyId + " has invalid value '"
+                + v + "' in column '" + column + "'; expected 'Yes' or 'No'");
     }
 
 }

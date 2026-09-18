@@ -83,6 +83,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
         </dependency>
+        <!-- STS: needed for profile-based cross-account role assumption with auto-refresh -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sts</artifactId>
+        </dependency>
 
         <!-- Bean-validation annotations used by expectation/param specs -->
         <dependency>

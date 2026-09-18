@@ -15,8 +15,9 @@ module "etl_runner" {
   ami_owner_id     = var.ami_owner_id
   ami_name_pattern = var.ami_name_pattern
   instance_type    = var.instance_type
-  subnet_id        = var.subnet_id
-  iam_role_name    = "jenkins-s3-role"
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = var.vpc_security_group_ids
+  iam_role_name          = "jenkins-s3-role"
   root_volume_size = var.root_volume_size
 
   job_name  = "participants-migration"
@@ -28,14 +29,21 @@ module "etl_runner" {
   rds_secret_id        = var.rds_secret_id
   rds_secret_arn       = var.rds_secret_arn
   manage_secret_access = var.manage_secret_access
+  rds_host             = var.rds_host
+  rds_dbname           = var.rds_dbname
+
+  container_assume_role_arn = var.container_assume_role_arn
 
   # Keys use underscores; the runner converts them to --managed-inputs, --data-folder,
   # --batch-size. Names must match ParticipantsMigrationJob.expectations().
-  job_params = {
-    managed_inputs = var.managed_inputs_uri
-    data_folder    = var.data_folder_uri
-    batch_size     = var.batch_size
-  }
+  job_params = merge(
+    {
+      managed_inputs = var.managed_inputs_uri
+      data_folder    = var.data_folder_uri
+      batch_size     = var.batch_size
+    },
+    var.study_filter != "" ? { study_filter = var.study_filter } : {}
+  )
 
   tags = merge({
     Project   = "PIC-SURE HPDS ETL"

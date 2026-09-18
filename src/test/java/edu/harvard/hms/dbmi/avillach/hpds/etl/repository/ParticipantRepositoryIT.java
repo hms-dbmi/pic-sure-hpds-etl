@@ -8,7 +8,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -16,9 +15,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Pins the {@link ParticipantRepository#resolveOrCreate} contract against a real Postgres, with no
  * threads or timing involved.
  *
- * <p>{@link #batch_upsert_does_not_reveal_the_uuid_that_won_but_resolve_or_create_does()} documents
- * the SQL semantics that make {@code batchUpsert} unusable for learning a uuid, and therefore why
- * a job must not be simplified back to {@code findUuids + batchUpsert}.
+ * <p>{@link #batch_upsert_does_not_reveal_the_id_that_won_but_resolve_or_create_does()} documents
+ * the SQL semantics that make {@code batchUpsert} unusable for learning an id, and therefore why
+ * a job must not be simplified back to {@code findIds + batchUpsert}.
  */
 class ParticipantRepositoryIT extends AbstractIntegrationTest {
 
@@ -34,35 +33,34 @@ class ParticipantRepositoryIT extends AbstractIntegrationTest {
         jdbc.execute("TRUNCATE TABLE participants, consents, samples");
     }
 
-    private UUID storedUuid(String sourceId) {
-        return jdbc.queryForObject("SELECT hpds_uuid FROM participants WHERE source_id = ? AND source = ?",
-                UUID.class, sourceId, SOURCE);
+    private long storedId(String sourceId) {
+        return jdbc.queryForObject("SELECT hpds_id FROM participants WHERE source_id = ? AND source = ?",
+                Long.class, sourceId, SOURCE);
     }
 
     /**
-     * The losing side of an insert race: a caller trusting its own candidate uuid after
-     * {@code batchUpsert} holds a uuid that is not in the table.
+     * The losing side of an insert race: a caller trusting its own candidate id after
+     * {@code batchUpsert} holds an id that is not in the table.
      */
     @Test
-    void batch_upsert_does_not_reveal_the_uuid_that_won_but_resolve_or_create_does() {
+    void batch_upsert_does_not_reveal_the_id_that_won_but_resolve_or_create_does() {
         // Stand in for the concurrent job that got there first.
-        UUID winner = UUID.randomUUID();
-        jdbc.update("INSERT INTO participants (hpds_uuid, source_id, source) VALUES (?, ?, ?)",
-                winner, "SUBJ1", SOURCE);
+        jdbc.update("INSERT INTO participants (source_id, source) VALUES (?, ?)",
+                "SUBJ1", SOURCE);
+        long winner = storedId("SUBJ1");
 
         // The losing job's own candidate.
-        UUID loser = UUID.randomUUID();
-        int inserted = participants.batchUpsert(List.of(new Participant(loser, "SUBJ1", SOURCE)));
+        int inserted = participants.batchUpsert(List.of(new Participant(0L, "SUBJ1", SOURCE)));
 
-        // ON CONFLICT DO NOTHING: no row inserted, no error, and no hint of the winner's uuid.
+        // ON CONFLICT DO NOTHING: no row inserted, no error, and no hint of the winner's id.
         assertThat(inserted).isZero();
-        assertThat(storedUuid("SUBJ1")).isEqualTo(winner).isNotEqualTo(loser);
+        assertThat(storedId("SUBJ1")).isEqualTo(winner);
 
         // resolveOrCreate returns what is actually stored, which is what the job must use.
         ParticipantRepository.Resolution resolution =
                 participants.resolveOrCreate(List.of("SUBJ1"), SOURCE, 100);
 
-        assertThat(resolution.uuidsBySourceId()).containsEntry("SUBJ1", winner);
+        assertThat(resolution.idsBySourceId()).containsEntry("SUBJ1", winner);
         assertThat(resolution.inserted()).isZero();
     }
 
@@ -72,30 +70,30 @@ class ParticipantRepositoryIT extends AbstractIntegrationTest {
                 participants.resolveOrCreate(List.of("SUBJ1", "SUBJ2"), SOURCE, 100);
 
         assertThat(first.inserted()).isEqualTo(2);
-        assertThat(first.uuidsBySourceId()).containsOnlyKeys("SUBJ1", "SUBJ2");
-        assertThat(first.uuidsBySourceId().get("SUBJ1")).isEqualTo(storedUuid("SUBJ1"));
+        assertThat(first.idsBySourceId()).containsOnlyKeys("SUBJ1", "SUBJ2");
+        assertThat(first.idsBySourceId().get("SUBJ1")).isEqualTo(storedId("SUBJ1"));
 
-        // Idempotent: a second call inserts nothing and returns the same uuids.
+        // Idempotent: a second call inserts nothing and returns the same ids.
         ParticipantRepository.Resolution second =
                 participants.resolveOrCreate(List.of("SUBJ1", "SUBJ2"), SOURCE, 100);
 
         assertThat(second.inserted()).isZero();
-        assertThat(second.uuidsBySourceId()).isEqualTo(first.uuidsBySourceId());
+        assertThat(second.idsBySourceId()).isEqualTo(first.idsBySourceId());
     }
 
     @Test
     void resolves_a_mix_of_existing_and_new_ids() {
-        UUID existing = UUID.randomUUID();
-        jdbc.update("INSERT INTO participants (hpds_uuid, source_id, source) VALUES (?, ?, ?)",
-                existing, "OLD", SOURCE);
+        jdbc.update("INSERT INTO participants (source_id, source) VALUES (?, ?)",
+                "OLD", SOURCE);
+        long existing = storedId("OLD");
 
         ParticipantRepository.Resolution resolution =
                 participants.resolveOrCreate(List.of("OLD", "NEW"), SOURCE, 100);
 
         assertThat(resolution.inserted()).isEqualTo(1);
-        assertThat(resolution.uuidsBySourceId())
+        assertThat(resolution.idsBySourceId())
                 .containsEntry("OLD", existing)
-                .containsEntry("NEW", storedUuid("NEW"));
+                .containsEntry("NEW", storedId("NEW"));
     }
 
     /** The same source id in two different sources is two different people. */
@@ -106,8 +104,8 @@ class ParticipantRepositoryIT extends AbstractIntegrationTest {
         ParticipantRepository.Resolution study =
                 participants.resolveOrCreate(List.of("SUBJ1"), "some-study", 100);
 
-        assertThat(dbgap.uuidsBySourceId().get("SUBJ1"))
-                .isNotEqualTo(study.uuidsBySourceId().get("SUBJ1"));
+        assertThat(dbgap.idsBySourceId().get("SUBJ1"))
+                .isNotEqualTo(study.idsBySourceId().get("SUBJ1"));
     }
 
     /** Lookups are chunked, so a study with more subjects than the driver's parameter limit works. */
@@ -118,9 +116,9 @@ class ParticipantRepositoryIT extends AbstractIntegrationTest {
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(ids, SOURCE, 2);
 
         assertThat(resolution.inserted()).isEqualTo(7);
-        assertThat(resolution.uuidsBySourceId()).hasSize(7);
+        assertThat(resolution.idsBySourceId()).hasSize(7);
         for (String id : ids) {
-            assertThat(resolution.uuidsBySourceId().get(id)).isEqualTo(storedUuid(id));
+            assertThat(resolution.idsBySourceId().get(id)).isEqualTo(storedId(id));
         }
     }
 
@@ -130,14 +128,14 @@ class ParticipantRepositoryIT extends AbstractIntegrationTest {
                 participants.resolveOrCreate(List.of("SUBJ1", "SUBJ1", "SUBJ1"), SOURCE, 100);
 
         assertThat(resolution.inserted()).isEqualTo(1);
-        assertThat(resolution.uuidsBySourceId()).hasSize(1);
+        assertThat(resolution.idsBySourceId()).hasSize(1);
     }
 
     @Test
     void returns_an_empty_resolution_for_no_ids() {
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(List.of(), SOURCE, 100);
 
-        assertThat(resolution.uuidsBySourceId()).isEmpty();
+        assertThat(resolution.idsBySourceId()).isEmpty();
         assertThat(resolution.inserted()).isZero();
     }
 }

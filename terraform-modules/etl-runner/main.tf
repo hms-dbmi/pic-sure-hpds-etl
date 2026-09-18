@@ -50,11 +50,14 @@ locals {
       module_name     = var.module_name
       job_name        = var.job_name
       run_id          = var.run_id
-      image_name      = var.image_name
+      image_name      = trimsuffix(trimsuffix(var.image_tar, ".gz"), ".tar")
       image_tar       = var.image_tar
-      rds_secret_id   = var.rds_secret_id
-      reports_prefix  = local.reports_prefix
+      rds_secret_id     = var.rds_secret_id
+      rds_host          = var.rds_host
+      rds_dbname        = var.rds_dbname
+      reports_prefix    = local.reports_prefix
       container_env_b64 = local.container_env_b64
+      container_assume_role_arn = var.container_assume_role_arn
     },
     var.user_data_template_vars
   )
@@ -101,6 +104,7 @@ module "etl_runner" {
   ami                                  = data.aws_ami.etl_base.id
   instance_type                        = var.instance_type
   subnet_id                            = var.subnet_id
+  vpc_security_group_ids               = length(var.vpc_security_group_ids) > 0 ? var.vpc_security_group_ids : null
   iam_instance_profile                 = aws_iam_instance_profile.etl_runner_profile.name
   instance_initiated_shutdown_behavior = "terminate"
 

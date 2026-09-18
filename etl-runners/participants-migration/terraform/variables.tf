@@ -34,6 +34,12 @@ variable "subnet_id" {
   description = "Subnet to launch the runner in. Must have a route to RDS and to S3."
 }
 
+variable "vpc_security_group_ids" {
+  type        = list(string)
+  default     = []
+  description = "Security group IDs to attach to the runner. When empty, the VPC default is used."
+}
+
 variable "root_volume_size" {
   type        = number
   default     = 50
@@ -55,6 +61,18 @@ variable "manage_secret_access" {
   type        = bool
   default     = false
   description = "Let this run attach a GetSecretValue policy to the instance role"
+}
+
+variable "rds_host" {
+  type        = string
+  default     = ""
+  description = "RDS endpoint hostname, used when the secret contains only username/password"
+}
+
+variable "rds_dbname" {
+  type        = string
+  default     = ""
+  description = "RDS database name, used when the secret contains only username/password"
 }
 
 variable "tags" {
@@ -98,6 +116,12 @@ variable "batch_size" {
   description = "--batch-size: rows per batch insert"
 }
 
+variable "container_assume_role_arn" {
+  type        = string
+  default     = ""
+  description = "Cross-account IAM role ARN for the container to assume when accessing S3 inputs."
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"
@@ -106,6 +130,12 @@ variable "image_tar" {
     per-run name so two pipelines building different commits cannot overwrite each other's
     image between upload and instance boot.
   EOT
+}
+
+variable "study_filter" {
+  type        = string
+  default     = ""
+  description = "--study-filter: comma-separated study ids to process; blank processes every ready study"
 }
 
 variable "java_opts" {
