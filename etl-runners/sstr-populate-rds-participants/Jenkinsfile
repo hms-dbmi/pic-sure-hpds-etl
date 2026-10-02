@@ -37,7 +37,7 @@
 //   5 config | 1 unknown | 124 monitor timeout
 //
 // Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, and the
-// jenkins-s3-role instance profile.
+// bdc-etl-jenkins-role instance profile.
 // =============================================================================
 
 pipeline {
@@ -65,7 +65,7 @@ pipeline {
                description: 'REQUIRED. --input: the dbGaP SSTR subject/sample mapping TSV (local path or s3:// URI)')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
-        string(name: 'EXPECTED_consent_codeS', defaultValue: '',
+        string(name: 'EXPECTED_CONSENT_CODES', defaultValue: '',
                description: 'Optional. Comma-separated CONSENT values this study must produce. When set, a mismatch fails the build — this is what catches a file swapped for the wrong study.')
         string(name: 'EXPECTED_MIN_PARTICIPANTS', defaultValue: '',
                description: 'Optional. Minimum distinct participants. Catches a truncated or partially-staged input file.')
@@ -79,18 +79,15 @@ pipeline {
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: purge + load is one transaction and upserts are idempotent.')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the study id and input header, then stop without provisioning anything')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/sstr-populate-rds-participants'
 
@@ -99,10 +96,9 @@ pipeline {
         TF_VAR_study_id                  = "${params.STUDY_ID.trim()}"
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
-        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS.trim()}"
+        EXPECTED_CONSENT_CODES   = "${params.EXPECTED_CONSENT_CODES.trim()}"
         EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -112,14 +108,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     if (!params.STUDY_ID?.trim()) {
                         error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile) to sweep every ready study from managed inputs.')
@@ -182,13 +170,11 @@ EOF
                     // Called directly, not through make: make collapses every failure to 2 and
                     // would lose the validator's "10 = warnings" signal.
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings in the input file')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings in the input file')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
                     }
                 }
             }
@@ -205,6 +191,12 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
 

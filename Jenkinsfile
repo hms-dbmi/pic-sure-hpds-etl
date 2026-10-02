@@ -8,13 +8,23 @@
 // that job's own pipeline, which owns provisioning its ephemeral runner, validating its inputs and
 // outputs, and tearing itself down. A stage runs only if the one above it succeeded.
 //
+// The participant database is not long-lived: 'Start participant DB' brings it up (restoring the
+// last promoted dump from S3) before the first DB-backed stage, and post { always } dumps it back
+// to S3 and tears it down -- promoting the dump only when this build succeeded. See
+// docs/PARTICIPANT_DB.md.
+//
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
 // SKIP_TESTS=true so the same commit's suites are not re-run per study.
+//
+// Per-study allConcepts: each unprocessed study's decoded data is turned into per-consent
+// allConcepts files under PER_STUDY_ALL_CONCEPTS_PREFIX (overwritten in place; the bucket is
+// versioned), which Merge AllConcepts then reads. A generation failure halts the pipeline
+// before the merge, so a merged file never mixes this run's output with a missing study.
 //
 // Trigger modes (both supported by this pipeline):
 //   STUDY_ID blank    sweep every study marked "Data is ready to process" = Yes in managed inputs
 //   STUDY_ID set      load exactly that study (the reload/manual entry path); INPUT overrides
-//                     the default SSTR input URI derived from INPUT_BASE
+//                     the SSTR file discovered under INPUT_BASE
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -38,60 +48,57 @@ pipeline {
         string(name: 'STUDY_ID', defaultValue: '',
                description: 'Blank sweeps every ready study from managed inputs. Set to a phs###### to load exactly one study (the reload/manual entry path).')
         string(name: 'INPUT', defaultValue: '',
-               description: 'Only used with STUDY_ID: overrides the SSTR input URI for that study. Required when the study has no SSTR file at the default INPUT_BASE location.')
+               description: 'Only used with STUDY_ID: the SSTR input URI for that study, overriding discovery under INPUT_BASE.')
         string(name: 'MANAGED_INPUTS', defaultValue: '',
-               description: 'Override for the managed inputs CSV URI. Blank uses the configured etl.managed-inputs.uri.')
-        string(name: 'INPUT_BASE', defaultValue: 's3://avillach-73-bdcatalyst-etl/sstr/',
-               description: 'Base S3 path for SSTR input files. Each study\'s input is derived as {INPUT_BASE}/{study_id}_sstr.tsv unless INPUT overrides it.')
+               description: 'REQUIRED. The managed inputs CSV URI. The study list is resolved from it here, and it is passed to the global AllConcepts and VCF jobs.')
+        string(name: 'INPUT_BASE', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl',
+               description: 'Root of the per-study data folders. Each study\'s SSTR is discovered in {INPUT_BASE}/{abv_lower}/rawData/ as sstr_{study_id}.{v}.txt (case-insensitive; the legacy BDC-ingestion-only__sstr_ prefix is also accepted) -- the same rule participants-migration uses.')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every permanent job')
         string(name: 'SSTR_JOB', defaultValue: 'sstr-populate-rds-participants',
                description: 'Jenkins job that runs etl-runners/sstr-populate-rds-participants/Jenkinsfile')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
                description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state.')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for containers to assume when reading S3 inputs from the 73 bucket. Passed to every downstream runner.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep loading the remaining studies when one fails, then fail the build with a summary. Safe: each study is loaded in its own transaction, scoped to its own study_id.')
+        booleanParam(name: 'PARALLEL_STUDY_LOADS', defaultValue: false,
+               description: 'Load studies concurrently, one runner each. Correct (see Concurrency in docs/JENKINS.md) but off by default: studies sharing subjects serialize on those rows anyway, and sequential keeps the participant DB load predictable and the log readable.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
-               description: 'Validate every study\'s inputs and stop, without provisioning anything')
+               description: 'Validate every study\'s inputs and stop, without provisioning anything (the participant DB included)')
         string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
-        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-etl/output/',
-               description: 'Output location for global_AllConcepts.csv (local path or s3:// URI)')
+        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/global_allconcepts/',
+               description: 'Output location for global_AllConcepts.csv. Must be an s3:// URI: a local path resolves inside the runner container and is destroyed with it.')
         string(name: 'VCF_INDEXES_JOB', defaultValue: 'create-vcf-indexes',
                description: 'Jenkins job that runs the create-vcf-indexes runner')
-        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
-               description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')
+        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/vcf_indexes/',
+               description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI.')
+        string(name: 'ALL_CONCEPTS_GENERATOR_JOB', defaultValue: 'all-concepts-data-generator',
+               description: 'Jenkins job that runs etl-runners/all-concepts-data-generator/Jenkinsfile')
+        string(name: 'DECODED_DATA_DIR', defaultValue: 'decoded_data',
+               description: 'Folder, relative to {INPUT_BASE}/{abv_lower}/, holding a study\'s decoded data CSVs')
+        string(name: 'CONCEPT_MAPPING_FILE', defaultValue: 'mappings/mapping2.csv',
+               description: 'File, relative to {INPUT_BASE}/{abv_lower}/, holding a study\'s concept mapping')
+        booleanParam(name: 'SKIP_ANALYSIS', defaultValue: false,
+               description: 'Pass --skip-analysis to the generator: use the mapping file\'s data types as-is instead of re-analysing the decoded data')
+        string(name: 'PER_STUDY_ALL_CONCEPTS_PREFIX', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/split_allconcepts/',
+               description: 'The shared s3:// prefix of {study_id}/c{code}/ allConcepts folders: where the generator writes (and the migration\'s split wrote), and what Merge AllConcepts reads. Must be on a versioned bucket.')
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
-        string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: 's3://avillach-etl/output/',
-               description: 'S3 prefix containing {study_id}/c{consent}/ folders to merge')
-        choice(name: 'ENV', choices: ['integration'],
-               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for network, RDS, and account settings.')
+        string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
+               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
+        string(name: 'DB_STOP_JOB', defaultValue: 'participant-db-stop',
+               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.stop')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for account, network, and DB settings.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
-        AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
-
+        ENV        = "${params.ENV ?: 'development'}"
+        AWS_REGION = 'us-east-1'
     }
 
     stages {
-
-        stage('AWS config') {
-            steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
-            }
-        }
 
         stage('Build') {
             steps {
@@ -114,84 +121,72 @@ EOF
         stage('Resolve studies') {
             steps {
                 script {
-                    // Read managed inputs: the same CSV the ETL jobs use internally.
-                    // Columns: "Study Abbreviated Name", "Study Identifier",
-                    //          "Data is ready to process"
-                    def managedInputsUri = params.MANAGED_INPUTS?.trim()
-                    def managedInputsArgs = managedInputsUri
-                        ? "--managed-inputs=${managedInputsUri}"
-                        : ''
-
-                    // Use the JAR to dump managed inputs as JSON so we parse exactly
-                    // what the job would parse. Fall back to reading the CSV directly
-                    // if that helper is not available.
-                    def studies = []
-
-                    if (managedInputsUri) {
-                        // Read managed inputs CSV directly via the pipeline.
-                        // Use an env var to avoid Groovy GString injection into the shell.
-                        env.MI_URI = managedInputsUri
-                        def lines = sh(returnStdout: true, script: '''
-                            AWS_PROFILE=dbgap-etl aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
-                        ''').trim()
-
-                        if (!lines) {
-                            error("Could not read managed inputs from ${managedInputsUri}")
+                    // Catch an unusable output before anything is provisioned: a local path
+                    // resolves inside the runner container and is destroyed with the instance.
+                    ['ALL_CONCEPTS_OUTPUT', 'VCF_INDEXES_OUTPUT', 'PER_STUDY_ALL_CONCEPTS_PREFIX'].each { p ->
+                        if (!params[p]?.trim()?.startsWith('s3://')) {
+                            error("${p} must be an s3:// URI, got '${params[p]}'.")
                         }
-
-                        def header = null
-                        lines.readLines().each { line ->
-                            if (!line.trim()) return
-                            def cols = parseCsvLine(line)
-                            if (header == null) {
-                                header = cols
-                                return
-                            }
-                            def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
-                                ? cols[header.indexOf('Study Identifier')].trim() : ''
-                            def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
-                                ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
-                            def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
-                                ? cols[header.indexOf('Data is ready to process')].trim() : ''
-                            def processedRaw = cols.size() > header.indexOf('Data Processed') && header.indexOf('Data Processed') >= 0
-                                ? cols[header.indexOf('Data Processed')].trim() : ''
-                            if (studyId) {
-                                def ready = parseYesNo(readyRaw, 'Data is ready to process', studyId)
-                                def processed = parseYesNo(processedRaw, 'Data Processed', studyId)
-                                studies << [studyId: studyId, abv: abv,
-                                            ready: ready, processed: processed]
-                            }
-                        }
-                    } else {
-                        // No explicit URI: the JAR will use etl.managed-inputs.uri from config.
-                        // We need the study list here for the pipeline loop, so require the param.
-                        error('MANAGED_INPUTS is required in sweep mode so the pipeline can resolve the study list. ' +
-                              'Set it to the s3:// or local path of the managed inputs CSV, or use STUDY_ID for a single study.')
                     }
 
-                    def inputBase = params.INPUT_BASE?.trim()?.replaceAll(/\/$/, '') ?: ''
+                    // Read managed inputs: the same CSV the ETL jobs use internally.
+                    // Columns: "Study Abbreviated Name", "Study Identifier",
+                    //          "Data is ready to process", "Data Processed"
+                    def managedInputsUri = params.MANAGED_INPUTS?.trim()
+                    if (!managedInputsUri) {
+                        error('MANAGED_INPUTS is required: the study list (and, in single-study mode, the study\'s ' +
+                              'abbreviation) comes from it, and the global AllConcepts and VCF jobs read it.')
+                    }
+
+                    // Use an env var to avoid Groovy GString injection into the shell.
+                    env.MI_URI = managedInputsUri
+                    def lines = sh(returnStdout: true, script: '''
+                        aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
+                    ''').trim()
+                    if (!lines) {
+                        error("Could not read managed inputs from ${managedInputsUri}")
+                    }
+
+                    def studies = []
+                    def header = null
+                    lines.readLines().each { line ->
+                        if (!line.trim()) return
+                        def cols = parseCsvLine(line)
+                        if (header == null) {
+                            header = cols
+                            return
+                        }
+                        def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
+                            ? cols[header.indexOf('Study Identifier')].trim() : ''
+                        def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
+                            ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
+                        def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
+                            ? cols[header.indexOf('Data is ready to process')].trim() : ''
+                        def processedRaw = cols.size() > header.indexOf('Data Processed') && header.indexOf('Data Processed') >= 0
+                            ? cols[header.indexOf('Data Processed')].trim() : ''
+                        if (studyId) {
+                            def ready = parseYesNo(readyRaw, 'Data is ready to process', studyId)
+                            def processed = parseYesNo(processedRaw, 'Data Processed', studyId)
+                            studies << [studyId: studyId, abv: abv,
+                                        ready: ready, processed: processed]
+                        }
+                    }
 
                     def selected
                     if (params.STUDY_ID?.trim()) {
                         def sid = params.STUDY_ID.trim()
-                        def inputUri = params.INPUT?.trim()
-                            ?: (inputBase ? "${inputBase}/${sid}_sstr.tsv" : '')
-                        if (!inputUri) {
-                            error("STUDY_ID=${sid} requires either INPUT or INPUT_BASE to derive the SSTR input URI.")
+                        def row = studies.find { it.studyId == sid }
+                        if (!row && !params.INPUT?.trim()) {
+                            error("STUDY_ID=${sid} is not in managed inputs, so its SSTR cannot be discovered. Pass INPUT.")
                         }
-                        selected = [[studyId: sid, abv: '', input: inputUri]]
+                        // An explicit reload: the ready/processed flags do not apply.
+                        selected = [[studyId: sid, abv: row?.abv ?: '', processed: false,
+                                     input: params.INPUT?.trim() ?: '']]
                     } else {
                         selected = studies.findAll { it.ready }
                         if (selected.isEmpty()) {
                             error('No studies are marked ready in managed inputs. ' +
-                                  'Run one study manually with STUDY_ID + INPUT, or mark studies ready in the managed inputs CSV.')
-                        }
-                        // Derive input URIs from INPUT_BASE
-                        if (!inputBase) {
-                            error('INPUT_BASE is required in sweep mode to derive SSTR input URIs per study.')
-                        }
-                        selected = selected.collect { s ->
-                            s + [input: "${inputBase}/${s.studyId}_sstr.tsv"]
+                                  'Run one study manually with STUDY_ID, or mark studies ready in the managed inputs CSV.')
                         }
                     }
 
@@ -213,20 +208,92 @@ EOF
                     UNPROCESSED_STUDIES = selected.findAll { !it.processed }
                     def alreadyProcessed = selected.findAll { it.processed }
 
+                    // Discover each unprocessed study's SSTR the way participants-migration does:
+                    // staged files keep NHLBI's own name (sstr_phs######.v#.txt), so it cannot be
+                    // derived from the study id alone. Sequential on purpose: the env-var handoff
+                    // into sh is not safe under `parallel`.
+                    def inputBase = params.INPUT_BASE?.trim()?.replaceAll(/\/+$/, '') ?: ''
+                    def missing = []
+                    for (s in UNPROCESSED_STUDIES) {
+                        if (!inputBase || !s.abv) {
+                            missing << "${s.studyId} (${!inputBase ? 'no INPUT_BASE' : 'no Study Abbreviated Name in managed inputs'})"
+                            continue
+                        }
+                        def studyBase = "${inputBase}/${s.abv.toLowerCase()}"
+
+                        if (!s.input) {
+                            env.RAW_DIR = "${studyBase}/rawData/"
+                            def listing = sh(returnStdout: true, script: 'aws s3 ls "$RAW_DIR" 2>/dev/null || true')
+                            def file = pickSstr(listing, s.studyId)
+                            if (file) {
+                                s.input = "${env.RAW_DIR}${file}"
+                            } else {
+                                missing << "${s.studyId} (no sstr_${s.studyId}.*.txt in ${env.RAW_DIR})"
+                            }
+                        }
+
+                        // The generator's inputs, checked here so a missing one fails the build
+                        // before anything is provisioned rather than after the SSTR loads.
+                        s.dataDir = "${studyBase}/${params.DECODED_DATA_DIR.trim().replaceAll(/^\/+|\/+$/, '')}/"
+                        s.mapping = "${studyBase}/${params.CONCEPT_MAPPING_FILE.trim().replaceAll(/^\/+/, '')}"
+                        env.DATA_DIR = s.dataDir
+                        env.MAPPING_URI = s.mapping
+                        def csvs = sh(returnStdout: true,
+                                      script: 'aws s3 ls "$DATA_DIR" 2>/dev/null | grep -ci "\\.csv$" || true').trim()
+                        if (!(csvs.isInteger() && csvs.toInteger() > 0)) {
+                            missing << "${s.studyId} (no decoded data CSVs in ${s.dataDir})"
+                        }
+                        if (sh(returnStatus: true, script: 'r="${MAPPING_URI#s3://}"; ' +
+                               'aws s3api head-object --bucket "${r%%/*}" --key "${r#*/}" >/dev/null 2>&1') != 0) {
+                            missing << "${s.studyId} (no concept mapping at ${s.mapping})"
+                        }
+                    }
+                    if (missing) {
+                        error("Missing inputs for: ${missing.join('; ')}. Stage the files (or pass INPUT with STUDY_ID " +
+                              'for the SSTR), or mark the study not ready.')
+                    }
+
                     currentBuild.displayName = params.STUDY_ID?.trim()
                         ? "#${env.BUILD_NUMBER} ${params.STUDY_ID}"
                         : "#${env.BUILD_NUMBER} sweep (${selected.size()} ready, ${UNPROCESSED_STUDIES.size()} unprocessed)"
 
                     echo "Studies ready (${selected.size()}):"
                     selected.each { s ->
-                        echo "  ${s.studyId}  ${s.processed ? '[processed]' : '[new]'}  <- ${s.input}"
+                        echo "  ${s.studyId}  ${s.processed ? '[processed]' : '[new]'}  ${s.input ? '<- ' + s.input : ''}"
+                        if (s.dataDir) {
+                            echo "      decoded data ${s.dataDir}, mapping ${s.mapping}"
+                        }
                     }
                     if (alreadyProcessed) {
-                        echo "${alreadyProcessed.size()} study/studies already processed — skipping DB population and VCF index creation"
+                        echo "${alreadyProcessed.size()} study/studies already processed — skipping DB population, VCF index creation, and per-study allConcepts"
                     }
                     if (UNPROCESSED_STUDIES.isEmpty()) {
                         echo 'No unprocessed studies to load. Global AllConcepts will still regenerate.'
                     }
+                }
+            }
+        }
+
+        stage('Start participant DB') {
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    def downstream = build(
+                        job: params.DB_START_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-db"),
+                            string(name: 'ENV',    value: params.ENV),
+                        ])
+                    if (downstream.result != 'SUCCESS') {
+                        error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}: the participant " +
+                              'database did not come up. If it says a database is already running, another pipeline ' +
+                              'is using it or a previous stop failed -- see that job\'s console.')
+                    }
+                    // Only now does post { always } own the teardown. Never stop a database this
+                    // build did not start: it may be another pipeline's.
+                    env.DB_STARTED = 'true'
                 }
             }
         }
@@ -240,73 +307,84 @@ EOF
             steps {
                 script {
                     def results = java.util.Collections.synchronizedList([])
-                    def branches = [:]
 
-                    for (study in UNPROCESSED_STUDIES) {
-                        def s = study
-                        branches[s.studyId] = {
-                            echo "--- ${s.studyId} ---"
-                            def outcome
+                    def loadStudy = { s ->
+                        echo "--- ${s.studyId} ---"
+                        def outcome
+                        try {
+                            def downstream = build(
+                                job: params.SSTR_JOB,
+                                wait: true,
+                                propagate: false,
+                                parameters: [
+                                    string(name: 'STUDY_ID', value: s.studyId),
+                                    string(name: 'INPUT',    value: s.input),
+                                    string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
+                                    string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
+                                    string(name: 'ENV',  value: params.ENV),
+                                    booleanParam(name: 'SKIP_TESTS', value: true),
+                                    booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                ])
+
+                            outcome = [studyId: s.studyId, result: downstream.result,
+                                       build: downstream.number, url: downstream.absoluteUrl]
+
                             try {
-                                def downstream = build(
-                                    job: params.SSTR_JOB,
-                                    wait: true,
-                                    propagate: false,
-                                    parameters: [
-                                        string(name: 'STUDY_ID', value: s.studyId),
-                                        string(name: 'INPUT',    value: s.input),
-                                        string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
-                                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
-                                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
-                                        string(name: 'ENV',  value: params.ENV),
-                                        booleanParam(name: 'SKIP_TESTS', value: true),
-                                        booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
-                                    ])
-
-                                outcome = [studyId: s.studyId, result: downstream.result,
-                                           build: downstream.number, url: downstream.absoluteUrl]
-
-                                try {
-                                    copyArtifacts(
-                                        projectName: params.SSTR_JOB,
-                                        selector: specific("${downstream.number}"),
-                                        target: "downstream-artifacts/sstr/${s.studyId}",
-                                        optional: true)
-                                } catch (err) {
-                                    echo "Could not copy artifacts for ${s.studyId} (${err.message}); " +
-                                         "they remain on ${params.SSTR_JOB} #${downstream.number}."
-                                }
+                                copyArtifacts(
+                                    projectName: params.SSTR_JOB,
+                                    selector: specific("${downstream.number}"),
+                                    target: "downstream-artifacts/sstr/${s.studyId}",
+                                    optional: true)
                             } catch (err) {
-                                outcome = [studyId: s.studyId, result: 'NOT_BUILT',
-                                           build: null, url: null, error: err.message]
-                                echo "${s.studyId}: could not run — ${err.message}"
+                                echo "Could not copy artifacts for ${s.studyId} (${err.message}); " +
+                                     "they remain on ${params.SSTR_JOB} #${downstream.number}."
                             }
+                        } catch (err) {
+                            outcome = [studyId: s.studyId, result: 'NOT_BUILT',
+                                       build: null, url: null, error: err.message]
+                            echo "${s.studyId}: could not run — ${err.message}"
+                        }
 
-                            results << outcome
-                            echo "${s.studyId}: ${outcome.result}"
+                        results << outcome
+                        echo "${s.studyId}: ${outcome.result}"
+                        return outcome.result in ['SUCCESS', 'UNSTABLE']
+                    }
+
+                    if (params.PARALLEL_STUDY_LOADS) {
+                        def branches = [:]
+                        for (study in UNPROCESSED_STUDIES) {
+                            def s = study
+                            branches[s.studyId] = { loadStudy(s) }
+                        }
+                        if (!params.CONTINUE_ON_STUDY_FAILURE) {
+                            branches.failFast = true
+                        }
+                        parallel branches
+                    } else {
+                        for (int i = 0; i < UNPROCESSED_STUDIES.size(); i++) {
+                            if (!loadStudy(UNPROCESSED_STUDIES[i]) && !params.CONTINUE_ON_STUDY_FAILURE) {
+                                echo 'CONTINUE_ON_STUDY_FAILURE is off: not loading the remaining studies.'
+                                break
+                            }
                         }
                     }
-
-                    if (!params.CONTINUE_ON_STUDY_FAILURE) {
-                        branches.failFast = true
-                    }
-                    parallel branches
 
                     // --- summary --------------------------------------------------
                     def ok       = results.findAll { it.result == 'SUCCESS' }
                     def warned   = results.findAll { it.result == 'UNSTABLE' }
                     def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
+                    def skipped  = UNPROCESSED_STUDIES.size() - results.size()
 
                     echo ''
                     echo '================ SSTR load summary ================'
                     results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
                     echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
-                         "${failed.size()} failed"
+                         "${failed.size()} failed" + (skipped ? ", ${skipped} not attempted" : '')
                     echo '=================================================='
 
                     if (failed) {
                         error("SSTR load failed for: ${failed*.studyId.join(', ')}. " +
-                              'Each study is loaded in its own transaction, so a failed study left RDS unchanged — ' +
+                              'Each study is loaded in its own transaction, so a failed study left the participant DB unchanged — ' +
                               'fix its input and re-run just that study with STUDY_ID.')
                     }
                     if (warned) {
@@ -317,32 +395,29 @@ EOF
         }
 
         stage('Generate global AllConcepts') {
+            // No pre-flight mode of its own: it reads the participant DB, which PREFLIGHT_ONLY
+            // does not start.
+            when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
                     echo 'Generating global_AllConcepts.csv from populated database...'
-
-                    def conceptParams = [
-                        string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
-                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
-                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
-                        string(name: 'ENV',    value: params.ENV),
-                        booleanParam(name: 'SKIP_TESTS', value: true),
-                        booleanParam(name: 'ALLOW_EMPTY', value: params.PREFLIGHT_ONLY),
-                    ]
-                    if (params.MANAGED_INPUTS?.trim()) {
-                        conceptParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
-                    }
 
                     def downstream = build(
                         job: params.ALL_CONCEPTS_JOB,
                         wait: true,
                         propagate: false,
-                        parameters: conceptParams)
+                        parameters: [
+                            string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
+                            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS),
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                            string(name: 'ENV',    value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS', value: true),
+                        ])
 
-                    if (downstream.result == 'FAILURE') {
-                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} failed")
-                    } else if (downstream.result == 'UNSTABLE') {
+                    if (downstream.result == 'UNSTABLE') {
                         unstable("${params.ALL_CONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} ended ${downstream.result}")
                     }
 
                     try {
@@ -365,22 +440,25 @@ EOF
                 script {
                     echo 'Creating VCF indexes from genomic data...'
 
-                    def vcfParams = [
-                        string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
-                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
-                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
-                        string(name: 'ENV',    value: params.ENV),
-                        booleanParam(name: 'SKIP_TESTS', value: true),
-                    ]
-
+                    // propagate must be false: build() throws for ANY downstream result worse
+                    // than SUCCESS, UNSTABLE included, which would halt the pipeline on warnings.
                     def downstream = build(
                         job: params.VCF_INDEXES_JOB,
                         wait: true,
-                        propagate: true,
-                        parameters: vcfParams)
+                        propagate: false,
+                        parameters: [
+                            string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
+                            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS),
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
+                            string(name: 'ENV',    value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS', value: true),
+                            booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                        ])
 
                     if (downstream.result == 'UNSTABLE') {
                         unstable('Create VCF indexes completed with warnings')
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.VCF_INDEXES_JOB} #${downstream.number} ended ${downstream.result}")
                     }
 
                     try {
@@ -397,29 +475,123 @@ EOF
             }
         }
 
+        stage('Generate per-study AllConcepts') {
+            when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
+            steps {
+                script {
+                    def results = java.util.Collections.synchronizedList([])
+
+                    def generateStudy = { s ->
+                        echo "--- ${s.studyId} ---"
+                        def outcome
+                        try {
+                            def downstream = build(
+                                job: params.ALL_CONCEPTS_GENERATOR_JOB,
+                                wait: true,
+                                propagate: false,
+                                parameters: [
+                                    string(name: 'STUDY_ID', value: s.studyId),
+                                    string(name: 'DATA_DIR', value: s.dataDir),
+                                    string(name: 'MAPPING',  value: s.mapping),
+                                    string(name: 'OUTPUT',   value: params.PER_STUDY_ALL_CONCEPTS_PREFIX),
+                                    booleanParam(name: 'SKIP_ANALYSIS', value: params.SKIP_ANALYSIS),
+                                    string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-${s.studyId}"),
+                                    string(name: 'ENV',    value: params.ENV),
+                                    booleanParam(name: 'SKIP_TESTS', value: true),
+                                    booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                ])
+
+                            outcome = [studyId: s.studyId, result: downstream.result,
+                                       build: downstream.number, url: downstream.absoluteUrl]
+
+                            try {
+                                copyArtifacts(
+                                    projectName: params.ALL_CONCEPTS_GENERATOR_JOB,
+                                    selector: specific("${downstream.number}"),
+                                    target: "downstream-artifacts/per-study-all-concepts/${s.studyId}",
+                                    optional: true)
+                            } catch (err) {
+                                echo "Could not copy artifacts for ${s.studyId} (${err.message}); " +
+                                     "they remain on ${params.ALL_CONCEPTS_GENERATOR_JOB} #${downstream.number}."
+                            }
+                        } catch (err) {
+                            outcome = [studyId: s.studyId, result: 'NOT_BUILT',
+                                       build: null, url: null, error: err.message]
+                            echo "${s.studyId}: could not run — ${err.message}"
+                        }
+
+                        results << outcome
+                        echo "${s.studyId}: ${outcome.result}"
+                        return outcome.result in ['SUCCESS', 'UNSTABLE']
+                    }
+
+                    if (params.PARALLEL_STUDY_LOADS) {
+                        def branches = [:]
+                        for (study in UNPROCESSED_STUDIES) {
+                            def s = study
+                            branches[s.studyId] = { generateStudy(s) }
+                        }
+                        if (!params.CONTINUE_ON_STUDY_FAILURE) {
+                            branches.failFast = true
+                        }
+                        parallel branches
+                    } else {
+                        for (int i = 0; i < UNPROCESSED_STUDIES.size(); i++) {
+                            if (!generateStudy(UNPROCESSED_STUDIES[i]) && !params.CONTINUE_ON_STUDY_FAILURE) {
+                                echo 'CONTINUE_ON_STUDY_FAILURE is off: not generating the remaining studies.'
+                                break
+                            }
+                        }
+                    }
+
+                    // --- summary --------------------------------------------------
+                    def ok       = results.findAll { it.result == 'SUCCESS' }
+                    def warned   = results.findAll { it.result == 'UNSTABLE' }
+                    def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
+                    def skipped  = UNPROCESSED_STUDIES.size() - results.size()
+
+                    echo ''
+                    echo '============ Per-study allConcepts summary ============'
+                    results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
+                    echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
+                         "${failed.size()} failed" + (skipped ? ", ${skipped} not attempted" : '')
+                    echo '======================================================='
+
+                    // Halts here, before Merge AllConcepts: a merge run with a study missing or
+                    // half-written would publish merged files that silently lack its rows.
+                    if (failed) {
+                        error("Per-study allConcepts failed for: ${failed*.studyId.join(', ')}. Merge AllConcepts " +
+                              'was not run. Fix the study and re-run it with STUDY_ID (its files are overwritten in place).')
+                    }
+                    if (warned) {
+                        unstable("Per-study allConcepts completed with warnings: ${warned*.studyId.join(', ')}")
+                    }
+                }
+            }
+        }
+
         stage('Merge AllConcepts') {
+            // No pre-flight mode of its own: skipped rather than provisioned under PREFLIGHT_ONLY.
+            when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
                     echo 'Merging per-consent allConcepts files where needed...'
-
-                    def mergeParams = [
-                        string(name: 'INPUT', value: params.MERGE_ALLCONCEPTS_INPUT),
-                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
-                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
-                        string(name: 'ENV',    value: params.ENV),
-                        booleanParam(name: 'SKIP_TESTS', value: true),
-                    ]
 
                     def downstream = build(
                         job: params.MERGE_ALLCONCEPTS_JOB,
                         wait: true,
                         propagate: false,
-                        parameters: mergeParams)
+                        parameters: [
+                            string(name: 'INPUT', value: params.PER_STUDY_ALL_CONCEPTS_PREFIX),
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
+                            string(name: 'ENV',    value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS', value: true),
+                        ])
 
-                    if (downstream.result == 'FAILURE') {
-                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} failed")
-                    } else if (downstream.result == 'UNSTABLE') {
+                    if (downstream.result == 'UNSTABLE') {
                         unstable("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result}")
                     }
 
                     try {
@@ -439,6 +611,9 @@ EOF
 
     post {
         always {
+            script {
+                stopParticipantDb(params.DB_STOP_JOB, params.ENV)
+            }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
         failure {
@@ -453,6 +628,31 @@ EOF
         success {
             echo 'Permanent ETL pipeline completed. Every study loaded and passed its output validation.'
         }
+    }
+}
+
+// Dumps the participant DB to S3 and tears it down, if this build started it. The dump becomes
+// the next run's restore point (LATEST) only when the build got this far without failing; a
+// failed or aborted run is still dumped, but LATEST stays on the last good dump. A failed stop
+// fails the build loudly: the database is then still up, holding writes no dump has captured.
+def stopParticipantDb(String stopJob, String envName) {
+    if (env.DB_STARTED != 'true') {
+        return
+    }
+    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']
+    echo "Stopping the participant database (promote dump: ${promote})"
+    def downstream = build(
+        job: stopJob,
+        wait: true,
+        propagate: false,
+        parameters: [
+            booleanParam(name: 'PROMOTE_BACKUP', value: promote),
+            string(name: 'ENV', value: envName),
+        ])
+    if (downstream.result != 'SUCCESS') {
+        currentBuild.result = 'FAILURE'
+        echo "ERROR: ${stopJob} #${downstream.number} ended ${downstream.result}. The participant database may " +
+             "still be running with this build's writes un-dumped. Re-run ${stopJob} before anything else uses it."
     }
 }
 
@@ -483,4 +683,23 @@ static List<String> parseCsvLine(String line) {
     }
     fields << current.toString().trim()
     return fields
+}
+
+// Picks a study's SSTR from an `aws s3 ls` listing of its rawData folder, by the same rule as
+// ParticipantsMigrationJob.isSstrFileFor / isCanonicalSstrName: a .txt naming the study,
+// starting sstr_ or bdc-ingestion-only__sstr_ (case-insensitive), the canonical sstr_{phs}.{v}.txt
+// preferred over folder-flattened copies. Null when there is none.
+@NonCPS
+static String pickSstr(String listing, String studyId) {
+    def sid = studyId.toLowerCase()
+    def names = listing.readLines()
+        .findAll { !it.trim().startsWith('PRE ') && it.trim() }
+        .collect { it.trim().split(/\s+/)[-1] }
+        .findAll { n ->
+            def l = n.toLowerCase()
+            l.endsWith('.txt') && l.contains(sid) && (l.startsWith('sstr_') || l.startsWith('bdc-ingestion-only__sstr_'))
+        }
+    if (!names) return null
+    def canonical = { String n -> def l = n.toLowerCase(); l.startsWith('sstr_') && !l.startsWith('sstr__') }
+    return names.sort { a, b -> (canonical(a) == canonical(b)) ? a <=> b : (canonical(a) ? -1 : 1) }[0]
 }

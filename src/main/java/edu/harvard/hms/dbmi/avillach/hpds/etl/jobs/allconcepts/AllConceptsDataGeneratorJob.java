@@ -41,6 +41,7 @@ import java.util.stream.Stream;
 public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGeneratorJob.Output> {
 
     private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
+    private static final Pattern CONSENT_FOLDER_PATTERN = Pattern.compile("c[^/]+");
     private static final Set<String> NULL_EQUIVALENTS = Set.of(
             "null", "na", "n/a", "nan", "nil", "nill");
 
@@ -196,8 +197,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             }
 
             String consentLabel = "c" + consentCode;
-            String outputFile = outputDir + studyId + "/" + consentLabel + "/"
-                    + studyId + "_allConcepts_" + consentLabel + ".csv";
+            String outputFile = outputFileFor(outputDir, studyId, consentLabel);
             byte[] csv = builder.build();
             io.writeOutput(outputFile, csv);
             rowsPerConsent.put("c" + consentCode, (long) builder.size());
@@ -205,8 +205,40 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             log.info("Wrote {} rows ({} bytes) to {}", builder.size(), csv.length, outputFile);
         }
 
+        List<String> staleFilesRemoved = removeStaleOutputs(outputDir, studyId, rowsPerConsent.keySet());
+
         return new Output(studyId, consents.size(), participants.size(), mappings.size(),
-                rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles);
+                rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles,
+                staleFilesRemoved);
+    }
+
+    static String outputFileFor(String outputDir, String studyId, String consentLabel) {
+        return outputDir + studyId + "/" + consentLabel + "/"
+                + studyId + "_allConcepts_" + consentLabel + ".csv";
+    }
+
+    /**
+     * Each run overwrites this study's per-consent files in place (the output bucket is
+     * versioned, so the previous version stays recoverable). A consent group that produced
+     * rows last time but none now -- emptied by the data, or gone after an SSTR reload -- would
+     * otherwise keep last run's file and keep being merged. Removes exactly this job's own file
+     * in every other consent folder of the study; files other sources write into the same
+     * folders are never touched.
+     */
+    private List<String> removeStaleOutputs(String outputDir, String studyId, Set<String> writtenLabels) {
+        List<String> removed = new ArrayList<>();
+        for (String folder : io.listDirectoryNames(outputDir + studyId + "/")) {
+            if (!CONSENT_FOLDER_PATTERN.matcher(folder).matches() || writtenLabels.contains(folder)) {
+                continue;
+            }
+            String stale = outputFileFor(outputDir, studyId, folder);
+            if (io.exists(stale)) {
+                io.delete(stale);
+                removed.add(stale);
+                log.warn("Removed stale {}: consent group {} produced no rows this run", stale, folder);
+            }
+        }
+        return removed;
     }
 
     private AllConceptsRow buildConceptRow(String hpdsId, ConceptMapping mapping, String cellValue) {
@@ -431,6 +463,9 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         }
         output.rowsPerConsent().forEach((consent, count) ->
                 report.info("CONSENT_ROW_COUNT", consent + ": " + count + " row(s)"));
+        output.staleFilesRemoved().forEach(file ->
+                report.warning("STALE_OUTPUT_REMOVED",
+                        "removed " + file + ": its consent group produced no rows this run"));
     }
 
     @Override
@@ -443,7 +478,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 .metric("rowsSkipped", output.rowsSkipped())
                 .metric("unmappedPatients", output.unmappedPatientCount())
                 .metric("rowsPerConsent", output.rowsPerConsent())
-                .metric("outputFiles", output.outputFiles());
+                .metric("outputFiles", output.outputFiles())
+                .metric("staleFilesRemoved", output.staleFilesRemoved());
     }
 
     public record Output(
@@ -455,7 +491,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             long rowsSkipped,
             int unmappedPatientCount,
             Map<String, Long> rowsPerConsent,
-            List<String> outputFiles
+            List<String> outputFiles,
+            List<String> staleFilesRemoved
     ) {
     }
 

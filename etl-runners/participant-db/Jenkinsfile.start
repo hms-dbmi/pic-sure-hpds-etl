@@ -1,0 +1,120 @@
+// =============================================================================
+// SHARED -- participant-db-start
+//
+// Brings up the participant database (participants / consents / samples) for a pipeline run:
+// a Postgres server on an EC2 instance that restores the most recent promoted pg_dump from S3
+// (or creates a fresh schema when there is none), then publishes its connection details to a
+// temporary Secrets Manager secret the runners read. Paired with participant-db-stop, which
+// dumps the database back to S3 and destroys everything this job created.
+//
+// Both orchestrators (/Jenkinsfile, /Jenkinsfile.migration) call this first and the stop job
+// last. Run it by hand only to use a DB-backed runner standalone -- and run participant-db-stop
+// when finished, or the instance (and its unsaved writes) is left running.
+//
+// Refuses to start a second database: the Terraform state is fixed per environment, and an
+// instance already in it means another pipeline is using the database or a previous stop
+// failed (in which case the instance holds writes no dump has captured -- stop it, don't
+// replace it).
+//
+// Dumps:   s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backups/
+//          LATEST names the dump a start restores. See docs/PARTICIPANT_DB.md.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        disableConcurrentBuilds()
+        timeout(time: 2, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'RESTORE_FROM', defaultValue: '',
+               description: 'Blank restores the dump named by backups/LATEST (a fresh schema if there is none). "none" forces a fresh schema. Otherwise a dump file name under backups/, or a full s3:// URI to a tarred pg_dump --format=d dump (e.g. the initial seed).')
+        string(name: 'INSTANCE_TYPE', defaultValue: 'm5.xlarge',
+               description: 'DB instance type. Several runners may load concurrently; size for that.')
+        string(name: 'READY_TIMEOUT_SECONDS', defaultValue: '3600',
+               description: 'How long to wait for install + restore before giving up')
+        string(name: 'RUN_ID', defaultValue: '',
+               description: 'Correlation id. Blank derives one from BUILD_NUMBER; orchestrators pass their BUILD_TAG.')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
+    }
+
+    environment {
+        ENV        = "${params.ENV ?: 'development'}"
+        AWS_REGION = 'us-east-1'
+        DB_DIR     = 'etl-runners/participant-db'
+        STATE_KEY  = "tf_backend/etl-runners/hpds-etl/participant-db/${params.ENV ?: 'development'}/terraform.tfstate"
+
+        TF_VAR_restore_from  = "${params.RESTORE_FROM.trim()}"
+        TF_VAR_instance_type = "${params.INSTANCE_TYPE.trim()}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                script {
+                    def base = params.RUN_ID?.trim() ?: "participant-db-${env.BUILD_NUMBER}"
+                    env.TF_VAR_run_id = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}"
+                    echo "env:          ${env.ENV}"
+                    echo "run id:       ${env.TF_VAR_run_id}"
+                    echo "restore from: ${params.RESTORE_FROM?.trim() ?: '<backups/LATEST>'}"
+                }
+                sh "make -C ${DB_DIR} init STATE_KEY=${STATE_KEY}"
+                script {
+                    def existing = sh(returnStdout: true, script: """
+                        cd ${DB_DIR}
+                        \$(make -s tf-path) -chdir=terraform state list 2>/dev/null | grep -x 'aws_instance.db' || true
+                    """).trim()
+                    if (existing) {
+                        error("A participant database is already running in '${env.ENV}'. Either another pipeline is " +
+                              'using it, or a previous participant-db-stop failed -- in which case that instance holds ' +
+                              'writes no dump has captured. Run participant-db-stop (it backs up before destroying); ' +
+                              'do not work around this check.')
+                    }
+                }
+            }
+        }
+
+        stage('Provision') {
+            steps {
+                script {
+                    // From here on a failure must tear down: nothing has been written to the new
+                    // database yet, and the dump it restored from is still in S3.
+                    env.DB_APPLIED = 'true'
+                }
+                sh "make -C ${DB_DIR} apply STATE_KEY=${STATE_KEY}"
+            }
+        }
+
+        stage('Wait for ready') {
+            steps {
+                sh "make -C ${DB_DIR} wait-ready STATE_KEY=${STATE_KEY} READY_TIMEOUT_SECONDS=${params.READY_TIMEOUT_SECONDS.trim()}"
+                sh "etl-runners/common/require-db.sh ${env.ENV}"
+            }
+        }
+    }
+
+    post {
+        unsuccessful {
+            script {
+                if (env.DB_APPLIED == 'true') {
+                    echo 'Start failed after provisioning -- destroying the half-built database (no data is lost: ' +
+                         'nothing has written to it, and its restore source is still in S3).'
+                    int rc = sh(returnStatus: true, script: "make -C ${DB_DIR} destroy STATE_KEY=${STATE_KEY}")
+                    if (rc != 0) {
+                        echo "WARNING: terraform destroy returned ${rc}. Run participant-db-stop with SKIP_BACKUP=true to clean up."
+                    }
+                }
+            }
+        }
+        success {
+            echo "Participant database is up in '${env.ENV}'. Run participant-db-stop when the pipeline is done."
+        }
+    }
+}

@@ -1,14 +1,14 @@
 # Jenkins Pipelines and Ephemeral ETL Runners
 
 This document describes how the hpds-etl jobs are orchestrated: two Jenkins pipelines, one
-ephemeral EC2 runner per job, provisioned with Terraform and torn down after each run. Jobs are
-selected at runtime from a single fat JAR and communicate outcome through process exit codes.
+ephemeral EC2 runner per job, provisioned with Terraform and torn down after each run, and a
+participant database that exists only for the duration of a pipeline run. Jobs are selected at
+runtime from a single fat JAR and communicate outcome through process exit codes.
 
-The infrastructure pattern matches
+The infrastructure pattern follows
 [`hms-dbmi/bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — the same
-`terraform-modules/etl-runner` shape, `jenkins-s3-role`, `s3://<stack>/etl-runner/{container,logs}/`
-layout, and per-pipeline `terraform/` directory driven by a `Makefile` — with Java in place of
-Python.
+`terraform-modules/etl-runner` shape, `s3://<stack>/etl-runner/{container,logs,reports}/` layout,
+and per-pipeline `terraform/` directory driven by a `Makefile` — with Java in place of Python.
 
 ## Table of Contents
 
@@ -31,10 +31,10 @@ Python.
 
 ## Pipelines
 
-| Pipeline                | File                                                 | Scope                         | Lifetime                                                    |
-|-------------------------|------------------------------------------------------|-------------------------------|-------------------------------------------------------------|
-| **Temporary migration** | [`/Jenkinsfile`](../Jenkinsfile)                     | only `JobType.MIGRATION` jobs | deleted once the migration has run everywhere               |
-| **Permanent ETL**       | [`/Jenkinsfile.permanent`](../Jenkinsfile.permanent) | only `JobType.PERMANENT` jobs | ongoing; rename to `Jenkinsfile` when the migration is gone |
+| Pipeline                | File                                                 | Jenkins job                                   | Scope                                                       | Lifetime                                      |
+|-------------------------|------------------------------------------------------|-----------------------------------------------|-------------------------------------------------------------|-----------------------------------------------|
+| **Permanent ETL**       | [`/Jenkinsfile`](../Jenkinsfile)                     | `hpds-etl-pipeline`                           | `JobType.PERMANENT` jobs                                    | ongoing                                       |
+| **Temporary migration** | [`/Jenkinsfile.migration`](../Jenkinsfile.migration) | `new-hpds-etl-participant-migration-pipeline` | `JobType.MIGRATION` jobs, plus the permanent jobs that derive artifacts from migrated data | deleted once the migration has run everywhere |
 
 The two are separate files because their lifecycles are opposites. A migration is a one-off that
 ends in deletion; permanent ingestion runs indefinitely. Keeping them apart means the permanent
@@ -42,27 +42,41 @@ pipeline's schedule, retention, and alerting are not entangled with work whose e
 `git rm`, and retiring the migration is a file deletion rather than an edit to the pipeline that
 runs every week.
 
+Stage-by-stage descriptions: [PERMANENT_PIPELINE.md](PERMANENT_PIPELINE.md),
+[MIGRATION_PIPELINE.md](MIGRATION_PIPELINE.md).
+
 ## Jenkins Jobs
 
-Eight jobs, all pointing at this repository:
+All jobs live in the Jenkins folder **`hpds-etl`** and point at this repository. Job names in the
+orchestrators' parameters (`SSTR_JOB`, `ALL_CONCEPTS_JOB`, `DB_START_JOB`, …) are **relative**, so
+they resolve to siblings inside the same folder.
 
-| Jenkins job                               | Script path                                              |
-|-------------------------------------------|----------------------------------------------------------|
-| `new-hpds-etl-participant-migration-pipeline` | `Jenkinsfile.migration`                     |
-| `participants-migration`         | `etl-runners/participants-migration/Jenkinsfile`         |
-| `split-allconcepts`              | `etl-runners/split-allconcepts/Jenkinsfile`              |
-| `hpds-etl-pipeline`              | `Jenkinsfile`                                            |
-| `sstr-populate-rds-participants` | `etl-runners/sstr-populate-rds-participants/Jenkinsfile` |
-| `generate-global-all-concepts`   | `etl-runners/generate-global-all-concepts/Jenkinsfile`   |
-| `create-vcf-indexes`             | `etl-runners/create-vcf-indexes/Jenkinsfile`             |
-| `generate-identity-consent-mapping` | `etl-runners/generate-identity-consent-mapping/Jenkinsfile` |
+| Jenkins job                                   | Script path                                                 |
+|-----------------------------------------------|-------------------------------------------------------------|
+| `hpds-etl-pipeline`                           | `Jenkinsfile`                                               |
+| `new-hpds-etl-participant-migration-pipeline` | `Jenkinsfile.migration`                                     |
+| `participant-db-start`                        | `etl-runners/participant-db/Jenkinsfile.start`              |
+| `participant-db-stop`                         | `etl-runners/participant-db/Jenkinsfile.stop`               |
+| `participants-migration`                      | `etl-runners/participants-migration/Jenkinsfile`            |
+| `split-allconcepts`                           | `etl-runners/split-allconcepts/Jenkinsfile`                 |
+| `sstr-populate-rds-participants`              | `etl-runners/sstr-populate-rds-participants/Jenkinsfile`    |
+| `generate-global-all-concepts`                | `etl-runners/generate-global-all-concepts/Jenkinsfile`      |
+| `create-vcf-indexes`                          | `etl-runners/create-vcf-indexes/Jenkinsfile`                |
+| `merge-allconcepts`                           | `etl-runners/merge-allconcepts/Jenkinsfile`                 |
+| `all-concepts-data-generator`                 | `etl-runners/all-concepts-data-generator/Jenkinsfile`       |
+| `generate-identity-consent-mapping`           | `etl-runners/generate-identity-consent-mapping/Jenkinsfile` |
 
-`generate-identity-consent-mapping` is standalone — no orchestrator triggers it; run it
-when a new DMC harmonization drop lands (ALS-12727).
+`all-concepts-data-generator` is triggered per unprocessed study by the permanent
+orchestrator's `Generate per-study AllConcepts` stage, and can also be run by hand.
+`generate-identity-consent-mapping` is standalone — no orchestrator triggers it; run it when a
+new DMC harmonization drop lands (ALS-12727).
 
-The orchestrators' job-name parameters (`PARTICIPANTS_MIGRATION_JOB`, `SSTR_JOB`,
-`ALL_CONCEPTS_JOB`, etc.) default to these names. If your naming differs, change the
-parameter rather than the pipeline.
+> **Folder names must not contain a space.** `common.mk` uses unquoted workspace paths, so a job
+> in a folder such as `__Harmonization Work` breaks at `ensure-terraform` (identity-mapping
+> shakeout run #2). `hpds-etl` is safe; keep every job, `generate-identity-consent-mapping`
+> included, inside it.
+
+If your naming differs, change the orchestrator's job-name parameter rather than the pipeline.
 
 ---
 
@@ -71,20 +85,29 @@ parameter rather than the pipeline.
 ### Orchestration
 
 The DAG lives in Jenkins, not in the JAR. Each orchestrator stage triggers that job's own
-pipeline, which owns its runner end to end.
+pipeline, which owns its runner end to end. The participant database is started after the
+gate and stopped in `post { always }`.
 
 ```
-/Jenkinsfile  (or /Jenkinsfile.permanent)
+/Jenkinsfile  (or /Jenkinsfile.migration)
   Build ▸ Tests                              gate: nothing is provisioned until these pass
-  └─ stage 'Migrate participants'
-       └─ build job: participants-migration  etl-runners/<job>/Jenkinsfile
+  ▸ (Resolve studies)
+  ▸ Start participant DB                     build job: participant-db-start
+  └─ stage 'Load SSTR participants'          (one stage per job, in DAG order)
+       └─ build job: sstr-populate-rds-participants    etl-runners/<job>/Jenkinsfile
             Init ▸ Build JAR ▸ Pre-flight ▸ Package image
-            ▸ Provision (terraform apply) ▸ Monitor ▸ Fetch reports ▸ Validate
+            ▸ Provision (require-db.sh, terraform apply) ▸ Monitor ▸ Fetch reports ▸ Validate
             post: terraform destroy, archive reports
+  post { always }: build job: participant-db-stop      PROMOTE_BACKUP = build SUCCESS/UNSTABLE
 ```
 
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
 invoked with `SKIP_TESTS=true` so the same commit's suites are not re-run per study.
+
+The orchestrator stops only a database it started itself (`DB_STARTED`), so a failed start —
+for example because another pipeline's database is already up — never tears down someone else's.
+The participant DB lifecycle, dump location, and recovery are in
+[PARTICIPANT_DB.md](PARTICIPANT_DB.md).
 
 ### Runner Lifecycle
 
@@ -94,8 +117,11 @@ Jenkins agent                          ephemeral EC2 (self-terminating)
 ./mvnw package        ─ target/hpds-etl.jar
 docker build          ─ hpds-etl-runner image
 docker save | gzip    ─▶ s3://<stack>/etl-runner/container/<run>.tar.gz
+require-db.sh         ─ DB-backed runners only: fail fast if the participant DB is down
 terraform apply       ─▶ launch instance ──▶ user_data:
-                                              fetch RDS creds (Secrets Manager, instance role)
+                                              fetch participant DB secret (instance role)
+                                                → DB_URL / DB_USERNAME / DB_PASSWORD
+                                                (skipped for DB-free jobs)
                                               docker load + docker run
                                               java -jar hpds-etl.jar --job=… --run-id=…
                                               sync /reports  ─▶ s3://…/etl-runner/reports/<run>/
@@ -109,16 +135,23 @@ validate.sh           ─ assertions over the report
 terraform destroy     (post: always)
 ```
 
+`merge-allconcepts` and `generate-identity-consent-mapping` touch no database: their module call
+passes `db_secret_id = ""`, so the credential fetch is skipped and they run whether or not the
+participant DB is up.
+
 Properties of this model:
 
-- **No SSH.** Access is AWS SSM Session Manager only; the instance has no key pair.
+- **One principal.** Runners, the participant DB, and the Jenkins agent all run as
+  `bdc-etl-jenkins-role` in account 515157839325, which also owns the data. No cross-account role
+  is assumed. The only remaining assume is `generate-identity-consent-mapping`'s in-process
+  `--role-arn` (the NHLBI exchange role), made by the instance role.
+- **No SSH.** Access is AWS SSM Session Manager only; no instance has a key pair.
 - **No long-lived ETL host** and no Jenkins agent holding database credentials.
-- **Self-terminating.** The instance terminates whether the job succeeded, failed, was
-  OOM-killed, or had its spot capacity reclaimed.
+- **Self-terminating runners.** A runner terminates whether the job succeeded, failed, was
+  OOM-killed, or had its spot capacity reclaimed. (The participant DB deliberately does not; see
+  [PARTICIPANT_DB.md](PARTICIPANT_DB.md).)
 - **Completion is a sentinel, not a log match.** `status.json` carries the job's exit code and is
-  uploaded last, so its presence also proves every other artifact reached S3. The BDC Python
-  pipelines detect completion by grepping the log for phrases such as `All studies processed`;
-  these jobs already exit with a precise code, so there is nothing to pattern-match.
+  uploaded last, so its presence also proves every other artifact reached S3.
 
 ---
 
@@ -131,10 +164,14 @@ Properties of this model:
 |    0 | `SUCCESS` / `SUCCESS_WITH_WARNINGS` | continue; the report distinguishes the two, and warnings mark the build UNSTABLE     |
 |    1 | `UNKNOWN`                           | fail                                                                                 |
 |    2 | `VALIDATION_FAILED`                 | fail. For the migration this also means *some studies failed while others succeeded* |
-|    3 | `DATA_ERROR`                        | fail. For SSTR the study was rolled back, so RDS is unchanged                        |
+|    3 | `DATA_ERROR`                        | fail. For SSTR the study was rolled back, so the participant DB is unchanged         |
 |    4 | `INFRASTRUCTURE_ERROR`              | **retried once**, then fail                                                          |
 |    5 | `CONFIG_ERROR`                      | fail; no retry — a retry cannot fix a missing parameter                              |
 |  124 | (monitor)                           | timed out waiting for the runner; no retry                                           |
+
+A DB-backed runner started while the participant DB is down exits `5` in its `credentials` phase
+(the secret does not exist). `common/require-db.sh` normally catches this on the agent first, in
+seconds, before anything is provisioned.
 
 ---
 
@@ -151,15 +188,15 @@ reasons about report metrics. Run by the orchestrators, skipped in the job pipel
 ### 2. Pre-flight Checks
 
 `etl-runners/<job>/preflight.sh` runs on the agent before any instance is provisioned, checking
-what is knowable from the input files alone.
+what is knowable from the input files alone (header shape, required columns, object existence,
+study-id format). Each runner's script documents its own checks. `PREFLIGHT_ONLY=true` on an
+orchestrator runs these for every job that has them and provisions nothing — the participant DB
+included; stages without a pre-flight mode (global AllConcepts, merge) are skipped.
 
-| Runner                           | Checks                                                                                                                                                                                                                           |
-|----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `participants-migration`         | study-list CSV parses and has its three required columns; at least one study is ready; `consents.csv` exists; every ready study has its `{ABV}_PatientMapping.v2.csv`. Also reports which studies take the sstr vs direct route. |
-| `sstr-populate-rds-participants` | `--study-id` matches `phs######`; input exists and is non-empty; header is tab-delimited and carries `dbgap_subject_id`, `CONSENT`, `consent_abbreviation`, `dbgap_sample_id`. Reads only the first 64 KiB via a ranged GET.     |
-
-`consents.csv` is required unconditionally: `execute()` reads it before processing any study, so
-its absence aborts the whole run rather than one study.
+`all-concepts-data-generator`'s pre-flight is the strictest about its output: the mapping file
+must exist, the decoded data folder must hold at least one `.csv`, and `OUTPUT` must be an
+`s3://` prefix on a bucket with **versioning Enabled** — the job overwrites per-consent files in
+place and removes stale ones, so versioning is what keeps every previous version recoverable.
 
 ### 3. Job Lifecycle
 
@@ -188,9 +225,9 @@ upserts with `ON CONFLICT DO NOTHING`, so it counts only new participants and is
 on a reload. That case is reported as a warning, since it is correct for a reload and wrong for a
 study's first load.
 
-Optional per-study expectations from `studies.tsv` (`expected_consent_codes`,
-`expected_min_participants`) catch a file swapped for the wrong study and a truncated input — the
-two failures no invariant can detect, because a truncated file is internally consistent.
+The optional job parameters `EXPECTED_CONSENT_CODES` and `EXPECTED_MIN_PARTICIPANTS` catch a file
+swapped for the wrong study and a truncated input — the two failures no invariant can detect,
+because a truncated file is internally consistent.
 
 **`participants-migration`** — checks artifacts, not just the exit code, because the job records a
 per-study data problem as a study-level failure and continues, and skips unmatched ids with only a
@@ -199,11 +236,16 @@ log warning. Neither is visible in the exit status.
 - `readyStudies > 0`, `failedStudies == 0`, `succeeded + failed == ready`
 - one `STUDY_MIGRATED` record per success
 - one `*_hpds_id_mapping.csv` per succeeded study
-- per mapping file: exact header, at least one row, well-formed UUIDs, no blank ids, and no
-  duplicated `old_hpds_id` (one legacy patient mapped to two new uuids is the corruption this
-  migration exists to avoid)
+- per mapping file: exact header (`old_hpds_id,new_hpds_id,common_dbgap_id`), at least one row,
+  integer HPDS ids, no blank ids, and no duplicated `old_hpds_id` (one legacy patient mapped to two
+  new ids is the corruption this migration exists to avoid)
 - each sstr sub-report validated; a mapping file with fewer rows than its study's sstr subject
   count is warned about, being the visible symptom of silently dropped patients
+
+**`all-concepts-data-generator`** — the report and the files it claims are checked together:
+`rowsProcessed > 0`, exactly one output file per consent group with rows, and every listed file
+present in S3 (a non-`s3://` path fails outright). Stale files the job removed
+(`staleFilesRemoved`) and unmapped patients are warnings.
 
 ### Validator Exit Codes
 
@@ -226,18 +268,16 @@ Validators never abort on the first failure, so one console read shows everythin
 
 ### Jenkins Agent
 
-| Requirement       | Notes                                                                    |
-|-------------------|--------------------------------------------------------------------------|
-| JDK 25            | matches `<java.version>` in `pom.xml`                                    |
-| Maven wrapper     | `./mvnw`, checked into the repo                                          |
-| Docker            | builds the runner image                                                  |
-| Terraform ≥ 1.3   | provisions the runner                                                    |
-| AWS CLI v2        | image upload, report sync, SSM, EC2 describe                             |
-| `jq`              | report and sentinel parsing                                              |
-| `python3`         | the migration pre-flight parses the study-list CSV with its `csv` module |
-| `jenkins-s3-role` | instance profile on the agent                                            |
-
-This is the same agent the BDC ETL runners use, plus JDK 25.
+| Requirement            | Notes                                                                    |
+|------------------------|--------------------------------------------------------------------------|
+| JDK 25                 | matches `<java.version>` in `pom.xml`                                    |
+| Maven wrapper          | `./mvnw`, checked into the repo                                          |
+| Docker                 | builds the runner image; also needed for the `*IT` suites                |
+| Terraform ≥ 1.3        | provisions runners and the participant DB (`common.mk` installs 1.9.8 if missing) |
+| AWS CLI v2             | image upload, report sync, SSM, EC2 describe, Secrets Manager describe   |
+| `jq`                   | report and sentinel parsing                                              |
+| `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module |
+| `bdc-etl-jenkins-role` | the agent's own role; it does all AWS work as this role (no profiles)    |
 
 ### Jenkins Plugins
 
@@ -252,47 +292,65 @@ This is the same agent the BDC ETL runners use, plus JDK 25.
 
 ## AWS Setup
 
-### 1. RDS Secret
+Account **515157839325**, region `us-east-1`. Shared settings are in
+[`etl-runners/environments/development.tfvars`](../etl-runners/environments/development.tfvars);
+every provider sets `allowed_account_ids`, so an apply against the wrong account fails fast.
 
-Create a Secrets Manager secret holding the ETL user's credentials, then set `rds_secret_id` in
-both `terraform/*.tfvars`. Either shape is accepted:
+### 1. Participant DB Secret
 
-```json
-{ "url": "jdbc:postgresql://host:5432/hpds", "username": "hpds_etl", "password": "…" }
-```
-
-```json
-{ "host": "host", "port": 5432, "dbname": "hpds", "username": "hpds_etl", "password": "…" }
-```
-
-The second is what an RDS-managed secret produces, so a rotated secret works unchanged.
+There is no standing database secret. `participant-db-start` creates
+`hpds-etl-development-participant-db` (the environment's `db_secret_id`), the DB instance writes
+its value once Postgres has restored, and `participant-db-stop` deletes it. Details in
+[PARTICIPANT_DB.md](PARTICIPANT_DB.md#credentials).
 
 ### 2. IAM
 
-`jenkins-s3-role` needs:
+`bdc-etl-jenkins-role` is the instance profile for every runner and the participant DB, and the
+Jenkins agent's role. It needs:
 
-- `secretsmanager:GetSecretValue` on the secret
-- read on the input buckets
-- read/write on the stack bucket's `etl-runner/*` prefixes
-- `AmazonSSMManagedInstanceCore`
+- **S3** read/write on `bdc-etl-data-d0d6191`: `etl-runner/*` (image tarballs, logs, reports,
+  DB boot sentinels), `tf_backend/*` (Terraform state), and `avillach-73-bdcatalyst-etl/*`
+  (job inputs and outputs, mapping handoffs, participant DB dumps); plus `s3:ListBucket`,
+  `s3:DeleteObject` (the generator's stale-file removal), and `s3:GetBucketVersioning` (the
+  generator's pre-flight). Versioning must be **Enabled** on `bdc-etl-data-d0d6191`.
+- **SSM**: `AmazonSSMManagedInstanceCore` for the instances; `ssm:SendCommand`,
+  `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation` for the agent (log tailing and the
+  DB backup)
+- **EC2 / IAM for Terraform**: create/describe/terminate instances, `ec2:CreateSecurityGroup`,
+  `ec2:AuthorizeSecurityGroupIngress`/`Egress`, `ec2:DeleteSecurityGroup`, describe
+  subnets/VPCs/AMIs; `iam:CreateInstanceProfile`/`DeleteInstanceProfile`/
+  `AddRoleToInstanceProfile`/`RemoveRoleFromInstanceProfile`, `iam:PassRole` on itself, and
+  `iam:PutRolePolicy`/`DeleteRolePolicy`/`GetRolePolicy` on itself — the DB stack attaches a
+  temporary secret-access policy for as long as the database is up
+- **Secrets Manager**: `CreateSecret`, `DeleteSecret`, `DescribeSecret`, `TagResource` on
+  `hpds-etl-*` secrets (Get/Put on the live secret is granted by the DB stack itself)
+- **STS**: `sts:AssumeRole` on the NHLBI exchange roles
+  (`arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3` and its 600168050588 twin),
+  which trust this role
 
-The full policy is in
-[`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md). The role
-is shared with the BDC pipelines and managed centrally, which is why `manage_secret_access`
-defaults to `false`.
+A minimal runner policy is in
+[`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md).
 
 ### 3. Networking
 
-`subnet_id` must have a route to the HPDS RDS instance **and** an S3 path (gateway endpoint or
-NAT). The values in `*.tfvars` are copied from the BioLINCC runner, which does not talk to RDS,
-so this is the one setting that configuration cannot vouch for. Confirm it before the first run.
+| Setting                  | Value                                                                             |
+|--------------------------|-----------------------------------------------------------------------------------|
+| VPC                      | `vpc-0fcb0b3dc2167e8b4`                                                           |
+| Runner security group    | `sg-0932143f21f7c533b`                                                            |
+| Subnet                   | `subnet_id = ""` → the lowest-id subnet in the VPC, for runners and DB alike      |
+
+The subnet must have an S3 path (gateway endpoint or NAT) and reach SSM. Pin `subnet_id` once the
+right subnet is confirmed rather than relying on the lookup. The participant DB gets its own
+security group allowing 5432 **only** from the runner security group(s), created and destroyed
+with the database, so the shared group is never modified.
 
 ### Credential Handling
 
-Credentials never reach Jenkins. Terraform receives the secret's id, never its value, so nothing
-sensitive enters Terraform state, the console log, or the EC2 user-data blob. On the instance the
-values are written to a `600`-mode file passed as `docker --env-file`, keeping them out of the
-process table and `docker inspect`. `xtrace` is disabled in the bootstrap for the same reason.
+Credentials never reach Jenkins. The DB password is generated on the DB instance and leaves it only
+through Secrets Manager: it is never in Terraform state, user data, or the console log. Runners
+receive the secret's name, fetch it with their instance role, and write the values to a `600`-mode
+file passed as `docker --env-file` (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`), keeping them out of
+the process table and `docker inspect`. `xtrace` is disabled in both bootstraps for the same reason.
 
 ---
 
@@ -300,36 +358,55 @@ process table and `docker inspect`. `xtrace` is disabled in the bootstrap for th
 
 ### Full Migration
 
-Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_FOLDER`. Set `PREFLIGHT_ONLY` to
-validate the export layout without provisioning anything.
+Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_FOLDER`. Set
+`PREFLIGHT_ONLY` to validate the export layout without provisioning anything.
 
 ### Permanent Sweep
 
-Run `hpds-etl-pipeline` with `STUDY_ID` blank. Every study marked ready in
-[`studies.tsv`](../etl-runners/sstr-populate-rds-participants/studies.tsv) is loaded, one
-ephemeral runner each, sequentially. `CONTINUE_ON_STUDY_FAILURE` (default on) lets one bad study
-fail without stopping the rest; the build ends with a per-study summary table.
+Run `hpds-etl-pipeline` with `STUDY_ID` blank and `MANAGED_INPUTS` set. Every study marked
+"Data is ready to process" = Yes and not yet "Data Processed" is loaded, one ephemeral runner each,
+sequentially. Each study's SSTR is discovered under `{INPUT_BASE}/{abv_lower}/rawData/` as
+`sstr_{study_id}.{v}.txt` (case-insensitive; `BDC-ingestion-only__sstr_*` also accepted) — the
+same rule `participants-migration` uses. Its per-study allConcepts inputs are
+`{INPUT_BASE}/{abv_lower}/decoded_data/` and `{INPUT_BASE}/{abv_lower}/mappings/mapping2.csv`
+(`DECODED_DATA_DIR` / `CONCEPT_MAPPING_FILE`). A study missing any of the three fails the build
+before anything is provisioned. `CONTINUE_ON_STUDY_FAILURE` (default on) lets one bad study fail without stopping the
+rest; the build ends with a per-study summary table.
 
 ### Single-Study Reload
 
-Run `hpds-etl-pipeline`, or the SSTR job directly, with `STUDY_ID` set. The manifest's `ready`
-flag is ignored in this mode, so an explicit reload is not blocked by a sweep flag.
+Run `hpds-etl-pipeline` with `STUDY_ID` set. `MANAGED_INPUTS` is still required (the study's
+abbreviation comes from it, and the global AllConcepts and VCF jobs read it); `INPUT` overrides
+SSTR discovery. The ready/processed flags are ignored in this mode, so an explicit reload is not
+blocked by a sweep flag.
 
-A reload is safe: purge and load share one transaction, so a failure leaves RDS exactly as it
-was. Expect `participantsInserted = 0` and an UNSTABLE build, which is correct for a reload.
+A reload is safe: purge and load share one transaction, so a failure leaves the participant DB
+exactly as it was. Expect `participantsInserted = 0` and an UNSTABLE build, which is correct for a
+reload.
 
-### Adding a Study
+### Running a Runner Standalone
 
-Append a row to `studies.tsv`. Populate `expected_consent_codes` and
-`expected_min_participants` where known — they are what catch a wrong or truncated file.
+A DB-backed runner job (`sstr-populate-rds-participants`, `participants-migration`,
+`split-allconcepts`, `generate-global-all-concepts`, `create-vcf-indexes`,
+`all-concepts-data-generator`) run on its own needs the participant DB up: run
+`participant-db-start` first and `participant-db-stop` afterwards. Without it, `require-db.sh`
+fails the build before provisioning. For a manual single-study SSTR load, the per-study checks are
+job parameters on `sstr-populate-rds-participants`: `EXPECTED_CONSENT_CODES`,
+`EXPECTED_MIN_PARTICIPANTS`, and `INSTANCE_TYPE`.
+
+`studies.tsv` has been removed: nothing ever read it (the orchestrator reads managed inputs), so
+the per-study expectations and instance types it held were never applied.
 
 ### Local Run
 
 ```bash
+# The participant DB must be up (participant-db-start, or make -C etl-runners/participant-db
+# init apply wait-ready). ENV defaults to development.
 cd etl-runners/sstr-populate-rds-participants
 
 export TF_VAR_run_id=local-1 TF_VAR_study_id=phs001412 \
-       TF_VAR_input_uri=s3://…/phs001412.sstr.txt TF_VAR_name_suffix=local1
+       TF_VAR_input_uri=s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/…/sstr_phs001412.v1.txt \
+       TF_VAR_name_suffix=local1
 
 make preflight
 make jar package          # build, containerise, upload
@@ -353,7 +430,13 @@ an environment may run.
 | `template`                                      | `false` | `ETL_JOB_TEMPLATE_ENABLED`                                      |
 | `sstr-populate-rds-participants`                | `true`  | `ETL_JOB_SSTR_POPULATE_RDS_PARTICIPANTS_ENABLED`                |
 | `single-consent-data-populate-rds-participants` | `true`  | `ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED` |
+| `generate-global-all-concepts`                  | `true`  | `ETL_JOB_GENERATE_GLOBAL_ALL_CONCEPTS_ENABLED`                  |
+| `all-concepts-data-generator`                   | `true`  | `ETL_JOB_ALL_CONCEPTS_DATA_GENERATOR_ENABLED`                   |
+| `create-vcf-indexes`                            | `true`  | `ETL_JOB_CREATE_VCF_INDEXES_ENABLED`                            |
+| `merge-allconcepts`                             | `true`  | `ETL_JOB_MERGE_ALLCONCEPTS_ENABLED`                             |
+| `generate-identity-consent-mapping`             | `true`  | `ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED`             |
 | `participants-migration`                        | `true`  | `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED`                        |
+| `split-allconcepts`                             | `true`  | `ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED`                             |
 
 Running a disabled job exits `5` (`CONFIG_ERROR`) with a message naming the flag.
 
@@ -363,60 +446,76 @@ Notes:
   because it injects that job to load the sstr-backed studies. Both flags are on its condition,
   so disabling the sstr job removes the migration job cleanly instead of breaking Spring context
   startup on a missing bean.
-- This is the retirement path for the migration: set
-  `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED=false` everywhere, confirm nothing calls it, then
-  delete the job, its runner directory, and `/Jenkinsfile`.
+- This is the retirement path for the migration: set the two migration flags to `false`
+  everywhere, confirm nothing calls them, then delete the jobs, their runner directories, and
+  `/Jenkinsfile.migration`.
 
 ---
 
 ## Concurrency
 
-Study loads may run in parallel. Study scoping alone does not make them safe: every SSTR load
-writes `participants` with `source = "DBGap"`, so two studies containing the same
-`dbgap_subject_id` compete for that subject's HPDS uuid.
+There is **one participant database per environment**. `participant-db-start` refuses to start a
+second while the environment's Terraform state still holds an instance, so two pipelines cannot
+silently share or replace it; the second fails at its `Start participant DB` stage, and its
+`post` does not touch the first pipeline's database.
+
+Study loads are **sequential by default** (`PARALLEL_STUDY_LOADS`, default `false`, on the
+permanent orchestrator). Parallel loads are correct but rarely worth it. Study scoping alone does
+not make them safe: every SSTR load writes `participants` with `source = "DBGap"`, so two studies
+containing the same `dbgap_subject_id` compete for that subject's HPDS id.
 
 `ParticipantRepository.resolveOrCreate` is what makes concurrent loads correct:
 
-- It re-reads after inserting and returns the uuid **actually stored**, so a run whose insert lost
-  the race cannot write consents and samples against its own discarded uuid.
-  `ON CONFLICT DO NOTHING` reports the loser's insert as "0 rows" without revealing the winner,
-  and there are no foreign keys from `consents`/`samples` back to `participants`, so nothing else
-  would catch it.
+- It re-reads after inserting and returns the id **actually stored**, so a run whose insert lost
+  the race cannot write consents and samples against an id it never got. `ON CONFLICT DO NOTHING`
+  reports the loser's insert as "0 rows" without revealing the winner, and there are no foreign
+  keys from `consents`/`samples` back to `participants`, so nothing else would catch it.
 - Inserts are issued in sorted `source_id` order, so two runs inserting an overlapping set of new
   subjects cannot deadlock by acquiring them in opposite orders.
 
 `SstrPopulateRdsParticipantsConcurrencyIT` covers all three properties: shared subjects converge
-on one uuid, no consent or sample row references a uuid with no participant, and opposing insert
+on one id, no consent or sample row references an id with no participant, and opposing insert
 orders do not deadlock.
 
-Sequential remains the default. Loads that share subjects serialize on those rows anyway — the
-loser waits for the winner's transaction to commit — so parallelism buys least where studies
-overlap most, and sequential keeps the RDS write load predictable and the console log readable.
-Swapping the loop in the `Load SSTR participants` stage for a `parallel` map is a small change if
-throughput matters.
+Loads that share subjects serialize on those rows anyway — the loser waits for the winner's
+transaction to commit — so parallelism buys least where studies overlap most, and sequential keeps
+the participant DB load predictable and the console log readable.
+
+The migration's `Split AllConcepts` stage runs its studies in **parallel**: the split job only
+reads the participant DB (consents), so there is nothing to race on. The DB's `max_connections`
+(300) is sized for that fan-out.
 
 ---
 
 ## Directory Layout
 
 ```
-Jenkinsfile                     migration orchestrator (TEMPORARY)
-Jenkinsfile.permanent           permanent orchestrator
+Jenkinsfile                     permanent orchestrator
+Jenkinsfile.migration           migration orchestrator (TEMPORARY)
 terraform-modules/etl-runner/   shared self-terminating-runner module
 etl-runners/
 ├─ Dockerfile                   one image for every job (the JAR selects the job at runtime)
 ├─ run-job.sh                   container entrypoint: env vars to --flags, java -jar, exit code
 ├─ common.mk                    shared build/deploy/monitor targets
+├─ environments/
+│  └─ development.tfvars        account, VPC, security group, instance role, DB secret name
 ├─ common/
 │  ├─ lib.sh                    check/soft/fail/warn/summary assertion helpers
 │  ├─ monitor-runner.sh         polls for the sentinel; exits with the job's exit code
+│  ├─ require-db.sh             fails fast on the agent when the participant DB is down
 │  └─ validate-report.sh        assertions true of every JobResult report
-├─ participants-migration/          TEMPORARY
-│  ├─ Jenkinsfile  Makefile  preflight.sh  validate.sh
-│  └─ terraform/                    module call, tfvars, backend config
-└─ sstr-populate-rds-participants/  PERMANENT
-   ├─ Jenkinsfile  Makefile  preflight.sh  validate.sh  studies.tsv
-   └─ terraform/
+├─ participant-db/              SHARED: the per-pipeline Postgres server
+│  ├─ Jenkinsfile.start  Jenkinsfile.stop  Makefile  wait-ready.sh  backup-via-ssm.sh
+│  └─ terraform/                instance, SG, secret, user_data.sh.tpl, backup.sh.tpl
+├─ participants-migration/            TEMPORARY
+├─ split-allconcepts/                 TEMPORARY
+├─ sstr-populate-rds-participants/    PERMANENT
+├─ generate-global-all-concepts/      PERMANENT
+├─ create-vcf-indexes/                PERMANENT
+├─ merge-allconcepts/                 PERMANENT (no DB)
+├─ all-concepts-data-generator/       PERMANENT (per study, from the permanent orchestrator)
+└─ generate-identity-consent-mapping/ PERMANENT, standalone (no DB)
+   each runner: Jenkinsfile  Makefile  preflight.sh  validate.sh  terraform/
 ```
 
 ---
@@ -425,18 +524,21 @@ etl-runners/
 
 ### Artifact Locations
 
-| Artifact            | Location                                                                            |
-|---------------------|-------------------------------------------------------------------------------------|
-| Console log         | the Jenkins build                                                                   |
-| JSON reports        | archived on the build, and `s3://<stack>/etl-runner/reports/<job>/<run-id>/`        |
-| Runner log          | `s3://<stack>/etl-runner/logs/<job>-<run-id>.log` (bootstrap plus container output) |
-| Completion sentinel | `status.json` under the report prefix                                               |
+| Artifact            | Location                                                                                    |
+|---------------------|---------------------------------------------------------------------------------------------|
+| Console log         | the Jenkins build                                                                           |
+| JSON reports        | archived on the build, and `s3://bdc-etl-data-d0d6191/etl-runner/reports/<job>/<run-id>/`   |
+| Runner log          | `s3://bdc-etl-data-d0d6191/etl-runner/logs/<job>-<run-id>.log` (bootstrap plus container output) |
+| Completion sentinel | `status.json` under the report prefix                                                       |
+| Terraform state     | `s3://bdc-etl-data-d0d6191/tf_backend/etl-runners/hpds-etl/…`                               |
+| Participant DB dumps| `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<env>/backups/`        |
 
 ### Diagnosing a Failure
 
 1. **Exit code** — identifies which of the five categories the failure falls in.
 2. **`status.json`** — its `phase` field distinguishes a bootstrap failure (`install`,
-   `credentials`, `image`) from the job itself (`job`).
+   `credentials`, `image`) from the job itself (`job`). `credentials` with exit 5 usually means
+   the participant DB was not running.
 3. **JSON report** — `inputValidation` and `outputValidation` issues name the specific rows and
    columns.
 
@@ -451,28 +553,39 @@ terminates itself. Check the tail of the runner log in S3 for the last phase rea
 `<job>-etl-instance-profile-<suffix>` can survive; the instance itself always terminates, so no
 compute is billed. Delete the profile manually or re-run `make destroy` with the same `STATE_KEY`.
 
+### Participant DB Left Running
+
+If an orchestrator ends with "participant-db-stop … ended FAILURE", or a later start says a
+database is already running, the instance is still up and may hold writes no dump has captured.
+Re-run `participant-db-stop`; it backs up before destroying. See
+[PARTICIPANT_DB.md](PARTICIPANT_DB.md#recovery-and-troubleshooting).
+
 ### Cost
 
-One instance per job run, alive only for the duration of the job. Per-build image tarballs are
-removed from S3 in `post { always }`.
+One instance per job run, alive only for the duration of the job, plus the participant DB for the
+duration of the pipeline. Per-build image tarballs are removed from S3 in `post { always }`.
 
 ---
 
 ## Known Limitations
 
-- **No post-load assertion against RDS itself.** Everything after the test suites reasons about
-  report metrics, which are counts of rows the repositories affected rather than a `SELECT`
-  against the loaded table. The fix is a `verify-rds-participants` job in the JAR, run as a second
-  container on the same runner, since only the runner can reach RDS.
-- **Reports cannot confirm their own study.** Adding `builder.metric("studyId", studyId)` to
-  `SstrPopulateRdsParticipantsJob.report` would let `validate.sh` confirm a report belongs to the
-  study it was asked about instead of inferring it from the run id.
-- **`studies.tsv` ships with example rows only.** A sweep fails with a clear message until it is
-  populated.
-- **`instance_type` is an estimate per job.** Both jobs hold their input in memory
-  (`List<Telemetry>` for SSTR, the mapping and consents joins for the migration), so the ceiling
-  is the largest file rather than the average. Set `instance_type` per study in `studies.tsv`
-  where a study needs more headroom.
+- **No post-load assertion against the database itself.** Everything after the test suites reasons
+  about report metrics, which are counts of rows the repositories affected rather than a `SELECT`
+  against the loaded table. The fix is a `verify-participants` job in the JAR, run as a second
+  container on a runner, since only a runner can reach the participant DB.
+- **SSTR reports cannot confirm their own study.** `SstrPopulateRdsParticipantsJob.report` emits no
+  `studyId` metric (split and all-concepts-data-generator do); adding one would let `validate.sh`
+  confirm a report belongs to the study it was asked about instead of inferring it from the run id.
+- **`instance_type` is an estimate per job.** The SSTR and migration jobs hold their input in
+  memory, so the ceiling is the largest file rather than the average. Override with the job's
+  `INSTANCE_TYPE` parameter. This now takes effect: `instance_type` was removed from every runner's
+  `.tfvars`, because a `-var-file` value outranks `TF_VAR_instance_type` and was silently
+  overriding the parameter.
+- **Parameter changes need one run to register.** Jenkins only learns a Jenkinsfile's new
+  `parameters` block after a build of it runs; until then it serves the old defaults (and Rebuild
+  copies them forward). Run each changed job once (`PREFLIGHT_ONLY=true` where available) after
+  merging parameter changes — including the new `ENV = development` choice and the removal of
+  `CONTAINER_ASSUME_ROLE_ARN`.
 - **Validation issue codes are inconsistently cased.** `consent_code_COUNT` does not follow the
   `SCREAMING_SNAKE_CASE` convention the other codes use. Renaming it means changing the emitted
   code in `SstrPopulateRdsParticipantsJob` and the matching `jq` filter in the SSTR `validate.sh`
@@ -482,6 +595,7 @@ removed from S3 in `post { always }`.
 
 ## References
 
+- [`docs/PARTICIPANT_DB.md`](PARTICIPANT_DB.md) — the participant database lifecycle
 - [`terraform-modules/etl-runner`](../terraform-modules/etl-runner/README.md) — the runner module
 - [`etl-runners/README.md`](../etl-runners/README.md) — runner directory conventions
 - [`docs/ADDING_A_JOB.md`](ADDING_A_JOB.md) — adding a job and its runner

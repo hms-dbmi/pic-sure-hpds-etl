@@ -14,6 +14,7 @@ import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
@@ -101,6 +102,31 @@ public class IoResolver {
             }
         }
         return Files.exists(toLocalPath(uri));
+    }
+
+    /**
+     * Deletes a single file. Deleting a location that does not exist is not an error. On a
+     * versioned S3 bucket this adds a delete marker, so the previous version stays recoverable.
+     */
+    public void delete(String uri) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            try {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build());
+                log.info("Deleted S3 object {}", uri);
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to delete from S3: " + uri, e);
+            }
+            return;
+        }
+        Path path = toLocalPath(uri);
+        try {
+            if (Files.deleteIfExists(path)) {
+                log.info("Deleted {}", path.toAbsolutePath());
+            }
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to delete local file: " + path, e);
+        }
     }
 
     /**

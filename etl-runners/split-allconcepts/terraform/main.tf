@@ -1,5 +1,7 @@
 provider "aws" {
   region = var.aws_region
+  # Refuse to touch any account but the environment's: a wrong-profile apply fails fast.
+  allowed_account_ids = [var.aws_account_id]
 }
 
 # TEMPORARY. Runs the one-off split-allconcepts job (JobType.MIGRATION) on a
@@ -15,9 +17,10 @@ module "etl_runner" {
   ami_owner_id     = var.ami_owner_id
   ami_name_pattern = var.ami_name_pattern
   instance_type    = var.instance_type
+  vpc_id                 = var.vpc_id
   subnet_id              = var.subnet_id
   vpc_security_group_ids = var.vpc_security_group_ids
-  iam_role_name          = "jenkins-s3-role"
+  iam_role_name          = var.iam_role_name
   root_volume_size = var.root_volume_size
 
   job_name  = "split-allconcepts"
@@ -26,13 +29,7 @@ module "etl_runner" {
   java_opts = var.java_opts
   log_level = var.log_level
 
-  rds_secret_id        = var.rds_secret_id
-  rds_secret_arn       = var.rds_secret_arn
-  manage_secret_access = var.manage_secret_access
-  rds_host             = var.rds_host
-  rds_dbname           = var.rds_dbname
-
-  container_assume_role_arn = var.container_assume_role_arn
+  db_secret_id = var.db_secret_id
 
   # Keys use underscores; the runner converts them to --study-id, --abbreviation, etc.
   # Names must match SplitAllConceptsJob.expectations().

@@ -1,6 +1,7 @@
 # ETL Runners
 
-One directory per hpds-etl job that runs on an ephemeral EC2 runner. Each directory holds the
+One directory per hpds-etl job that runs on an ephemeral EC2 runner, plus `participant-db/`, the
+Postgres server those jobs share for the length of a pipeline run. Each runner directory holds the
 job's Jenkinsfile, its Terraform module call, and its pre-flight and post-run validation.
 
 Architecture, exit-code contract, AWS prerequisites, and the operations runbook are in
@@ -26,15 +27,21 @@ etl-runners/
 ├── run-job.sh                          Container entrypoint
 ├── common.mk                           Shared build/deploy/monitor targets
 ├── common/                             Shared shell libraries
-├── environments/                       Per-environment tfvars (integration.tfvars, staging.tfvars, ...)
+├── environments/                       Per-environment tfvars (development.tfvars)
+├── participant-db/                     SHARED: participant DB start/stop (docs/PARTICIPANT_DB.md)
 ├── participants-migration/             TEMPORARY (JobType.MIGRATION)
 ├── split-allconcepts/                  TEMPORARY (JobType.MIGRATION)
 ├── sstr-populate-rds-participants/     PERMANENT (JobType.PERMANENT)
-├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT)
 ├── generate-global-all-concepts/       PERMANENT (JobType.PERMANENT)
 ├── create-vcf-indexes/                 PERMANENT (JobType.PERMANENT)
-└── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone
+├── merge-allconcepts/                  PERMANENT (JobType.PERMANENT), no DB
+├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT), per study from /Jenkinsfile
+└── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone, no DB
 ```
+
+`participant-db/` is not a runner: it has `Jenkinsfile.start` / `Jenkinsfile.stop` (Jenkins jobs
+`participant-db-start` / `participant-db-stop`), one Terraform state per environment rather than
+per run, and no JAR. See [`docs/PARTICIPANT_DB.md`](../docs/PARTICIPANT_DB.md).
 
 ## Shared Components
 
@@ -45,6 +52,7 @@ etl-runners/
 | `common.mk`                 | Build, deploy, monitor, and teardown targets, included by each runner's `Makefile`.                                                     |
 | `common/lib.sh`             | Assertion helpers: `check`, `soft`, `fail`, `warn`, `note`, `summary`.                                                                  |
 | `common/monitor-runner.sh`  | Polls EC2 state and the `status.json` sentinel; exits with the job's own exit code.                                                     |
+| `common/require-db.sh`      | Run on the agent before provisioning a DB-backed runner: fails in seconds if the participant DB secret has no current value (DB down).   |
 | `common/validate-report.sh` | Assertions true of every `JobResult` report, independent of which job produced it.                                                      |
 
 Job parameters are passed as environment variables rather than an argv string so that the
@@ -59,7 +67,24 @@ generated EC2 user-data never has to quote a command line.
 | `preflight.sh` | Input-layout checks that run before any instance is provisioned.                           |
 | `validate.sh`  | Assertions over the JSON report after the run.                                             |
 | `terraform/`   | Module call, `<name>.tfvars`, `<name>.backend.tfvars`, outputs.                            |
-| `studies.tsv`  | SSTR only: the study manifest driving a full sweep.                                        |
+
+### Database access
+
+Six runners read or write the participant DB: `sstr-populate-rds-participants`,
+`participants-migration`, `split-allconcepts`, `generate-global-all-concepts`,
+`create-vcf-indexes`, `all-concepts-data-generator`. Their module call passes
+`db_secret_id = var.db_secret_id`, and their `Provision, run and monitor` stage calls
+`common/require-db.sh` first. `merge-allconcepts` and `generate-identity-consent-mapping` pass
+`db_secret_id = ""`: the runner skips the credential fetch and the job runs whether or not the
+database is up.
+
+### AWS identity
+
+Every runner, the participant DB, and the Jenkins agent run as `bdc-etl-jenkins-role`
+(`iam_role_name` in the environment file), in the same account as the data. No cross-account role
+is assumed. The one exception is `generate-identity-consent-mapping`, which assumes the NHLBI
+exchange role in-process (`ROLE_ARN` → `--role-arn`) for its input reads; its Init stage also
+writes an agent-side `nhlbi-exchange` profile for the pre-flight.
 
 ## Make Targets
 
@@ -104,7 +129,7 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `STATE_KEY`          | `tf_backend/etl-runners/hpds-etl/<name>/terraform.tfstate` | Terraform state key; set per run for concurrent builds                            |
 | `IMAGE_TAR`          | `hpds-etl-runner.tar.gz`                                   | Local tarball name, matched to `TF_VAR_image_tar`                                 |
 | `IMAGE_NAME`         | `hpds-etl-runner`                                          | Docker image name                                                                 |
-| `ENV`                | `integration`                                              | Target environment; selects `environments/<ENV>.tfvars`                            |
+| `ENV`                | `development`                                              | Target environment; selects `environments/<ENV>.tfvars`                           |
 | `SKIP_TESTS`         | `false`                                                    | Skip the JAR test suites in `make jar`                                            |
 | `REPORTS_DIR`        | `<runner>/reports`                                         | Where `fetch-reports` syncs to                                                    |
 | `AWS_REGION`         | from environment tfvars                                    | Region for AWS CLI calls                                                          |
@@ -125,88 +150,92 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `participants-migration`            | `TF_VAR_managed_inputs_uri`, `TF_VAR_data_folder_uri`, `TF_VAR_batch_size` |
 | `split-allconcepts`                 | `TF_VAR_study_id`, `TF_VAR_abbreviation`, `TF_VAR_input_uri`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri` |
 | `sstr-populate-rds-participants`    | `TF_VAR_study_id`, `TF_VAR_input_uri`, `TF_VAR_batch_size`                 |
+| `merge-allconcepts`                 | `TF_VAR_input_uri`, `TF_VAR_study_ids`                                     |
 | `all-concepts-data-generator`       | `TF_VAR_study_id`, `TF_VAR_data_dir`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri`, `TF_VAR_skip_analysis` |
 | `generate-global-all-concepts`      | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_allow_empty`     |
 | `create-vcf-indexes`                | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_include_processed` |
 | `generate-identity-consent-mapping` | `TF_VAR_base_uri`, `TF_VAR_dataset_prefix`, `TF_VAR_input_role_arn`, `TF_VAR_output_uri`, `TF_VAR_per_study` |
 
+Every runner also takes `TF_VAR_instance_type`, from its Jenkins `INSTANCE_TYPE` parameter.
+
+> **Never set a `TF_VAR`-driven variable in a runner's `.tfvars`.** Terraform gives `-var-file`
+> values precedence over `TF_VAR_*` environment variables, so a value in `<name>.tfvars` silently
+> overrides the Jenkins parameter. This is why `instance_type` lives only as a default in
+> `variables.tf`: until it was removed from the `.tfvars` files, no runner's `INSTANCE_TYPE`
+> parameter ever took effect.
+
 ### Validation Expectations
 
-Read by the SSTR `validate.sh`; supplied per study from `studies.tsv` via the Jenkins job.
+Read by the SSTR `validate.sh`; supplied as parameters of the `sstr-populate-rds-participants`
+Jenkins job (set them on a manual single-study run; the orchestrator does not pass them).
 
 | Variable                    | Description                                                    |
 |-----------------------------|----------------------------------------------------------------|
-| `EXPECTED_consent_codeS`    | Comma-separated `CONSENT` values the study must produce        |
+| `EXPECTED_CONSENT_CODES`    | Comma-separated `CONSENT` values the study must produce        |
 | `EXPECTED_MIN_PARTICIPANTS` | Floor on distinct participants; catches a truncated input file |
 
 ---
 
 ## Environments
 
-Infrastructure settings that are the same across all runners (region, VPC, subnet, security
-groups, RDS secret) live in `environments/<ENV>.tfvars`. Each runner's own `<name>.tfvars`
-holds only runner-specific settings (instance type, volume size, tags). `common.mk` loads
-both files: the environment file first, then the runner file, so a runner can override any
-shared value if needed.
+Infrastructure settings shared by every runner and the participant DB (account, region, VPC,
+subnet, security groups, instance role, DB secret name) live in `environments/<ENV>.tfvars`. Each
+runner's own `<name>.tfvars` holds only runner-specific settings (volume size, tags). `common.mk`
+loads both files: the environment file first, then the runner file.
 
-The default environment is `integration` (`ENV ?= integration` in `common.mk`). Every
+The default environment is `development` (`ENV ?= development` in `common.mk`). Every
 Jenkinsfile exposes `ENV` as a build parameter and sets it in the pipeline's environment
-block so `make` picks it up automatically.
+block so `make` picks it up automatically; the orchestrators pass it to every job they trigger.
 
 ### Current environments
 
-| Name          | File                               | Description                  |
-|---------------|------------------------------------|------------------------------|
-| `integration` | `environments/integration.tfvars`  | Integration/development      |
+| Name          | File                               | Account        |
+|---------------|------------------------------------|----------------|
+| `development` | `environments/development.tfvars`  | `515157839325` |
 
 ### Adding a new environment
 
-1. Copy `environments/integration.tfvars` to `environments/<name>.tfvars`.
+1. Copy `environments/development.tfvars` to `environments/<name>.tfvars`.
 
 2. Update the values for the new environment:
 
-   | Setting                  | What to change                                                |
-   |--------------------------|---------------------------------------------------------------|
-   | `subnet_id`              | A subnet in the target VPC with routes to RDS and S3          |
-   | `vpc_security_group_ids` | Security group(s) in the target VPC                           |
-   | `rds_secret_id`          | Secrets Manager secret holding the RDS credentials            |
-   | `rds_secret_arn`         | Full ARN of the same secret (for the IAM policy)              |
-   | `stack_s3_bucket`        | Deployment bucket for container images, logs, and reports     |
-   | `aws_region`             | Region (if different)                                         |
-   | `ami_owner_id`           | AMI owner (if using a custom AMI)                             |
-   | `ami_name_pattern`       | AMI name glob (if using a custom AMI)                         |
+   | Setting                  | What to change                                                       |
+   |--------------------------|----------------------------------------------------------------------|
+   | `aws_account_id`         | The target account; every provider refuses any other                 |
+   | `aws_region`             | Region (if different)                                                |
+   | `stack_s3_bucket`        | Bucket for container images, logs, reports, and Terraform state     |
+   | `iam_role_name`          | Instance profile role (and the agent's role) in that account         |
+   | `vpc_id` / `subnet_id`   | Target VPC; blank `subnet_id` uses its lowest-id subnet — pin it     |
+   | `vpc_security_group_ids` | Runner security group(s); the only sources allowed to reach the DB   |
+   | `db_secret_id`           | Name for the temporary participant DB secret (unique per environment) |
+   | `ami_owner_id` / `ami_name_pattern` | AMI (the DB needs Amazon Linux 2023 for its `postgresqlNN` packages) |
 
-   The RDS secret JSON must contain `host`, `port`, `dbname`, `username`, and `password`
-   (or a ready-made `url`/`jdbcUrl` field). An RDS-managed secret works unchanged.
+   Also check the bucket in each `terraform/*.backend.tfvars` and the backup bucket/prefix in
+   `participant-db/terraform/participant-db.tfvars` (dumps go under `<prefix>/<env>/backups/`).
 
-3. Add the new name to the `choices` list in every Jenkinsfile's `ENV` parameter. The files
-   to update:
+3. Add the new name to the `choices` list of the `ENV` parameter in every Jenkinsfile:
 
-   - `Jenkinsfile` (permanent orchestrator)
-   - `Jenkinsfile.migration` (migration orchestrator)
-   - `etl-runners/*/Jenkinsfile` (all six downstream runners)
+   - `Jenkinsfile` and `Jenkinsfile.migration` (orchestrators)
+   - `etl-runners/*/Jenkinsfile` (all eight runners)
+   - `etl-runners/participant-db/Jenkinsfile.start` and `Jenkinsfile.stop`
 
    ```groovy
-   choice(name: 'ENV', choices: ['integration', 'staging'],
+   choice(name: 'ENV', choices: ['development', '<name>'],
           description: 'Target environment.')
    ```
 
 4. Verify locally before the first Jenkins run:
 
    ```bash
-   cd etl-runners/participants-migration
-   make plan ENV=staging
+   make -C etl-runners/participants-migration init plan ENV=<name>
    ```
 
 ### Switching environments
 
-From Jenkins, select the environment in the build parameters dropdown. The orchestrator
-passes `ENV` to every downstream job it triggers.
-
-From the command line:
+From Jenkins, select the environment in the build parameters dropdown. From the command line:
 
 ```bash
-make -C etl-runners/participants-migration plan ENV=staging
+make -C etl-runners/participants-migration plan ENV=<name>
 ```
 
 ---
@@ -226,17 +255,20 @@ make -C etl-runners/participants-migration plan ENV=staging
 
 4. In `terraform/main.tf`, set `module_name` and `job_name` to the job's `name()`, and map
    `job_params` to the job's `expectations()` inputs. Keys use underscores; `run-job.sh` converts
-   them to `--kebab-case` flags.
+   them to `--kebab-case` flags. If the job never touches the database, set `db_secret_id = ""`
+   and remove the `require-db.sh` check from the Jenkinsfile's provision stage.
 
-5. Replace the per-run variables in `terraform/variables.tf` with the job's parameters.
+5. Replace the per-run variables in `terraform/variables.tf` with the job's parameters. Keep
+   anything Jenkins sets through `TF_VAR_*` out of `<name>.tfvars` (see the precedence note above).
 
 6. Rewrite `preflight.sh` and `validate.sh` for the job's inputs and metrics. Assert invariants
    rather than expected-looking numbers: check how the repository upserts before asserting a count
    is equal to anything, since `ON CONFLICT DO NOTHING` returns only newly inserted rows.
 
 7. Add a stage to the matching orchestrator — [`/Jenkinsfile`](../Jenkinsfile) for
-   `JobType.MIGRATION`, [`/Jenkinsfile.permanent`](../Jenkinsfile.permanent) for
-   `JobType.PERMANENT`.
+   `JobType.PERMANENT`, [`/Jenkinsfile.migration`](../Jenkinsfile.migration) for
+   `JobType.MIGRATION` — after `Start participant DB` if the job uses the database. Create the
+   Jenkins job inside the `hpds-etl` folder so the orchestrator's relative job name resolves.
 
 8. Enable the job in [`application.yml`](../src/main/resources/application.yml) under `etl.jobs`.
    Jobs are opt-in; without the flag `JobRegistry` never sees it.

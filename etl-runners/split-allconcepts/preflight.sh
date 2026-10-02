@@ -59,8 +59,8 @@ check "allConcepts input exists: $INPUT" uri_exists "$INPUT"
 # --- mapping CSV exists ------------------------------------------------------
 # The mapping CSV is uploaded by the orchestrator (MAPPING_UPLOAD_BASE) after
 # participants-migration completes; it does not exist yet when running
-# preflight-only, so this stays a soft check. This runs on the Jenkins agent
-# under the dbgap-etl profile, which can head-object the 73 bucket.
+# preflight-only, so this stays a soft check. Runs on the Jenkins agent as its
+# own role (bdc-etl-jenkins-role), which reads the data bucket directly.
 soft "mapping CSV exists (uploaded by the orchestrator after participants-migration): $MAPPING" uri_exists "$MAPPING"
 # --- output looks reasonable -------------------------------------------------
 if [[ "$OUTPUT" == s3://* ]]; then

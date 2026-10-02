@@ -6,9 +6,10 @@ spring:
     web-application-type: none
     banner-mode: "off"
   datasource:
-    url: ${RDS_URL:jdbc:postgresql://unset:5432/unset}
-    username: ${RDS_USERNAME:}
-    password: ${RDS_PASSWORD:}
+    # Supplied on a runner from the participant-db secret (see docs/PARTICIPANT_DB.md).
+    url: ${DB_URL:jdbc:postgresql://unset:5432/unset}
+    username: ${DB_USERNAME:}
+    password: ${DB_PASSWORD:}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
       schema: ${DB_SCHEMA:etl}
@@ -18,7 +19,8 @@ spring:
       initialization-fail-timeout: -1
   sql:
     init:
-      # Schema is owned/managed externally (Flyway/DBA). Never auto-run against RDS.
+      # Schema is created by participant-db-start (fresh database) or arrives with the restored
+      # dump. Never auto-run at application startup.
       mode: never
 
 etl:

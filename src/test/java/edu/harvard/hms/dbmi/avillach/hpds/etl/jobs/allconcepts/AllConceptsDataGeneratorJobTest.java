@@ -389,4 +389,48 @@ class AllConceptsDataGeneratorJobTest {
             }
         }
     }
+
+    @Test
+    void removes_own_file_for_consent_groups_that_produced_no_rows() {
+        setupStudyData();
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
+        // Only SUBJ001 (c1) has data this run, so c2 writes nothing.
+        setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\n");
+
+        String outputDir = tempDir.resolve("output").toString();
+        String studyDir = outputDir + "/" + STUDY_ID + "/";
+        // Last run left files in c1, c2, and c3 (a group the SSTR reload has since removed).
+        when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2", "c3", "notes"));
+        String staleC2 = studyDir + "c2/" + STUDY_ID + "_allConcepts_c2.csv";
+        String staleC3 = studyDir + "c3/" + STUDY_ID + "_allConcepts_c3.csv";
+        when(ioResolver.exists(staleC2)).thenReturn(true);
+        when(ioResolver.exists(staleC3)).thenReturn(true);
+
+        JobResult result = executor.run(job, params(outputDir), "test-stale");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        verify(ioResolver).delete(staleC2);
+        verify(ioResolver).delete(staleC3);
+        // The group written this run is overwritten, never deleted; non-consent folders are ignored.
+        verify(ioResolver, never()).delete(studyDir + "c1/" + STUDY_ID + "_allConcepts_c1.csv");
+        verify(ioResolver, never()).delete(startsWith(studyDir + "notes/"));
+        assertThat(result.getMetrics().get("staleFilesRemoved")).isEqualTo(List.of(staleC2, staleC3));
+    }
+
+    @Test
+    void stale_cleanup_leaves_other_sources_files_alone() {
+        setupStudyData();
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
+        setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\n");
+
+        String outputDir = tempDir.resolve("output").toString();
+        String studyDir = outputDir + "/" + STUDY_ID + "/";
+        // c2 holds only another source's file, not this job's.
+        when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2"));
+
+        JobResult result = executor.run(job, params(outputDir), "test-other-sources");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        verify(ioResolver, never()).delete(any());
+    }
 }

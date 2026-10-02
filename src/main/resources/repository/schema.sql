@@ -1,9 +1,9 @@
--- Reference schema for the three PIC-SURE HPDS identity tables on AWS RDS Postgres.
+-- Reference schema for the three PIC-SURE HPDS identity tables in the participant database.
 --
--- This file documents the target shape and is used to initialize the Postgres
--- Testcontainer during integration tests. In production the schema is owned and
--- migrated externally (spring.sql.init.mode=never) -- this file does NOT run
--- against RDS at application startup.
+-- Used to initialize the Postgres Testcontainer during integration tests, and by
+-- participant-db-start to create the `etl` schema when there is no dump to restore (see
+-- docs/PARTICIPANT_DB.md). It does NOT run at application startup
+-- (spring.sql.init.mode=never). Once a dump exists, the dump is the schema of record.
 
 -- Sequence shared by all three tables: every HPDS identity gets a unique integer.
 CREATE SEQUENCE IF NOT EXISTS hpds_id_seq AS BIGINT;

@@ -17,14 +17,26 @@ data "aws_ami" "etl_base" {
   }
 }
 
+# Blank subnet_id: launch in the lowest-id subnet of vpc_id, so an environment can name only
+# its VPC. Sorted so every run of every runner picks the same subnet.
+data "aws_subnets" "vpc" {
+  count = var.subnet_id == "" ? 1 : 0
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+}
+
 locals {
+  subnet_id = var.subnet_id != "" ? var.subnet_id : sort(data.aws_subnets.vpc[0].ids)[0]
+
   # Blank name_suffix keeps the historical resource names; a per-run suffix lets two
   # concurrent runs of the same job coexist (needed by the SSTR study sweep).
   suffix = var.name_suffix == "" ? "" : "-${var.name_suffix}"
 
   reports_prefix = var.reports_s3_prefix != "" ? var.reports_s3_prefix : "etl-runner/reports/${var.module_name}/${var.run_id}"
 
-  # Non-secret container environment, rendered as a docker --env-file. The RDS credentials
+  # Non-secret container environment, rendered as a docker --env-file. The database credentials
   # are appended to this file on the instance after being fetched from Secrets Manager, so
   # they never appear here, in Terraform state, or in the user-data blob.
   #
@@ -52,12 +64,9 @@ locals {
       run_id          = var.run_id
       image_name      = trimsuffix(trimsuffix(var.image_tar, ".gz"), ".tar")
       image_tar       = var.image_tar
-      rds_secret_id     = var.rds_secret_id
-      rds_host          = var.rds_host
-      rds_dbname        = var.rds_dbname
+      db_secret_id      = var.db_secret_id
       reports_prefix    = local.reports_prefix
       container_env_b64 = local.container_env_b64
-      container_assume_role_arn = var.container_assume_role_arn
     },
     var.user_data_template_vars
   )
@@ -79,23 +88,6 @@ resource "aws_iam_instance_profile" "etl_runner_profile" {
   tags = local.merged_tags
 }
 
-# Optional, off by default: see the manage_secret_access variable for why.
-resource "aws_iam_role_policy" "etl_runner_secret_access" {
-  count = var.manage_secret_access ? 1 : 0
-
-  name = "${var.module_name}-etl-secret-access${local.suffix}"
-  role = var.iam_role_name
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [var.rds_secret_arn]
-    }]
-  })
-}
-
 module "etl_runner" {
   source  = "terraform-aws-modules/ec2-instance/aws"
   version = "6.0.1"
@@ -103,7 +95,7 @@ module "etl_runner" {
   name                                 = "${var.module_name}-etl-runner${local.suffix}"
   ami                                  = data.aws_ami.etl_base.id
   instance_type                        = var.instance_type
-  subnet_id                            = var.subnet_id
+  subnet_id                            = local.subnet_id
   vpc_security_group_ids               = length(var.vpc_security_group_ids) > 0 ? var.vpc_security_group_ids : null
   iam_instance_profile                 = aws_iam_instance_profile.etl_runner_profile.name
   instance_initiated_shutdown_behavior = "terminate"
@@ -114,7 +106,7 @@ module "etl_runner" {
     http_endpoint = "enabled"
     http_tokens   = "required"
     # 2 hops so the container (a second network hop) can still reach IMDS for the
-    # instance-role credentials the AWS SDK inside the JAR uses to read s3:// inputs.
+    # instance-role credentials the AWS SDK inside the JAR uses for all S3 I/O.
     http_put_response_hop_limit = 2
   }
 

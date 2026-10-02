@@ -20,8 +20,8 @@
 # subject was already known.
 #
 # Usage: validate.sh <reports-dir> <run-id>
-# Environment (optional, from studies.tsv):
-#   EXPECTED_consent_codeS    comma-separated CONSENT values this study must produce
+# Environment (optional; the Jenkins job parameters of the same names):
+#   EXPECTED_CONSENT_CODES    comma-separated CONSENT values this study must produce
 #   EXPECTED_MIN_PARTICIPANTS  floor on distinct participants
 # Exit: 0 clean | 10 clean but with warnings | 1 failed | 64 usage
 set -uo pipefail
@@ -38,7 +38,7 @@ if [[ -z "$REPORTS" || -z "$RUN_ID" ]]; then
 fi
 
 REPORT="$REPORTS/sstr-populate-rds-participants-$RUN_ID.json"
-EXPECTED_GROUPS="${EXPECTED_consent_codeS:-}"
+EXPECTED_GROUPS="${EXPECTED_CONSENT_CODES:-}"
 EXPECTED_MIN="${EXPECTED_MIN_PARTICIPANTS:-}"
 
 echo "=========================================================="
@@ -112,7 +112,7 @@ if [[ -n "$EXPECTED_GROUPS" ]]; then
   check "consent groups are exactly the expected set (want: $want)" test "$got" = "$want"
   [[ "$got" != "$want" ]] && note "got: $got"
 else
-  note "no EXPECTED_consent_codeS declared for this study -- group membership is unverified"
+  note "no EXPECTED_CONSENT_CODES declared for this study -- group membership is unverified"
 fi
 
 if [[ -n "$EXPECTED_MIN" ]]; then

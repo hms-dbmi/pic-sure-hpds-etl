@@ -1,3 +1,15 @@
+> **Note (2026-10-02): the infrastructure has moved since these entries were written.**
+> The environment is now `development`, in account `515157839325`. Data lives at
+> `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/`, with the same layout as the old
+> `avillach-73-bdcatalyst-etl` bucket. The `dbgap-etl` (736265540791) cross-account role and
+> `jenkins-s3-role` are retired: every instance and the Jenkins agent run as
+> `bdc-etl-jenkins-role`, and no 73-account role is assumed. The NHLBI exchange role assume
+> (ALS-12727) remains. RDS is replaced by the per-run participant database, started and
+> stopped by each pipeline and persisted as pg_dumps in S3 (see
+> [PARTICIPANT_DB.md](PARTICIPANT_DB.md)). The Jenkins jobs live in the `hpds-etl` folder;
+> `generate-identity-consent-mapping` included, since that folder name has no space. Account
+> ids, buckets, roles and Jenkins locations below are as of their dates.
+
 # BAM Migration Pipeline — Handoff Notes (2026-08-31)
 
 Companion to the fix in this branch. Written for handback: everything here is
@@ -211,5 +223,12 @@ dataset `BDC-DMC-Harmonization-Examples-20260804`, 19 consent groups across
 8 studies, `identity_consent_mapping.csv` at the temp output prefix, and the
 Validate stage printing the row counts. UNSTABLE means identities spanning
 consent groups of one study — mapping still written; raise the count with the
-DMC. See also `docs/TEMP-ALS-12727-HANDBACK.md` (temporary, delete before
-merge) for the zero-context version of all of this.
+DMC.
+
+*(2026-10-02)* This verifying run never happened in the old account. Re-run it in
+`development`. The STS call now goes out under the default chain, which on a runner is the
+instance role `bdc-etl-jenkins-role`. That role must be trusted by
+`nih-nhlbi-TopMed-EC2Access-S3`, and the output default has moved to
+`s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/dmcharmonizedexamples/output/`, still
+temporary pending the ALS-12727 S3-vs-database decision. The temporary handback note
+(`docs/TEMP-ALS-12727-HANDBACK.md`) has been folded in here and deleted.

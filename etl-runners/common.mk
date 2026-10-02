@@ -35,8 +35,8 @@ LOCAL_TF       := $(LOCAL_TF_DIR)/terraform
 # Recursively expanded (=) so it picks up the local binary after ensure-terraform runs.
 TF = $(if $(wildcard $(LOCAL_TF)),$(LOCAL_TF),terraform)
 
-# Environment: switch with ENV=staging, ENV=production, etc.
-ENV         ?= integration
+# Environment: switch with ENV=<name> to load environments/<name>.tfvars.
+ENV         ?= development
 ENV_TFVARS  := $(abspath ../environments/$(ENV).tfvars)
 
 JAR         := $(REPO_ROOT)/target/hpds-etl.jar

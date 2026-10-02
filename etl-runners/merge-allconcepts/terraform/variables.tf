@@ -26,9 +26,27 @@ variable "instance_type" {
   description = "Instance type. The merge is I/O-bound (streaming S3 objects), not memory-bound."
 }
 
+variable "aws_account_id" {
+  type        = string
+  description = "Account the environment lives in; the provider refuses any other"
+}
+
+variable "vpc_id" {
+  type        = string
+  default     = ""
+  description = "VPC to launch in; its lowest-id subnet is used when subnet_id is blank"
+}
+
 variable "subnet_id" {
   type        = string
-  description = "Subnet to launch the runner in. Must have a route to S3."
+  default     = ""
+  description = "Subnet to launch the runner in. Must reach the participant DB and S3. Blank = looked up from vpc_id."
+}
+
+variable "iam_role_name" {
+  type        = string
+  default     = "bdc-etl-jenkins-role"
+  description = "Instance profile role; the job does all S3 and Secrets Manager work as this role"
 }
 
 variable "vpc_security_group_ids" {
@@ -43,33 +61,10 @@ variable "root_volume_size" {
   description = "Root EBS size in GiB."
 }
 
-variable "rds_secret_id" {
-  type        = string
-  description = "Secrets Manager id holding the RDS credentials"
-}
-
-variable "rds_secret_arn" {
+variable "db_secret_id" {
   type        = string
   default     = ""
-  description = "Secret ARN; only needed when manage_secret_access is true"
-}
-
-variable "manage_secret_access" {
-  type        = bool
-  default     = false
-  description = "Let this run attach a GetSecretValue policy to the instance role"
-}
-
-variable "rds_host" {
-  type        = string
-  default     = ""
-  description = "RDS endpoint hostname"
-}
-
-variable "rds_dbname" {
-  type        = string
-  default     = ""
-  description = "RDS database name"
+  description = "Participant DB secret (environments/<ENV>.tfvars). Unused: this job touches no database."
 }
 
 variable "tags" {
@@ -100,12 +95,6 @@ variable "study_ids" {
   type        = string
   default     = ""
   description = "--study-ids: comma-separated study ids to check. Blank discovers all."
-}
-
-variable "container_assume_role_arn" {
-  type        = string
-  default     = ""
-  description = "Cross-account IAM role ARN for the container to assume when accessing S3."
 }
 
 variable "image_tar" {

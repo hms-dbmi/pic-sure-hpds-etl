@@ -41,9 +41,16 @@ variable "instance_type" {
   description = "EC2 instance type."
 }
 
+variable "vpc_id" {
+  type        = string
+  default     = ""
+  description = "VPC to launch in. Only consulted when subnet_id is blank, to pick its lowest-id subnet."
+}
+
 variable "subnet_id" {
   type        = string
-  description = "Subnet to launch the instance in."
+  default     = ""
+  description = "Subnet to launch the instance in. Blank picks the lowest-id subnet of vpc_id (one of the two must be set)."
 }
 
 variable "vpc_security_group_ids" {
@@ -54,12 +61,13 @@ variable "vpc_security_group_ids" {
 
 variable "iam_role_name" {
   type        = string
-  default     = "jenkins-s3-role"
+  default     = "bdc-etl-jenkins-role"
   description = <<-EOT
     Pre-existing IAM role attached as the instance profile. This module does not create
-    the role. It must allow: s3 read on the container tarball, s3 write on the log and
-    report prefixes, secretsmanager:GetSecretValue on var.rds_secret_arn, ssm core, and
-    read on any bucket holding job input. See README for the policy.
+    the role. It is the only principal the job runs as: it must allow s3 read on the
+    container tarball, s3 write on the log and report prefixes, read/write on the data
+    bucket, and ssm core. GetSecretValue on the participant DB secret is granted by the
+    participant-db stack for as long as the database is up. See README for the policy.
   EOT
 }
 
@@ -120,42 +128,16 @@ variable "log_level" {
   description = "LOG_LEVEL for edu.harvard.hms.dbmi.avillach.hpds loggers."
 }
 
-variable "rds_secret_id" {
+variable "db_secret_id" {
   type        = string
+  default     = ""
   description = <<-EOT
-    Secrets Manager secret id/name holding the RDS credentials. The runner fetches it with
-    its instance profile at run time; the values never enter Terraform state, the Jenkins
-    console, or the EC2 user-data blob. Expected JSON keys: url (a full JDBC URL) or
-    host/port/dbname, plus username and password.
-  EOT
-}
-
-variable "rds_secret_arn" {
-  type        = string
-  default     = ""
-  description = "ARN of the RDS secret. Only needed when manage_secret_access is true."
-}
-
-variable "rds_host" {
-  type        = string
-  default     = ""
-  description = "RDS endpoint hostname. Used to build the JDBC URL when the secret contains only username/password."
-}
-
-variable "rds_dbname" {
-  type        = string
-  default     = ""
-  description = "RDS database name. Used to build the JDBC URL when the secret contains only username/password."
-}
-
-variable "manage_secret_access" {
-  type        = bool
-  default     = false
-  description = <<-EOT
-    When true, attaches an inline secretsmanager:GetSecretValue policy for rds_secret_arn
-    to var.iam_role_name. Defaults to false because that role is shared with other
-    pipelines and is normally managed outside this repo -- prefer granting the permission
-    once, centrally, over having each ETL run mutate a shared role.
+    Secrets Manager id/name of the participant database secret, written by participant-db-start
+    and deleted by participant-db-stop. The runner fetches it with its instance profile at run
+    time; the values never enter Terraform state, the Jenkins console, or the EC2 user-data
+    blob. Expected JSON keys: url (a full JDBC URL) or host/port/dbname, plus username and
+    password. Blank for jobs that never touch the database: the credential fetch is skipped,
+    so those jobs run whether or not the database is up.
   EOT
 }
 
@@ -165,17 +147,6 @@ variable "reports_s3_prefix" {
   description = <<-EOT
     S3 prefix (no bucket, no leading slash) the runner syncs the reports directory to.
     Defaults to etl-runner/reports/<module_name>/<run_id> when blank.
-  EOT
-}
-
-variable "container_assume_role_arn" {
-  type        = string
-  default     = ""
-  description = <<-EOT
-    When set, the runner writes an AWS CLI config that assumes this role using the
-    instance-profile credentials, mounts it into the container, and sets AWS_PROFILE.
-    Use this for cross-account access (e.g. reading inputs from a different account's
-    S3 bucket).
   EOT
 }
 

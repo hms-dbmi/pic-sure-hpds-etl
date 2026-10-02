@@ -52,22 +52,18 @@ pipeline {
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when accessing S3.')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/merge-allconcepts'
 
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_study_ids                 = "${params.STUDY_IDS.trim()}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -77,14 +73,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// prefix containing study/consent allConcepts folders.')
@@ -131,13 +119,11 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc})")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
                     }
                 }
             }

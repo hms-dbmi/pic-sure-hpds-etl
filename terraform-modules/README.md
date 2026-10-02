@@ -9,6 +9,10 @@ reusable unit — callers reference it via a relative `source` path.
 |----------------------------------------|--------------------------------------------------------------------------------------------------------|
 | [`etl-runner`](./etl-runner/README.md) | Self-terminating EC2 instance that runs one hpds-etl job and publishes its exit code and reports to S3 |
 
+The participant database is not a module here: it is a single stack with one state per
+environment, in [`etl-runners/participant-db/`](../etl-runners/participant-db) (see
+[docs/PARTICIPANT_DB.md](../docs/PARTICIPANT_DB.md)).
+
 ## Usage Convention
 
 Modules are called from a runner's `terraform/` directory using a relative path:

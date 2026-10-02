@@ -3,8 +3,18 @@
 //
 // Generates per-consent allConcepts CSV files for a single study. Reads decoded
 // data CSVs and a mapping file, resolves participant/consent associations from
-// the RDS database, runs data type analysis, and writes one
+// the participant database, runs data type analysis, and writes one
 // {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv per consent group.
+//
+// Triggered per unprocessed study by the permanent orchestrator's "Generate per-study
+// AllConcepts" stage (/Jenkinsfile), after that study's SSTR load; also runnable standalone
+// (with the participant DB up -- see docs/PARTICIPANT_DB.md).
+//
+// Output is overwritten in place, by design: OUTPUT is the shared split_allconcepts/ prefix
+// other sources also write into, and the bucket's S3 versioning keeps every previous version.
+// Pre-flight refuses an unversioned output bucket. A consent group that produces no rows this
+// run has this job's own file from an earlier run removed (a recoverable delete marker), so
+// merge-allconcepts never keeps merging stale rows; other sources' files are never touched.
 //
 // This job replaces the legacy "ETL - Generate DBGAP All Concepts with Data Type
 // Analyzer" Jenkins job, producing per-consent output rather than per-study.
@@ -14,7 +24,7 @@
 //   --data-dir     decoded data CSVs (local path or s3:// URI)
 //   --mapping      mapping CSV (local path or s3:// URI)
 //   --output       output directory for per-consent allConcepts files
-//   RDS credentials fetched on the runner from Secrets Manager by instance role
+//   participant DB credentials fetched on the runner from Secrets Manager by instance role
 //
 // Outputs
 //   {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv per consent group
@@ -45,8 +55,8 @@ pipeline {
                description: 'REQUIRED. --data-dir: S3 prefix or local path containing decoded data CSVs')
         string(name: 'MAPPING', defaultValue: '',
                description: 'REQUIRED. --mapping: S3 URI or local path to the mapping CSV')
-        string(name: 'OUTPUT', defaultValue: '',
-               description: 'REQUIRED. --output: where per-consent allConcepts files are written')
+        string(name: 'OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/split_allconcepts/',
+               description: '--output: the s3:// prefix the {study_id}/c{code}/ files are written under -- the shared split_allconcepts/ location merge-allconcepts reads. Must be s3:// on a versioned bucket.')
         booleanParam(name: 'SKIP_ANALYSIS', defaultValue: false,
                description: 'Skip data type re-analysis and use mapping types as-is')
         string(name: 'RUN_ID', defaultValue: '',
@@ -58,17 +68,16 @@ pipeline {
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
-               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
-        choice(name: 'ENV', choices: ['integration'],
+               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: every output is an overwrite of the same keys.')
+        booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
+               description: 'Validate the inputs and the output bucket, then stop without provisioning anything')
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/all-concepts-data-generator'
 
@@ -77,7 +86,6 @@ pipeline {
         TF_VAR_mapping_uri               = "${params.MAPPING.trim()}"
         TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
         TF_VAR_skip_analysis             = "${params.SKIP_ANALYSIS}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -87,14 +95,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     if (!params.STUDY_ID?.trim()) {
                         error('STUDY_ID is required: the dbGaP study id (phs######).')
@@ -105,8 +105,12 @@ EOF
                     if (!params.MAPPING?.trim()) {
                         error('MAPPING is required: the S3 URI or path to the mapping CSV.')
                     }
-                    if (!params.OUTPUT?.trim()) {
-                        error('OUTPUT is required: the output directory for allConcepts files.')
+                    if (!params.OUTPUT?.trim()?.startsWith('s3://')) {
+                        error("OUTPUT must be an s3:// URI, got '${params.OUTPUT}'. A local path resolves inside the " +
+                              'runner container and every allConcepts file would be destroyed with the instance.')
+                    }
+                    if (!(params.STUDY_ID.trim() ==~ /^phs\d{6}$/)) {
+                        error("STUDY_ID '${params.STUDY_ID}' must match phs###### (exactly 6 digits).")
                     }
 
                     def base = (params.RUN_ID?.trim())
@@ -114,7 +118,7 @@ EOF
                     env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
                     env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
 
-                    env.TF_VAR_name_suffix = "allconcepts-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
+                    env.TF_VAR_name_suffix = "allconcepts-${params.STUDY_ID.trim()}-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
                     env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
@@ -153,27 +157,33 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc})")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
                     }
                 }
             }
         }
 
         stage('Package runner image') {
+            when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
             }
         }
 
         stage('Provision, run and monitor') {
+            when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
 
@@ -181,7 +191,7 @@ EOF
                         env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
                                                               : "${env.BASE_RUN_ID}-r${attempt}"
                         env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                        env.TF_VAR_name_suffix = "allconcepts-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
+                        env.TF_VAR_name_suffix = "allconcepts-${params.STUDY_ID.trim()}-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
                         env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/all-concepts-data-generator/${env.EFFECTIVE_RUN_ID}.tfstate"
 
                         echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
@@ -214,7 +224,7 @@ EOF
                             1  : 'UNKNOWN (unclassified failure)',
                             2  : 'VALIDATION_FAILED (bad study-id or missing data)',
                             3  : 'DATA_ERROR (no concept rows, no consents/participants)',
-                            4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
+                            4  : 'INFRASTRUCTURE_ERROR (participant DB/S3/network)',
                             5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
                             124: 'TIMEOUT (runner did not finish in time)',
                         ].get(rc, "unmapped code ${rc}")
@@ -226,14 +236,14 @@ EOF
         }
 
         stage('Fetch reports') {
-            when { expression { env.TF_INITIALISED == 'true' } }
+            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
             steps {
                 sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
             }
         }
 
         stage('Validate') {
-            when { expression { env.TF_INITIALISED == 'true' } }
+            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
             steps {
                 script {
                     int rc = sh(returnStatus: true, script:
@@ -280,7 +290,7 @@ EOF
         }
         unstable {
             echo 'all-concepts-data-generator completed WITH WARNINGS. ' +
-                 'Check for unmapped patients in the report.'
+                 'Check for unmapped patients, or stale consent-group files removed, in the report.'
         }
         success {
             echo "allConcepts files generated for ${params.STUDY_ID} (run ${env.EFFECTIVE_RUN_ID})."

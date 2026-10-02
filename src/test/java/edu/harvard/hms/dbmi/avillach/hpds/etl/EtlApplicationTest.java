@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code etl.jobs.*.enabled}. {@link JobEnablementTest} covers toggling them.
  */
 @SpringBootTest
-// application.yml takes the datasource from RDS_URL/RDS_USERNAME/RDS_PASSWORD with no defaults, so
+// application.yml takes the datasource from DB_URL/DB_USERNAME/DB_PASSWORD with no defaults, so
 // a context that is not given them cannot build a DataSource. Nothing here connects -- Hikari is
 // lazy -- so a syntactically valid URL is enough.
 @TestPropertySource(properties = {

@@ -12,7 +12,7 @@
 #     presence means the run is over and every other artifact is already in S3
 #   - the instance always terminates -- normal completion, error, OOM kill, or spot reclaim
 #
-# xtrace is NOT enabled: this script handles RDS credentials, and `set -x` would echo them into the
+# xtrace is NOT enabled: this script handles database credentials, and `set -x` would echo them into the
 # log uploaded to S3.
 set -euo pipefail
 
@@ -108,38 +108,43 @@ systemctl enable --now amazon-ssm-agent
 # --------------------------------------------------------------------------
 PHASE=credentials
 JOB_EXIT=5
-say "Fetching RDS credentials from Secrets Manager (${rds_secret_id})"
 
 # Non-secret environment, rendered by Terraform. Decoded from base64 so no heredoc
 # delimiter or embedded newline in a job param value can inject into this file.
 { echo '${container_env_b64}' | base64 -d; printf '\n'; } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-SECRET_JSON=$(aws secretsmanager get-secret-value \
-  --secret-id "${rds_secret_id}" --region "${aws_region}" \
-  --query SecretString --output text)
+%{ if db_secret_id != "" ~}
+say "Fetching participant DB credentials from Secrets Manager (${db_secret_id})"
+
+# The secret exists only while the participant database is up: participant-db-start
+# creates it, participant-db-stop deletes it. Not found therefore means "database down".
+if ! SECRET_JSON=$(aws secretsmanager get-secret-value \
+    --secret-id "${db_secret_id}" --region "${aws_region}" \
+    --query SecretString --output text 2>/tmp/secret.err); then
+  say "ERROR: could not read ${db_secret_id}: $(cat /tmp/secret.err)"
+  say "  The participant database is probably not running -- run participant-db-start first."
+  exit 5
+fi
 
 say "Secret keys: $(printf '%s' "$SECRET_JSON" | jq -r 'keys | join(", ")' 2>/dev/null || echo '(not valid JSON)')"
 
-# Accept either a ready-made JDBC url or discrete host/port/dbname fields.
-# When the secret contains only username/password (e.g. an RDS-managed secret),
-# fall back to the rds_host and rds_dbname provided via Terraform variables.
+# Accept either a ready-made JDBC url or discrete host/port/dbname fields (what
+# participant-db-start writes).
 JQ_ERR=$(mktemp)
-RDS_URL=$(printf '%s' "$SECRET_JSON" | jq -r --arg tfhost '${rds_host}' --arg tfdb '${rds_dbname}' '
+DB_URL=$(printf '%s' "$SECRET_JSON" | jq -r '
   def nonempty: if (. // "") == "" then null else . end;
   if (.url | nonempty) then .url
   elif (.jdbcUrl | nonempty) then .jdbcUrl
   else "jdbc:postgresql://"
-    + ((.host | nonempty) // ($tfhost | nonempty) // error("no RDS host in secret or tfvars"))
+    + ((.host | nonempty) // error("no host in secret"))
     + ":" + (((.port | nonempty) // 5432) | tostring)
-    + "/" + (((.dbname | nonempty) // (.dbName | nonempty) // ($tfdb | nonempty)) // "hpds")
+    + "/" + (((.dbname | nonempty) // (.dbName | nonempty)) // error("no dbname in secret"))
   end' 2>"$JQ_ERR") || true
 
-if [[ ! "$RDS_URL" =~ ^jdbc: ]]; then
+if [[ ! "$DB_URL" =~ ^jdbc: ]]; then
   say "ERROR: secret yielded no JDBC url"
-  say "  tfhost='${rds_host}' tfdb='${rds_dbname}'"
   [[ -s "$JQ_ERR" ]] && say "  jq error: $(cat "$JQ_ERR")"
-  [[ -n "$RDS_URL" ]] && say "  jq output: $RDS_URL"
   rm -f "$JQ_ERR"
   exit 5
 fi
@@ -148,12 +153,15 @@ rm -f "$JQ_ERR"
 # Credentials go into --env-file, never -e: this keeps them out of the process table,
 # `docker inspect`, and any command echo.
 {
-  printf 'RDS_URL=%s\n' "$RDS_URL"
-  printf 'RDS_USERNAME=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.username')"
-  printf 'RDS_PASSWORD=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.password')"
+  printf 'DB_URL=%s\n' "$DB_URL"
+  printf 'DB_USERNAME=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.username')"
+  printf 'DB_PASSWORD=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.password')"
 } >> "$ENV_FILE"
-unset SECRET_JSON RDS_URL
-say "RDS credentials resolved"
+unset SECRET_JSON DB_URL
+say "Participant DB credentials resolved"
+%{ else ~}
+say "Job does not use the participant database; skipping credential fetch"
+%{ endif ~}
 
 # --------------------------------------------------------------------------
 PHASE=image
@@ -167,36 +175,10 @@ rm -f /tmp/image.tar.gz
 # --------------------------------------------------------------------------
 PHASE=job
 
-# Cross-account role assumption: write an AWS config profile that assumes the
-# target role using the EC2 instance-profile credentials as source.  The SDK
-# refreshes the STS session automatically, so long-running jobs never hit an
-# expired-token error.
-DOCKER_EXTRA_ARGS=()
-%{ if container_assume_role_arn != "" ~}
-say "Configuring cross-account role profile: ${container_assume_role_arn}"
-AWS_CFG_DIR=/tmp/aws-config
-mkdir -p "$AWS_CFG_DIR"
-cat > "$AWS_CFG_DIR/config" <<AWSCFG
-[profile etl-cross-account]
-role_arn = ${container_assume_role_arn}
-credential_source = Ec2InstanceMetadata
-role_session_name = etl-${run_id}
-region = ${aws_region}
-AWSCFG
-chmod 600 "$AWS_CFG_DIR/config"
-DOCKER_EXTRA_ARGS+=(-v "$AWS_CFG_DIR/config:/root/.aws/config:ro")
-{
-  printf 'AWS_PROFILE=etl-cross-account\n'
-  printf 'AWS_CONFIG_FILE=/root/.aws/config\n'
-} >> "$ENV_FILE"
-say "Cross-account profile configured (${container_assume_role_arn})"
-%{ endif ~}
-
 say "Running job ${job_name} (run ${run_id})"
 set +e
 docker run --rm \
   --env-file "$ENV_FILE" \
-  "$${DOCKER_EXTRA_ARGS[@]}" \
   -v "$REPORTS":/reports \
   "${image_name}"
 JOB_EXIT=$?

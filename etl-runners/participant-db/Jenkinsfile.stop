@@ -1,0 +1,125 @@
+// =============================================================================
+// SHARED -- participant-db-stop
+//
+// Takes the participant database down at the end of a pipeline run: pg_dumps it to S3 over SSM,
+// verifies the dump landed, and only then destroys the instance, its security group, its
+// instance profile, and the temporary Secrets Manager secret.
+//
+// PROMOTE_BACKUP decides whether the next participant-db-start restores this dump. The
+// orchestrators pass true only when the pipeline succeeded (SUCCESS or UNSTABLE); a failed run
+// is still dumped -- kept for inspection or a deliberate RESTORE_FROM -- but LATEST stays on the
+// last good dump.
+//
+// If the backup fails, the database is LEFT RUNNING and this job fails: destroying it would
+// lose every write since the last dump. Fix the cause and re-run this job.
+//
+// No database running is not an error: the job reports it and succeeds.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        disableConcurrentBuilds()
+        timeout(time: 3, unit: 'HOURS')
+    }
+
+    parameters {
+        booleanParam(name: 'PROMOTE_BACKUP', defaultValue: true,
+               description: 'Point backups/LATEST at this dump, so the next start restores it. Orchestrators pass false when the pipeline failed.')
+        booleanParam(name: 'SKIP_BACKUP', defaultValue: false,
+               description: 'DANGER: destroy WITHOUT dumping, discarding every write since the last dump. Only for a database known to hold nothing new (e.g. cleaning up after a failed start).')
+        string(name: 'BACKUP_TIMEOUT_SECONDS', defaultValue: '7200',
+               description: 'How long pg_dump + upload may take')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
+    }
+
+    environment {
+        ENV        = "${params.ENV ?: 'development'}"
+        AWS_REGION = 'us-east-1'
+        DB_DIR     = 'etl-runners/participant-db'
+        STATE_KEY  = "tf_backend/etl-runners/hpds-etl/participant-db/${params.ENV ?: 'development'}/terraform.tfstate"
+
+        // Unused by destroy, but declared without defaults in the stack.
+        TF_VAR_run_id = "stop-${env.BUILD_NUMBER}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                sh "make -C ${DB_DIR} init STATE_KEY=${STATE_KEY}"
+                script {
+                    env.DB_INSTANCE_ID = sh(returnStdout: true, script: """
+                        cd ${DB_DIR}
+                        TF=\$(make -s tf-path)
+                        if \$TF -chdir=terraform state list 2>/dev/null | grep -qx 'aws_instance.db'; then
+                            \$TF -chdir=terraform output -raw instance_id
+                        fi
+                    """).trim()
+                    env.HAS_STATE = sh(returnStdout: true, script: """
+                        cd ${DB_DIR}
+                        \$(make -s tf-path) -chdir=terraform state list 2>/dev/null | head -1
+                    """).trim() ? 'true' : 'false'
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}" +
+                        (params.SKIP_BACKUP ? ' (no backup)' : params.PROMOTE_BACKUP ? '' : ' (not promoted)')
+                    if (!env.DB_INSTANCE_ID) {
+                        echo "No participant database instance in '${env.ENV}' state." +
+                             (env.HAS_STATE == 'true' ? ' Leftover resources will be destroyed.' : ' Nothing to stop.')
+                    } else {
+                        echo "Participant database instance: ${env.DB_INSTANCE_ID}"
+                    }
+                }
+            }
+        }
+
+        stage('Back up') {
+            when { expression { env.DB_INSTANCE_ID && !params.SKIP_BACKUP } }
+            steps {
+                script {
+                    int rc = sh(returnStatus: true, script: """
+                        cd ${DB_DIR}
+                        TF=\$(make -s tf-path)
+                        ./backup-via-ssm.sh "${env.DB_INSTANCE_ID}" "${params.PROMOTE_BACKUP}" \
+                          "${params.BACKUP_TIMEOUT_SECONDS.trim()}" "\$(\$TF -chdir=terraform output -raw backup_s3_uri)"
+                    """)
+                    if (rc != 0) {
+                        env.BACKUP_FAILED = 'true'
+                        error('Backup failed. The participant database has been LEFT RUNNING so no data is lost. ' +
+                              'Fix the cause (see the output above) and re-run participant-db-stop.')
+                    }
+                }
+            }
+        }
+
+        stage('Tear down') {
+            when { expression { env.HAS_STATE == 'true' } }
+            steps {
+                script {
+                    if (params.SKIP_BACKUP && env.DB_INSTANCE_ID) {
+                        echo 'SKIP_BACKUP=true: destroying WITHOUT a dump.'
+                    }
+                }
+                sh "make -C ${DB_DIR} destroy STATE_KEY=${STATE_KEY}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Participant database in '${env.ENV}' is down" +
+                 (env.DB_INSTANCE_ID && !params.SKIP_BACKUP
+                     ? (params.PROMOTE_BACKUP ? '; its dump is the new LATEST.' : '; dumped, LATEST unchanged.')
+                     : '.')
+        }
+        failure {
+            echo(env.BACKUP_FAILED == 'true'
+                 ? 'participant-db-stop FAILED before destroying anything: the database is still up and holds the run\'s writes.'
+                 : "participant-db-stop FAILED at '${env.STAGE_NAME}'. If the backup completed, the dump is safe in S3; re-run to finish the teardown.")
+        }
+    }
+}

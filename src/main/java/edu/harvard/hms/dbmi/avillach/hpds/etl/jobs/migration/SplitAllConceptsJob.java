@@ -75,7 +75,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                                 "FHS"),
                         ParamSpec.required("input",
                                 "S3 URI of the study's allConcepts CSV",
-                                "s3://avillach-73-bdcatalyst-etl/fhs/completed/phs000123/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
+                                "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/fhs/completed/phs000123/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
                         ParamSpec.required("mapping",
                                 "S3 URI of the hpds_id_mapping.csv from participants-migration (columns: old_hpds_id, new_hpds_id, common_dbgap_id)",
                                 "s3://bucket/reports/phs000123_hpds_id_mapping.csv"),
