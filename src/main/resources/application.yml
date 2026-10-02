@@ -51,6 +51,9 @@ etl:
     create-vcf-indexes:
       enabled: ${ETL_JOB_CREATE_VCF_INDEXES_ENABLED:true}
 
+    merge-allconcepts:
+      enabled: ${ETL_JOB_MERGE_ALLCONCEPTS_ENABLED:true}
+
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:
       enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}

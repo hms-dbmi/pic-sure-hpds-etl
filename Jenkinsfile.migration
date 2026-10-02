@@ -67,6 +67,10 @@ pipeline {
                description: 'Jenkins job that runs the create-vcf-indexes runner')
         string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/vcf_indexes/',
                description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI reachable by CONTAINER_ASSUME_ROLE_ARN.')
+        string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
+               description: 'Jenkins job that runs the merge-allconcepts runner')
+        string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: '',
+               description: 'S3 prefix to scan for allConcepts files to merge. Blank defaults to SPLIT_OUTPUT (the merge job discovers nested study/consent folders recursively).')
         string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
                description: 'Cross-account IAM role ARN for containers to assume when reading S3 inputs from the 73 bucket. Passed to every downstream runner.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
@@ -458,6 +462,49 @@ EOF
                     } catch (err) {
                         echo "Could not copy artifacts for vcf-indexes (${err.message}); " +
                              "they remain on ${params.VCF_INDEXES_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
+
+        stage('Merge AllConcepts') {
+            steps {
+                script {
+                    echo 'Merging per-consent allConcepts files where needed...'
+
+                    def mergeInput = params.MERGE_ALLCONCEPTS_INPUT?.trim()
+                            ?: params.SPLIT_OUTPUT.trim()
+                    echo "merge input: ${mergeInput}"
+
+                    def mergeParams = [
+                        string(name: 'INPUT', value: mergeInput),
+                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
+                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
+                        string(name: 'ENV',    value: params.ENV),
+                        booleanParam(name: 'SKIP_TESTS', value: true),
+                    ]
+
+                    def downstream = build(
+                        job: params.MERGE_ALLCONCEPTS_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: mergeParams)
+
+                    if (downstream.result == 'FAILURE') {
+                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} failed")
+                    } else if (downstream.result == 'UNSTABLE') {
+                        unstable("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    }
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.MERGE_ALLCONCEPTS_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/merge-allconcepts',
+                            optional: true)
+                    } catch (err) {
+                        echo "Could not copy artifacts for merge-allconcepts (${err.message}); " +
+                             "they remain on ${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number}."
                     }
                 }
             }

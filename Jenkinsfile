@@ -63,6 +63,10 @@ pipeline {
                description: 'Jenkins job that runs the create-vcf-indexes runner')
         string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-etl/output/vcf-indexes/',
                description: 'Output location for vcfIndex.tsv and SampleIds.csv (local path or s3:// URI)')
+        string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
+               description: 'Jenkins job that runs the merge-allconcepts runner')
+        string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: 's3://avillach-etl/output/',
+               description: 'S3 prefix containing {study_id}/c{consent}/ folders to merge')
         choice(name: 'ENV', choices: ['integration'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for network, RDS, and account settings.')
     }
@@ -388,6 +392,45 @@ EOF
                     } catch (err) {
                         echo "Could not copy artifacts for vcf-indexes (${err.message}); " +
                              "they remain on ${params.VCF_INDEXES_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
+
+        stage('Merge AllConcepts') {
+            steps {
+                script {
+                    echo 'Merging per-consent allConcepts files where needed...'
+
+                    def mergeParams = [
+                        string(name: 'INPUT', value: params.MERGE_ALLCONCEPTS_INPUT),
+                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
+                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
+                        string(name: 'ENV',    value: params.ENV),
+                        booleanParam(name: 'SKIP_TESTS', value: true),
+                    ]
+
+                    def downstream = build(
+                        job: params.MERGE_ALLCONCEPTS_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: mergeParams)
+
+                    if (downstream.result == 'FAILURE') {
+                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} failed")
+                    } else if (downstream.result == 'UNSTABLE') {
+                        unstable("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    }
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.MERGE_ALLCONCEPTS_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/merge-allconcepts',
+                            optional: true)
+                    } catch (err) {
+                        echo "Could not copy artifacts for merge-allconcepts (${err.message}); " +
+                             "they remain on ${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number}."
                     }
                 }
             }

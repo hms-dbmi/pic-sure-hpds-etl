@@ -81,7 +81,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                                 "s3://bucket/reports/phs000123_hpds_id_mapping.csv"),
                         ParamSpec.required("output",
                                 "Output directory for split files (local path or s3:// URI). "
-                                        + "Structure: {output}/split_allconcepts/{study_id}/c{code}/{ABV}_allConcepts_c{code}.csv",
+                                        + "Structure: {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv",
                                 "./output")),
                 List.of("Per-consent allConcepts files with new hpds IDs replacing legacy hpds IDs"));
     }
@@ -184,7 +184,6 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 log.warn("Sample unmapped hpds ids (up to 10): {}", unmappedSample);
             }
 
-            String abvUpper = abbreviation.toUpperCase(Locale.ROOT);
             Map<String, String> outputPaths = new LinkedHashMap<>();
 
             for (Map.Entry<String, Path> entry : tmpByConsent.entrySet()) {
@@ -193,8 +192,8 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 String consentLabel = "c" + code;
 
                 String outputUri = joinPath(outputBase,
-                        "split_allconcepts", studyId, consentLabel,
-                        abvUpper + "_allConcepts_" + consentLabel + ".csv");
+                        studyId, consentLabel,
+                        studyId + "_allConcepts_" + consentLabel + ".csv");
 
                 io.writeOutputFile(outputUri, tmp);
                 log.info("Wrote {} row(s) ({} bytes) to {}", rowsPerConsent.get(code), Files.size(tmp), outputUri);
