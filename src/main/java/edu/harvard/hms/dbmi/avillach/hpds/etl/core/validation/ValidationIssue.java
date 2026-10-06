@@ -27,8 +27,16 @@ public record ValidationIssue(
         return new ValidationIssue(Severity.ERROR, code, message, location, Map.of());
     }
 
+    public static ValidationIssue error(String code, String message, String location, Map<String, Object> context) {
+        return new ValidationIssue(Severity.ERROR, code, message, location, Map.copyOf(context));
+    }
+
     public static ValidationIssue warning(String code, String message) {
         return new ValidationIssue(Severity.WARNING, code, message, null, Map.of());
+    }
+
+    public static ValidationIssue warning(String code, String message, Map<String, Object> context) {
+        return new ValidationIssue(Severity.WARNING, code, message, null, Map.copyOf(context));
     }
 
     public static ValidationIssue info(String code, String message) {

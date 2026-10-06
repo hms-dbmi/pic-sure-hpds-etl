@@ -56,11 +56,25 @@ public record ConceptMapping(
         }
     }
 
+    /** Mappings parsed from a mapping CSV, plus how many rows were dropped as unusable. */
+    public record Parsed(List<ConceptMapping> mappings, long droppedRows) {
+    }
+
     public static List<ConceptMapping> parse(InputStream in, DelimitedReader reader) {
+        return parseWithStats(in, reader).mappings();
+    }
+
+    /**
+     * Like {@link #parse}, but also counts the rows it drops: fewer than 4 columns, a key that is
+     * not {@code file:int}, or a blank root node.
+     */
+    public static Parsed parseWithStats(InputStream in, DelimitedReader reader) {
         List<ConceptMapping> mappings = new ArrayList<>();
+        long droppedRows = 0;
         try (Stream<List<String>> rows = reader.streamRows(in, DelimitedReader.COMMA)) {
             for (List<String> row : (Iterable<List<String>>) rows::iterator) {
                 if (row.size() < 4) {
+                    droppedRows++;
                     continue;
                 }
                 String key = row.get(0).replace("\"", "").trim();
@@ -70,6 +84,7 @@ public record ConceptMapping(
 
                 String[] keyParts = key.split(":");
                 if (keyParts.length != 2) {
+                    droppedRows++;
                     continue;
                 }
 
@@ -78,10 +93,12 @@ public record ConceptMapping(
                 try {
                     colIdx = Integer.parseInt(keyParts[1].trim());
                 } catch (NumberFormatException e) {
+                    droppedRows++;
                     continue;
                 }
 
                 if (rootNode.isEmpty()) {
+                    droppedRows++;
                     continue;
                 }
 
@@ -93,9 +110,9 @@ public record ConceptMapping(
             }
         }
         if (mappings.isEmpty()) {
-            throw new DataException("Mapping file produced no valid mappings");
+            throw new DataException("Mapping file produced no valid mappings (" + droppedRows + " row(s) dropped)");
         }
-        return mappings;
+        return new Parsed(mappings, droppedRows);
     }
 
     static String normalizeConceptPath(String path) {

@@ -94,4 +94,19 @@ class ConceptMappingTest {
 
         assertThat(mappings.get(0).dataType()).isEqualTo(ConceptMapping.DataType.TEXT);
     }
+
+    @Test
+    void counts_the_rows_it_drops() {
+        String csv = "\"file.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv\",\"µStudyµNoIndexµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:x\",\"µStudyµBadIndexµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:2\",\"\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:3\",\"µStudyµShortµ\"\n";
+
+        ConceptMapping.Parsed parsed = ConceptMapping.parseWithStats(
+                new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)), reader);
+
+        assertThat(parsed.mappings()).hasSize(1);
+        assertThat(parsed.droppedRows()).isEqualTo(4);
+    }
 }

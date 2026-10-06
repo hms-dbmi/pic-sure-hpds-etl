@@ -586,10 +586,6 @@ duration of the pipeline. Per-build image tarballs are removed from S3 in `post 
   copies them forward). Run each changed job once (`PREFLIGHT_ONLY=true` where available) after
   merging parameter changes — including the new `ENV = development` choice and the removal of
   `CONTAINER_ASSUME_ROLE_ARN`.
-- **Validation issue codes are inconsistently cased.** `consent_code_COUNT` does not follow the
-  `SCREAMING_SNAKE_CASE` convention the other codes use. Renaming it means changing the emitted
-  code in `SstrPopulateRdsParticipantsJob` and the matching `jq` filter in the SSTR `validate.sh`
-  together.
 
 ---
 

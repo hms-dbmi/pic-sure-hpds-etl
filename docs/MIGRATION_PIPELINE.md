@@ -135,7 +135,7 @@ seed dump of the legacy RDS database must be placed.
 |------|----------|-------------|
 | Managed inputs CSV | `--managed-inputs` | Study master list with readiness flags |
 | `GLOBAL_allConcepts_merged.csv` | `{DATA_FOLDER}/general/completed/` | Legacy file (headerless, all-quoted) with consent codes and abbreviations per legacy HPDS id |
-| `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{abv_lower}/` | Per-study mapping (headerless: id, abv, legacy HPDS id) |
+| `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{abv_lower}/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id) |
 | `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{abv_lower}/rawData/` | Per-study SSTR (optional; determines processing path). Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
 
 ### Flow

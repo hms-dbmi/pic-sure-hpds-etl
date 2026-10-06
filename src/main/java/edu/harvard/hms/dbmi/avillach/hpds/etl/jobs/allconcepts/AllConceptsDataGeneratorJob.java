@@ -100,13 +100,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                         "study-id must match phs###### (6 digits), got: " + studyId, "--study-id");
             }
         });
-        ctx.get("skip-analysis").ifPresent(v -> {
-            if (!JobContext.isBooleanLiteral(v)) {
-                report.error("BAD_SKIP_ANALYSIS",
-                        "skip-analysis must be " + JobContext.acceptedBooleanLiterals() + ", got: " + v,
-                        "--skip-analysis");
-            }
-        });
+        validateBooleanParam(ctx, report, "skip-analysis");
     }
 
     @Override
@@ -140,8 +134,10 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         log.info("Study {} has {} consent group(s) and {} participant(s)",
                 studyId, consents.size(), participants.size());
 
-        List<ConceptMapping> mappings = parseMappings(mappingUri);
-        log.info("Loaded {} mapping(s) from {}", mappings.size(), mappingUri);
+        ConceptMapping.Parsed parsed = parseMappings(mappingUri);
+        List<ConceptMapping> mappings = parsed.mappings();
+        log.info("Loaded {} mapping(s) from {} ({} row(s) dropped as unusable)",
+                mappings.size(), mappingUri, parsed.droppedRows());
 
         if (!skipAnalysis) {
             mappings = analyzeDataTypes(mappings, dataDir);
@@ -154,8 +150,9 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             mappingsByFile.computeIfAbsent(m.fileName(), k -> new ArrayList<>()).add(m);
         }
 
+        List<String> missingDataFiles = new ArrayList<>();
         List<FileResult> fileResults = processFilesInParallel(
-                mappingsByFile, dataDir, idBySourceId, consentById);
+                mappingsByFile, dataDir, idBySourceId, consentById, missingDataFiles);
 
         Map<String, AllConceptsCsvBuilder> buildersByConsent = new LinkedHashMap<>();
         for (Consent c : consents) {
@@ -164,11 +161,13 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
 
         long rowsProcessed = 0;
         long rowsSkipped = 0;
+        long malformedRows = 0;
         Set<String> unmappedPatients = new LinkedHashSet<>();
 
         for (FileResult fr : fileResults) {
             rowsProcessed += fr.rowsProcessed;
             rowsSkipped += fr.rowsSkipped;
+            malformedRows += fr.malformedRows;
             unmappedPatients.addAll(fr.unmappedPatients);
             for (Map.Entry<String, List<AllConceptsRow>> e : fr.rowsByConsent.entrySet()) {
                 AllConceptsCsvBuilder builder = buildersByConsent.get(e.getKey());
@@ -209,7 +208,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
 
         return new Output(studyId, consents.size(), participants.size(), mappings.size(),
                 rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles,
-                staleFilesRemoved);
+                staleFilesRemoved, parsed.droppedRows(), malformedRows, missingDataFiles);
     }
 
     static String outputFileFor(String outputDir, String studyId, String consentLabel) {
@@ -264,7 +263,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             Map<String, List<ConceptMapping>> mappingsByFile,
             String dataDir,
             Map<String, Long> idBySourceId,
-            Map<Long, Consent> consentById) {
+            Map<Long, Consent> consentById,
+            List<String> missingDataFiles) {
 
         List<FileResult> results = new ArrayList<>();
 
@@ -279,6 +279,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 if (!io.exists(fileUri)) {
                     log.warn("Data file {} does not exist; skipping {} mapping(s)",
                             fileUri, fileMappings.size());
+                    missingDataFiles.add(fileUri);
                     continue;
                 }
 
@@ -312,6 +313,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         Set<String> unmappedPatients = new LinkedHashSet<>();
         long rowsProcessed = 0;
         long rowsSkipped = 0;
+        long malformedRows = 0;
 
         InputStream in = io.openInput(fileUri);
         try (Stream<List<String>> rows = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
@@ -322,6 +324,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                     continue;
                 }
                 if (row.size() != headers.size()) {
+                    malformedRows++;
                     continue;
                 }
 
@@ -362,13 +365,17 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             }
         }
 
+        if (malformedRows > 0) {
+            log.warn("File {}: {} row(s) had a column count different from the header and were skipped",
+                    fileUri, malformedRows);
+        }
         log.info("File {} produced {} row(s), skipped {}", fileUri, rowsProcessed, rowsSkipped);
-        return new FileResult(rowsByConsent, rowsProcessed, rowsSkipped, unmappedPatients);
+        return new FileResult(rowsByConsent, rowsProcessed, rowsSkipped, malformedRows, unmappedPatients);
     }
 
-    private List<ConceptMapping> parseMappings(String mappingUri) {
+    private ConceptMapping.Parsed parseMappings(String mappingUri) {
         InputStream in = io.openInput(mappingUri);
-        return ConceptMapping.parse(in, delimitedReader);
+        return ConceptMapping.parseWithStats(in, delimitedReader);
     }
 
     List<ConceptMapping> analyzeDataTypes(List<ConceptMapping> mappings, String dataDir) {
@@ -453,9 +460,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
 
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
-        if (output.rowsProcessed() == 0) {
-            report.error("EMPTY_OUTPUT", "No concept rows were generated");
-        }
+        // rowsProcessed == 0 never gets here: execute() throws before writing or removing any file.
         if (output.unmappedPatientCount() > 0) {
             report.warning("UNMAPPED_PATIENTS",
                     output.unmappedPatientCount() + " patient(s) in data files could not be resolved "
@@ -466,6 +471,22 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         output.staleFilesRemoved().forEach(file ->
                 report.warning("STALE_OUTPUT_REMOVED",
                         "removed " + file + ": its consent group produced no rows this run"));
+        // INFO rather than WARNING: a missing data file is tolerated by design (the mapping may name
+        // files a study's decoded data does not include), but it should still be visible.
+        output.missingDataFiles().forEach(file ->
+                report.info("MISSING_DATA_FILE",
+                        file + " is named in the mapping but does not exist; its concepts were not generated"));
+        if (output.malformedRows() > 0) {
+            report.warning("MALFORMED_ROWS", output.malformedRows()
+                    + " data row(s) had a column count different from their file's header and were skipped");
+        }
+        // INFO rather than WARNING: a mapping file may deliberately leave a column's root node blank
+        // to exclude it, so dropped rows are not by themselves a sign of lost data.
+        if (output.mappingRowsDropped() > 0) {
+            report.info("DROPPED_MAPPING_ROWS", output.mappingRowsDropped()
+                    + " mapping row(s) were unusable (fewer than 4 columns, a key not 'file:int', "
+                    + "or a blank root node) and were ignored");
+        }
     }
 
     @Override
@@ -479,7 +500,10 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 .metric("unmappedPatients", output.unmappedPatientCount())
                 .metric("rowsPerConsent", output.rowsPerConsent())
                 .metric("outputFiles", output.outputFiles())
-                .metric("staleFilesRemoved", output.staleFilesRemoved());
+                .metric("staleFilesRemoved", output.staleFilesRemoved())
+                .metric("mappingRowsDropped", output.mappingRowsDropped())
+                .metric("malformedRows", output.malformedRows())
+                .metric("missingDataFiles", output.missingDataFiles());
     }
 
     public record Output(
@@ -492,7 +516,10 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             int unmappedPatientCount,
             Map<String, Long> rowsPerConsent,
             List<String> outputFiles,
-            List<String> staleFilesRemoved
+            List<String> staleFilesRemoved,
+            long mappingRowsDropped,
+            long malformedRows,
+            List<String> missingDataFiles
     ) {
     }
 
@@ -500,6 +527,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             Map<String, List<AllConceptsRow>> rowsByConsent,
             long rowsProcessed,
             long rowsSkipped,
+            long malformedRows,
             Set<String> unmappedPatients
     ) {}
 

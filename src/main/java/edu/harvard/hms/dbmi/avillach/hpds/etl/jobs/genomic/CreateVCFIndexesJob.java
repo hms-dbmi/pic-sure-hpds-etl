@@ -84,6 +84,11 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
+        validateBooleanParam(ctx, report, "include-processed");
+        if (report.hasErrors()) {
+            // includeProcessed() below would throw on the same bad value.
+            return;
+        }
         List<ManagedInputRow> rows = managedInputsService.read();
         boolean includeProcessed = includeProcessed(ctx);
         long genomicCount = rows.stream()
@@ -100,7 +105,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
     }
 
     private static boolean includeProcessed(JobContext ctx) {
-        return Boolean.parseBoolean(ctx.get("include-processed", "false"));
+        return ctx.getBoolean("include-processed", false);
     }
 
     @Override
@@ -171,11 +176,17 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
                         .map(s -> String.valueOf(s.hpdsId()))
                         .collect(Collectors.joining(","));
 
-                long sampleIdCount = sampleIds.chars().filter(c -> c == ',').count() + 1;
-                long patientIdCount = patientIds.chars().filter(c -> c == ',').count() + 1;
-                if (sampleIdCount != patientIdCount) {
-                    idCountMismatches.add(consentGroup + ": " + sampleIdCount + " sample_ids vs " + patientIdCount + " patient_ids");
-                    log.error("Count mismatch in {}: {} sample_ids vs {} patient_ids", consentGroup, sampleIdCount, patientIdCount);
+                // Both columns are built from the same samples, one entry each, so they can only fall
+                // out of step when a sample id contains the list or column separator itself.
+                List<String> badSampleIds = nwdSamples.stream()
+                        .map(Sample::sourceSampleId)
+                        .filter(id -> id.indexOf(',') >= 0 || id.indexOf('\t') >= 0 || id.indexOf('\n') >= 0)
+                        .toList();
+                if (!badSampleIds.isEmpty()) {
+                    idCountMismatches.add(consentGroup + ": " + badSampleIds.size()
+                            + " sample id(s) contain a comma, tab, or newline: " + badSampleIds.stream().limit(10).toList());
+                    log.error("{}: sample id(s) contain a separator, so sample_ids and patient_ids would not line up: {}",
+                            consentGroup, badSampleIds);
                 }
 
                 String vcfIndex = buildVcfIndex(consentGroup, sampleIds, patientIds);
@@ -247,12 +258,18 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
         if (output.outputFiles().isEmpty()) {
             if (output.studiesProcessed() == 0) {
-                // Nothing genomic to process (already flagged as NO_GENOMIC_STUDIES or
-                // SKIPPED_STUDY): an empty output is consistent, not a failure.
+                // Nothing genomic to process (already flagged as NO_GENOMIC_STUDIES): an empty
+                // output is consistent, not a failure.
                 report.warning("NO_FILES_WRITTEN",
                         "No VCF index files were written (no genomic studies were processed)");
             } else {
-                report.error("NO_FILES_WRITTEN", "No VCF index files were written");
+                // Genomic studies were selected but none produced an index: each was skipped for
+                // missing consents/samples (SKIPPED_STUDY) or had no NWD samples. A genomic study
+                // with nothing to index points at an incomplete load, so this stays a failure.
+                report.error("NO_FILES_WRITTEN", "No VCF index files were written although "
+                        + output.studiesProcessed() + " genomic study(ies) were selected ("
+                        + output.skippedStudies().size() + " skipped for missing consents or samples; "
+                        + "the rest had no NWD samples)");
             }
         }
         for (String studyId : output.skippedStudies()) {
@@ -261,7 +278,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         }
         for (String mismatch : output.idCountMismatches()) {
             report.error("ID_COUNT_MISMATCH",
-                    "sample_ids and patient_ids column counts differ: " + mismatch);
+                    "sample_ids and patient_ids would not line up: " + mismatch);
         }
     }
 

@@ -259,7 +259,7 @@ class SplitAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getInputValidation().getIssues())
-                .anyMatch(i -> i.code().equals("INVALID_STUDY_ID"));
+                .anyMatch(i -> i.code().equals("BAD_STUDY_ID"));
     }
 
     @Test
@@ -393,5 +393,36 @@ class SplitAllConceptsJobTest {
         Path path = tempDir.resolve("allconcepts_" + System.nanoTime() + ".csv");
         Files.writeString(path, String.join("\n", rows) + "\n");
         return path;
+    }
+
+    @Test
+    void counts_malformed_rows_and_attaches_the_unmapped_sample() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs000777";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µtestµ\",\"\",\"mapped\",\"0\"",
+                "\"999\",\"µtestµ\",\"\",\"unmapped\",\"0\"",
+                "\"100\",\"µtestµ\",\"\",\"short\"",
+                "\"\",\"µtestµ\",\"\",\"blank id\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "TST",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", tempDir.resolve("output").toString()), "test-malformed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics()).containsEntry("malformedRows", 2L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MALFORMED_ROWS") && i.message().startsWith("2 row(s)"))
+                .anyMatch(i -> i.code().equals("UNMAPPED_IDS")
+                        && i.context().get("firstOldHpdsIds").equals(List.of("999"))
+                        && i.context().get("count").equals(1L));
     }
 }

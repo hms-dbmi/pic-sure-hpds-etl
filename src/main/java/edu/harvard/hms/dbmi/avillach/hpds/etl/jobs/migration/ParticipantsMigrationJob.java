@@ -14,6 +14,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.BatchOps;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
@@ -64,7 +65,7 @@ import java.util.stream.Stream;
  *             SSTR export (tab-delimited; matched case-insensitively, including the legacy
  *             folder-flattened {@code SSTR__sstr_*} and {@code BDC-ingestion-only__sstr_*}
  *             names; the canonical lowercase name is preferred when several exist)</li>
- *         <li>{@code {base}/{abv_lowercase}/{ABV_UPPERCASE}_PatientMapping.v2.csv} — per-study
+ *         <li>{@code {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv} — per-study
  *             patient mapping (headerless; columns: id, abv, legacy hpds id)</li>
  *       </ul>
  *       All files are staged (copied) into a local temporary directory organized by study id
@@ -176,7 +177,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                 "Base URI whose subfolders hold per-study data: "
                                         + "{base}/general/completed/GLOBAL_allConcepts_merged.csv, "
                                         + "{base}/{abv_lower}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
-                                        + "{base}/{abv_lower}/{ABV_UPPER}_PatientMapping.v2.csv "
+                                        + "{base}/{abv_lower}/data/{ABV_UPPER}_PatientMapping.v2.csv "
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
                         ParamSpec.optional("batch-size", "Rows per batch insert", "1000"),
@@ -659,12 +660,23 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 // to bring the run back UNSTABLE rather than clean.
                 if (!result.skippedHpdsIdsWithNoConsent().isEmpty()) {
                     List<String> sample = result.skippedHpdsIdsWithNoConsent().stream().limit(10).toList();
-                    report.warning("SUBJECTS_WITHOUT_CONSENT", result.studyId() + ": "
-                            + result.skippedHpdsIdsWithNoConsent().size() + " subject(s) had no entry in "
-                            + ALL_CONCEPTS_FILE_NAME + " and were NOT migrated. First: " + sample);
+                    // The two paths lose subjects for different reasons: the sstr path cannot find the
+                    // patient-mapping id in the sstr file (or no participant was created for it); the
+                    // direct path finds no consent for the legacy hpds id in the global allConcepts file.
+                    String reason = result.usedSstr()
+                            ? "could not be resolved via the sstr file"
+                            : "had no consent entry in " + ALL_CONCEPTS_FILE_NAME;
+                    report.add(ValidationIssue.warning("SUBJECTS_WITHOUT_CONSENT", result.studyId() + ": "
+                                    + result.skippedHpdsIdsWithNoConsent().size() + " subject(s) " + reason
+                                    + " and were NOT migrated. First: " + sample,
+                            Map.of("studyId", result.studyId(),
+                                    "path", result.usedSstr() ? "sstr" : "direct",
+                                    "count", (long) result.skippedHpdsIdsWithNoConsent().size(),
+                                    "firstOldHpdsIds", sample)));
                 }
             } else {
-                report.error("STUDY_FAILED", result.studyId() + ": " + result.errorMessage());
+                report.add(ValidationIssue.error("STUDY_FAILED", result.studyId() + ": " + result.errorMessage(),
+                        null, Map.of("studyId", result.studyId())));
             }
         }
 

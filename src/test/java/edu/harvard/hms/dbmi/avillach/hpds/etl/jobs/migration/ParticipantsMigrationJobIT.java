@@ -17,6 +17,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -199,6 +200,41 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         assertThat(mapping).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n1001," + newHpdsId + ",phs001412.v1.p1.c1\n");
     }
 
+    /**
+     * On the sstr path a subject is lost because its patient-mapping id is not in the sstr file, not
+     * because GLOBAL_allConcepts_merged.csv lacks its consent; the warning must say which.
+     */
+    @Test
+    void sstr_study_reports_ids_missing_from_the_sstr_file_as_such() throws IOException {
+        managedInputs("GRU,phs001412,Yes");
+        String base = baseUri(Map.of(
+                "general/completed/GLOBAL_allConcepts_merged.csv", "",
+                "gru/rawData/sstr_phs001412.v1.txt", """
+                SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
+                SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
+                """,
+                "gru/data/GRU_PatientMapping.v2.csv",
+                "phs001412.v1.p1.c1,GRU,1001\n" + "NOT_IN_SSTR,GRU,1002\n"));
+
+        JobResult result = executor.run(job,
+                Map.of("data-folder", base), "it-sstr-unresolved");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 1L);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.message()).contains("could not be resolved via the sstr file")
+                            .doesNotContain("GLOBAL_allConcepts_merged.csv");
+                    assertThat(i.context())
+                            .containsEntry("studyId", "phs001412")
+                            .containsEntry("path", "sstr")
+                            .containsEntry("count", 1L)
+                            .containsEntry("firstOldHpdsIds", List.of("1002"));
+                });
+    }
+
     @Test
     void non_sstr_study_populates_directly_with_abbreviation_from_all_concepts() throws IOException {
         managedInputs("OTHER,other-study-01,Yes");
@@ -264,6 +300,17 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
         String unmatched = Files.readString(reportsDir.resolve("MIXED_unmatched_mappings.csv"));
         assertThat(unmatched).isEqualTo("id,old_hpds_id\nSUBJ2,9999\nSUBJ3,8888\n");
+
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.message()).contains("had no consent entry in GLOBAL_allConcepts_merged.csv");
+                    assertThat(i.context())
+                            .containsEntry("path", "direct")
+                            .containsEntry("count", 2L)
+                            .containsEntry("firstOldHpdsIds", List.of("9999", "8888"));
+                });
     }
 
     @Test

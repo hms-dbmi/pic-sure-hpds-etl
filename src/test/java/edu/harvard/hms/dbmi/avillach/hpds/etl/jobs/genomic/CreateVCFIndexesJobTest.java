@@ -413,4 +413,36 @@ class CreateVCFIndexesJobTest {
             }
         }
     }
+
+    @Test
+    void rejects_a_misspelt_include_processed_flag_instead_of_reading_it_as_false() {
+        when(managedInputsService.read()).thenReturn(List.of(processedGenomicStudy("TST", "phs000555")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job,
+                Map.of("output", outputPath, "include-processed", "ture"), "test-bad-include-processed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("BAD_BOOLEAN") && "--include-processed".equals(i.location()));
+    }
+
+    @Test
+    void flags_a_sample_id_containing_a_separator() {
+        String studyId = "phs000666";
+        when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(1L, studyId, "1", "GRU"),
+                new Consent(2L, studyId, "1", "GRU")));
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Sample(1L, "NWD000001", "submitted"),
+                new Sample(2L, "NWD000002,NWD000003", "submitted")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-separator-in-sample-id");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("ID_COUNT_MISMATCH") && i.message().contains("NWD000002,NWD000003"));
+    }
 }

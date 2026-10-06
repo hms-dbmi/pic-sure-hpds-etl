@@ -78,6 +78,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
+        validateBooleanParam(ctx, report, "allow-empty");
         List<ManagedInputRow> rows = managedInputsService.read();
         long readyCount = rows.stream().filter(ManagedInputRow::isReady).count();
         if (readyCount == 0) {

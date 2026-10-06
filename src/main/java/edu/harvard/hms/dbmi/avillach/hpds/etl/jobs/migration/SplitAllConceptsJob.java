@@ -10,6 +10,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
@@ -90,13 +91,11 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
     protected void validateInput(JobContext ctx, ValidationReport report) {
         String studyId = ctx.require("study-id");
         if (!studyId.matches("^phs\\d{6}$")) {
-            report.error("INVALID_STUDY_ID",
+            report.error("BAD_STUDY_ID",
                     "study-id must match phs###### (exactly 6 digits), got: " + studyId, "--study-id");
         }
-        String abbreviation = ctx.require("abbreviation");
-        if (abbreviation.isBlank()) {
-            report.error("BLANK_ABBREVIATION", "abbreviation must not be blank", "--abbreviation");
-        }
+        // A blank --abbreviation needs no check here: JobContext treats blank as absent, so it
+        // already fails MISSING_PARAM.
     }
 
     @Override
@@ -128,6 +127,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         long totalRows = 0;
         long unmappedIds = 0;
         long noConsentRows = 0;
+        long malformedRows = 0;
         List<String> unmappedSample = new ArrayList<>();
 
         try {
@@ -135,12 +135,14 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             try (Stream<List<String>> rows = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
                 for (List<String> row : (Iterable<List<String>>) rows::iterator) {
                     if (row.size() < 5) {
+                        malformedRows++;
                         continue;
                     }
                     totalRows++;
 
                     String oldHpdsId = Strings.trimToNull(row.get(0));
                     if (oldHpdsId == null) {
+                        malformedRows++;
                         continue;
                     }
 
@@ -176,9 +178,10 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 writer.close();
             }
 
-            log.info("Read {} row(s): {} mapped to consents, {} unmapped id(s), {} no-consent row(s)",
+            log.info("Read {} row(s): {} mapped to consents, {} unmapped id(s), {} no-consent row(s), "
+                            + "{} malformed row(s)",
                     totalRows, rowsPerConsent.values().stream().mapToLong(Long::longValue).sum(),
-                    unmappedIds, noConsentRows);
+                    unmappedIds, noConsentRows, malformedRows);
 
             if (!unmappedSample.isEmpty()) {
                 log.warn("Sample unmapped hpds ids (up to 10): {}", unmappedSample);
@@ -200,8 +203,8 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 outputPaths.put(code, outputUri);
             }
 
-            return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows,
-                    rowsPerConsent, outputPaths);
+            return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows, malformedRows,
+                    List.copyOf(unmappedSample), rowsPerConsent, outputPaths);
         } catch (IOException e) {
             throw new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException(
                     "Failed spooling split output for study " + studyId, e);
@@ -279,9 +282,16 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         }
         if (output.unmappedIds() > 0) {
             double pct = 100.0 * output.unmappedIds() / Math.max(output.totalRows(), 1);
-            report.warning("UNMAPPED_IDS",
+            report.add(ValidationIssue.warning("UNMAPPED_IDS",
                     output.unmappedIds() + " row(s) (" + String.format("%.1f%%", pct)
-                            + ") had hpds IDs not found in the mapping CSV");
+                            + ") had hpds IDs not found in the mapping CSV. First: " + output.unmappedSample(),
+                    Map.of("count", output.unmappedIds(),
+                            "percent", Math.round(pct * 10) / 10.0,
+                            "firstOldHpdsIds", output.unmappedSample())));
+        }
+        if (output.malformedRows() > 0) {
+            report.warning("MALFORMED_ROWS", output.malformedRows()
+                    + " row(s) had fewer than 5 columns or a blank hpds id and were skipped");
         }
         if (output.noConsentRows() > 0) {
             report.warning("NO_CONSENT",
@@ -298,6 +308,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 .metric("totalRows", output.totalRows())
                 .metric("unmappedIds", output.unmappedIds())
                 .metric("noConsentRows", output.noConsentRows())
+                .metric("malformedRows", output.malformedRows())
                 .metric("rowsPerConsent", output.rowsPerConsent())
                 .metric("outputPaths", output.outputPaths());
     }
@@ -308,6 +319,8 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             long totalRows,
             long unmappedIds,
             long noConsentRows,
+            long malformedRows,
+            List<String> unmappedSample,
             Map<String, Long> rowsPerConsent,
             Map<String, String> outputPaths
     ) {

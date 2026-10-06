@@ -149,16 +149,7 @@ public class SingleConsentDataPopulateRdsParticipantsJob
                         "--consent-type");
             }
         });
-        // Checked here as well as in JobContext.getBoolean so a misspelt flag is reported in the
-        // JSON report before any work starts, naming the offending value.
-        ctx.get("subject-id-is-sample-id").ifPresent(raw -> {
-            if (!JobContext.isBooleanLiteral(raw)) {
-                report.error("BAD_BOOLEAN",
-                        "subject-id-is-sample-id must be " + JobContext.acceptedBooleanLiterals()
-                                + ", got: '" + raw + "'. It was NOT interpreted as false.",
-                        "--subject-id-is-sample-id");
-            }
-        });
+        validateBooleanParam(ctx, report, "subject-id-is-sample-id");
         ctx.get("batch-size").ifPresent(bs -> {
             try {
                 if (Integer.parseInt(bs) <= 0) {
@@ -196,10 +187,9 @@ public class SingleConsentDataPopulateRdsParticipantsJob
             }
         }
 
-        // Guard the purge below. validateOutput's EMPTY_INPUT check runs after execute() returns,
-        // by which point this transaction has committed -- so a header-only or truncated file
-        // would delete the study's consents, repopulate nothing, and still report exit 2.
-        // Throwing here rolls the transaction back instead.
+        // Guard the purge below. A check in validateOutput would run after execute() returns, by
+        // which point this transaction has committed -- so a header-only or truncated file would
+        // already have deleted the study's consents. Throwing here rolls the transaction back.
         if (subjectIds.isEmpty()) {
             throw new DataException("Input yielded no subject ids (" + rowsRead + " data row(s) read); refusing to "
                     + "purge existing consents for study " + studyId + ". Check that the file is complete.");
@@ -253,9 +243,8 @@ public class SingleConsentDataPopulateRdsParticipantsJob
 
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
-        if (output.rowsRead() == 0) {
-            report.error("EMPTY_INPUT", "Input contained no data rows");
-        }
+        // Nothing to assert: an empty input never gets here, because load() throws before purging so
+        // the purge rolls back. Every other outcome is a valid load, reported through the metrics.
     }
 
     @Override

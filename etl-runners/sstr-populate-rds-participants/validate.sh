@@ -99,11 +99,11 @@ fi
 # --- consent groups ------------------------------------------------------
 check "at least one consent group" test -n "$GROUP_KEYS"
 
-# The job records one consent_code_COUNT info issue per group; a mismatch means the report's
+# The job records one CONSENT_CODE_COUNT info issue per group; a mismatch means the report's
 # two accounts of the same fact disagree.
 GROUP_COUNT=$(jq -r '(.metrics.countsByConsentGroup // {}) | length' "$REPORT")
-ISSUE_COUNT=$(jq -r '[(.outputValidation.issues // [])[] | select(.code == "consent_code_COUNT")] | length' "$REPORT")
-check "one consent_code_COUNT record per group ($ISSUE_COUNT == $GROUP_COUNT)" \
+ISSUE_COUNT=$(jq -r '[(.outputValidation.issues // [])[] | select(.code == "CONSENT_CODE_COUNT")] | length' "$REPORT")
+check "one CONSENT_CODE_COUNT record per group ($ISSUE_COUNT == $GROUP_COUNT)" \
       test "$ISSUE_COUNT" -eq "$GROUP_COUNT"
 
 if [[ -n "$EXPECTED_GROUPS" ]]; then

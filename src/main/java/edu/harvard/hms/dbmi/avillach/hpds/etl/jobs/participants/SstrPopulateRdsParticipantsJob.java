@@ -236,11 +236,9 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
 
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
-        if (output.rowsRead() == 0) {
-            report.error("EMPTY_INPUT", "Input contained no data rows");
-        }
+        // An empty input never gets here: load() throws before purging, so the purge rolls back.
         output.countsByConsentGroup().forEach((group, count) ->
-                report.info("consent_code_COUNT", group + ": " + count + " participant(s)"));
+                report.info("CONSENT_CODE_COUNT", group + ": " + count + " participant(s)"));
     }
 
     @Override

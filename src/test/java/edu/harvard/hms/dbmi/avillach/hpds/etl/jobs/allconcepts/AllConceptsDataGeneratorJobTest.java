@@ -9,6 +9,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.Severity;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
@@ -432,5 +433,46 @@ class AllConceptsDataGeneratorJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         verify(ioResolver, never()).delete(any());
+    }
+
+    @Test
+    void reports_rows_it_had_to_drop() {
+        setupStudyData();
+
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"missing.csv:1\",\"µStudyµGoneµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"no-column-index\",\"µStudyµBadµ\",\"\",\"TEXT\",\"\"\n");
+
+        when(ioResolver.exists(tempDir.resolve("data/").toString() + "/missing.csv")).thenReturn(false);
+        setupDataFile("datafile.csv",
+                "patient_id,val\n"
+                        + "SUBJ001,hello\n"
+                        + "SUBJ002,too,many\n");
+
+        String outputDir = tempDir.resolve("output/").toString();
+        JobResult result = executor.run(job, params(outputDir), "test-dropped-rows");
+
+        // Only the malformed data row loses data; the other two are surfaced without failing the run.
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics())
+                .containsEntry("malformedRows", 1L)
+                .containsEntry("mappingRowsDropped", 1L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MALFORMED_ROWS") && i.severity() == Severity.WARNING)
+                .anyMatch(i -> i.code().equals("MISSING_DATA_FILE") && i.severity() == Severity.INFO
+                        && i.message().contains("missing.csv"))
+                .anyMatch(i -> i.code().equals("DROPPED_MAPPING_ROWS") && i.severity() == Severity.INFO);
+    }
+
+    @Test
+    void rejects_a_misspelt_skip_analysis_flag() {
+        Map<String, String> params = new java.util.HashMap<>(params(tempDir.resolve("output/").toString()));
+        params.put("skip-analysis", "maybe");
+
+        JobResult result = executor.run(job, params, "test-bad-skip-analysis");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("BAD_BOOLEAN") && "--skip-analysis".equals(i.location()));
     }
 }
