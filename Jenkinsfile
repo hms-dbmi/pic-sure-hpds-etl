@@ -17,14 +17,14 @@
 // SKIP_TESTS=true so the same commit's suites are not re-run per study.
 //
 // Per-study allConcepts: each unprocessed study's decoded data is turned into per-consent
-// allConcepts files under PER_STUDY_ALL_CONCEPTS_PREFIX (overwritten in place; the bucket is
+// allConcepts files under {DATA_ROOT}/{study_id}/allConcepts/ (overwritten in place; the bucket is
 // versioned), which Merge AllConcepts then reads. A generation failure halts the pipeline
 // before the merge, so a merged file never mixes this run's output with a missing study.
 //
 // Trigger modes (both supported by this pipeline):
 //   STUDY_ID blank    sweep every study marked "Data is ready to process" = Yes in managed inputs
 //   STUDY_ID set      load exactly that study (the reload/manual entry path); INPUT overrides
-//                     the SSTR file discovered under INPUT_BASE
+//                     the SSTR file discovered under DATA_ROOT
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -48,11 +48,11 @@ pipeline {
         string(name: 'STUDY_ID', defaultValue: '',
                description: 'Blank sweeps every ready study from managed inputs. Set to a phs###### to load exactly one study (the reload/manual entry path).')
         string(name: 'INPUT', defaultValue: '',
-               description: 'Only used with STUDY_ID: the SSTR input URI for that study, overriding discovery under INPUT_BASE.')
+               description: 'Only used with STUDY_ID: the SSTR input URI for that study, overriding discovery under DATA_ROOT.')
         string(name: 'MANAGED_INPUTS', defaultValue: '',
                description: 'REQUIRED. The managed inputs CSV URI. The study list is resolved from it here, and it is passed to the global AllConcepts and VCF jobs.')
-        string(name: 'INPUT_BASE', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl',
-               description: 'Root of the per-study data folders. Each study\'s SSTR is discovered in {INPUT_BASE}/{abv_lower}/rawData/ as sstr_{study_id}.{v}.txt (case-insensitive; the legacy BDC-ingestion-only__sstr_ prefix is also accepted) -- the same rule participants-migration uses.')
+        string(name: 'DATA_ROOT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
+               description: 'Root of the per-study folders, one per study id. Must be an s3:// URI on a versioned bucket. Each study\'s SSTR is discovered in {DATA_ROOT}/{study_id}/rawData/ as sstr_{study_id}.{v}.txt (case-insensitive; the legacy BDC-ingestion-only__sstr_ prefix is also accepted) -- the same rule participants-migration uses. Per-consent allConcepts files are written to, and merged in, {DATA_ROOT}/{study_id}/allConcepts/c{code}/.')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every permanent job')
         string(name: 'SSTR_JOB', defaultValue: 'sstr-populate-rds-participants',
@@ -76,13 +76,11 @@ pipeline {
         string(name: 'ALL_CONCEPTS_GENERATOR_JOB', defaultValue: 'all-concepts-data-generator',
                description: 'Jenkins job that runs etl-runners/all-concepts-data-generator/Jenkinsfile')
         string(name: 'DECODED_DATA_DIR', defaultValue: 'decoded_data',
-               description: 'Folder, relative to {INPUT_BASE}/{abv_lower}/, holding a study\'s decoded data CSVs')
+               description: 'Folder, relative to {DATA_ROOT}/{study_id}/, holding a study\'s decoded data CSVs')
         string(name: 'CONCEPT_MAPPING_FILE', defaultValue: 'mappings/mapping2.csv',
-               description: 'File, relative to {INPUT_BASE}/{abv_lower}/, holding a study\'s concept mapping')
+               description: 'File, relative to {DATA_ROOT}/{study_id}/, holding a study\'s concept mapping')
         booleanParam(name: 'SKIP_ANALYSIS', defaultValue: false,
                description: 'Pass --skip-analysis to the generator: use the mapping file\'s data types as-is instead of re-analysing the decoded data')
-        string(name: 'PER_STUDY_ALL_CONCEPTS_PREFIX', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/split_allconcepts/',
-               description: 'The shared s3:// prefix of {study_id}/c{code}/ allConcepts folders: where the generator writes (and the migration\'s split wrote), and what Merge AllConcepts reads. Must be on a versioned bucket.')
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
@@ -123,7 +121,7 @@ pipeline {
                 script {
                     // Catch an unusable output before anything is provisioned: a local path
                     // resolves inside the runner container and is destroyed with the instance.
-                    ['ALL_CONCEPTS_OUTPUT', 'VCF_INDEXES_OUTPUT', 'PER_STUDY_ALL_CONCEPTS_PREFIX'].each { p ->
+                    ['ALL_CONCEPTS_OUTPUT', 'VCF_INDEXES_OUTPUT', 'DATA_ROOT'].each { p ->
                         if (!params[p]?.trim()?.startsWith('s3://')) {
                             error("${p} must be an s3:// URI, got '${params[p]}'.")
                         }
@@ -134,8 +132,8 @@ pipeline {
                     //          "Data is ready to process", "Data Processed"
                     def managedInputsUri = params.MANAGED_INPUTS?.trim()
                     if (!managedInputsUri) {
-                        error('MANAGED_INPUTS is required: the study list (and, in single-study mode, the study\'s ' +
-                              'abbreviation) comes from it, and the global AllConcepts and VCF jobs read it.')
+                        error('MANAGED_INPUTS is required: the study list comes from it, and the global AllConcepts ' +
+                              'and VCF jobs read it.')
                     }
 
                     // Use an env var to avoid Groovy GString injection into the shell.
@@ -176,9 +174,6 @@ pipeline {
                     if (params.STUDY_ID?.trim()) {
                         def sid = params.STUDY_ID.trim()
                         def row = studies.find { it.studyId == sid }
-                        if (!row && !params.INPUT?.trim()) {
-                            error("STUDY_ID=${sid} is not in managed inputs, so its SSTR cannot be discovered. Pass INPUT.")
-                        }
                         // An explicit reload: the ready/processed flags do not apply.
                         selected = [[studyId: sid, abv: row?.abv ?: '', processed: false,
                                      input: params.INPUT?.trim() ?: '']]
@@ -212,14 +207,10 @@ pipeline {
                     // staged files keep NHLBI's own name (sstr_phs######.v#.txt), so it cannot be
                     // derived from the study id alone. Sequential on purpose: the env-var handoff
                     // into sh is not safe under `parallel`.
-                    def inputBase = params.INPUT_BASE?.trim()?.replaceAll(/\/+$/, '') ?: ''
+                    def dataRoot = params.DATA_ROOT.trim().replaceAll(/\/+$/, '')
                     def missing = []
                     for (s in UNPROCESSED_STUDIES) {
-                        if (!inputBase || !s.abv) {
-                            missing << "${s.studyId} (${!inputBase ? 'no INPUT_BASE' : 'no Study Abbreviated Name in managed inputs'})"
-                            continue
-                        }
-                        def studyBase = "${inputBase}/${s.abv.toLowerCase()}"
+                        def studyBase = "${dataRoot}/${s.studyId}"
 
                         if (!s.input) {
                             env.RAW_DIR = "${studyBase}/rawData/"
@@ -493,7 +484,7 @@ pipeline {
                                     string(name: 'STUDY_ID', value: s.studyId),
                                     string(name: 'DATA_DIR', value: s.dataDir),
                                     string(name: 'MAPPING',  value: s.mapping),
-                                    string(name: 'OUTPUT',   value: params.PER_STUDY_ALL_CONCEPTS_PREFIX),
+                                    string(name: 'OUTPUT',   value: params.DATA_ROOT.trim()),
                                     booleanParam(name: 'SKIP_ANALYSIS', value: params.SKIP_ANALYSIS),
                                     string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-${s.studyId}"),
                                     string(name: 'ENV',    value: params.ENV),
@@ -582,7 +573,7 @@ pipeline {
                         wait: true,
                         propagate: false,
                         parameters: [
-                            string(name: 'INPUT', value: params.PER_STUDY_ALL_CONCEPTS_PREFIX),
+                            string(name: 'INPUT', value: params.DATA_ROOT.trim()),
                             string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
                             string(name: 'ENV',    value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS', value: true),

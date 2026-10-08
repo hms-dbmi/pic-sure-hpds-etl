@@ -23,6 +23,7 @@ derived artifacts from newly migrated data.
 ## Table of Contents
 
 - [Pipeline DAG](#pipeline-dag)
+- [S3 Layout](#s3-layout)
 - [Pre-flight Only](#pre-flight-only)
 - [Stage 1: Build and Test](#stage-1-build-and-test)
 - [Stage 2: Start Participant DB](#stage-2-start-participant-db)
@@ -54,13 +55,13 @@ Build ▸ Tests
 │  participants-migration  │
 └────────────┬────────────┘
              │  produces {studyid}_hpds_id_mapping.csv per study,
-             │  uploaded by the orchestrator to MAPPING_UPLOAD_BASE/<build-tag>/
+             │  uploaded by the orchestrator to {DATA_ROOT}/{study_id}/mappings/<build-tag>/
              ▼
 ┌─────────────────────────┐
 │  Split AllConcepts       │  (one runner per study, in parallel)
 │  split-allconcepts       │
 └────────────┬────────────┘
-             │  produces {study_id}/c{code}/{study_id}_allConcepts_c{code}.csv per consent
+             │  produces {study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv per consent
              ▼
 ┌─────────────────────────┐
 │  Generate global         │  (all ready studies, one run)
@@ -72,7 +73,7 @@ Build ▸ Tests
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
-│  Merge AllConcepts       │  (consent folders under SPLIT_OUTPUT needing a merge)
+│  Merge AllConcepts       │  (consent folders under DATA_ROOT needing a merge)
 └─────────────────────────┘
 
 post { always }:  participant-db-stop  (pg_dump to S3; LATEST promoted only on SUCCESS/UNSTABLE)
@@ -90,6 +91,32 @@ rerun still ends with complete artifacts.
 
 The first four jobs can also be run locally via `--pipeline=migrate-all`, which uses the
 in-process `PipelineRunner` defined in `application.yml`.
+
+---
+
+## S3 Layout
+
+Everything per-study lives in one folder per study id under `DATA_ROOT` (currently
+`s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing`; eventually the bucket
+prefix itself):
+
+```
+{DATA_ROOT}/
+├── general/completed/GLOBAL_allConcepts_merged.csv           shared legacy consent lookup
+└── {study_id}/
+    ├── legacy/
+    │   ├── allConcepts/{study_id}_allConcepts_new_search_with_data_analyzer.csv   split input
+    │   └── data/{ABV}_PatientMapping.v2.csv                   participants-migration input
+    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (optional)
+    ├── mappings/<build-tag>/
+    │   ├── {study_id}_hpds_id_mapping.csv                     participants-migration → split
+    │   └── {study_id}_unmatched_mappings.csv                  only when rows were unmatched
+    └── allConcepts/c{code}/
+        ├── {study_id}_allConcepts_c{code}.csv                 split / generator output
+        └── {study_id}_c{code}_allConcepts_MERGED.csv          merge output
+```
+
+The global AllConcepts and VCF index outputs are not per-study and keep their own prefixes.
 
 ---
 
@@ -135,8 +162,8 @@ seed dump of the legacy RDS database must be placed.
 |------|----------|-------------|
 | Managed inputs CSV | `--managed-inputs` | Study master list with readiness flags |
 | `GLOBAL_allConcepts_merged.csv` | `{DATA_FOLDER}/general/completed/` | Legacy file (headerless, all-quoted) with consent codes and abbreviations per legacy HPDS id |
-| `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{abv_lower}/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id) |
-| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{abv_lower}/rawData/` | Per-study SSTR (optional; determines processing path). Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
+| `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{study_id}/legacy/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id) |
+| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR (optional; determines processing path). Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
 
 ### Flow
 
@@ -177,7 +204,7 @@ For each ready study:
                                     Build mapping: legacy id → new hpds_id → source id
         │
         ▼
-Write {studyid}_hpds_id_mapping.csv to the reports directory
+Write {studyid}_hpds_id_mapping.csv (and {studyid}_unmatched_mappings.csv, if any) to the reports directory
 ```
 
 Studies are processed independently. A data failure in one study does not stop the rest
@@ -192,8 +219,8 @@ study failed while others succeeded.
   - `new_hpds_id` -- the new integer HPDS id (from `hpds_id_seq`)
   - `common_dbgap_id` -- the dbGaP subject id (or the patient mapping id for non-SSTR studies)
 
-The orchestrator copies these from the runner's artifacts and uploads them to
-`{MAPPING_UPLOAD_BASE}/<build-tag>/` for the split stage — the split container cannot see the
+The orchestrator copies these (and any `{studyid}_unmatched_mappings.csv`) from the runner's
+artifacts and uploads them to `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot see the
 orchestrator's workspace.
 
 ### Special Cases
@@ -214,8 +241,8 @@ database)
 
 | File | Source | Description |
 |------|--------|-------------|
-| Legacy allConcepts CSV | `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/{abv_lower}/completed/{study_id}/{study_id}_allConcepts_new_search_with_data_analyzer.csv` | The study's unified allConcepts file |
-| `{studyid}_hpds_id_mapping.csv` | `{MAPPING_UPLOAD_BASE}/<build-tag>/` | Maps legacy ids to new HPDS ids |
+| Legacy allConcepts CSV | `{DATA_ROOT}/{study_id}/legacy/allConcepts/{study_id}_allConcepts_new_search_with_data_analyzer.csv` | The study's unified allConcepts file |
+| `{studyid}_hpds_id_mapping.csv` | `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` | Maps legacy ids to new HPDS ids |
 | `consents` table | Participant database | Consent assignments for the study |
 
 ### Flow
@@ -236,20 +263,16 @@ Route row to the appropriate per-consent output file
         │
         ▼
 Write per-consent files:
-  {SPLIT_OUTPUT}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv
+  {DATA_ROOT}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv
 ```
 
 ### Output
 
 Per-consent allConcepts files at
-`{SPLIT_OUTPUT}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv` — the same layout
-`all-concepts-data-generator` uses, so the merge stage treats both alike.
-
-`SPLIT_OUTPUT` defaults to the shared `…/split_allconcepts/` prefix, not a `__migration__/`
-one: it is where every pipeline's per-consent allConcepts files land, so the permanent
-pipeline's merge picks up the migrated studies alongside its own. (Split output from runs
-before this change sits under `__migration__/split_allconcepts/`; copy it across if it should
-be merged.)
+`{DATA_ROOT}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv` — the same layout
+`all-concepts-data-generator` uses, so the merge stage treats both alike. (Split output from
+earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
+`__migration__/split_allconcepts/`; copy it across if it should be merged.)
 
 - Legacy HPDS ids replaced by new HPDS ids
 - One file per consent group instead of one unified file
@@ -259,7 +282,7 @@ be merged.)
 - Rows with unmapped HPDS ids are logged as warnings and skipped
 - `CONTINUE_ON_STUDY_FAILURE` (default `true`) lets the remaining studies finish when one
   fails; off, the parallel branches fail fast
-- `SPLIT_OUTPUT`, `MAPPING_UPLOAD_BASE`, `ALL_CONCEPTS_OUTPUT`, and `VCF_INDEXES_OUTPUT` must
+- `DATA_ROOT`, `ALL_CONCEPTS_OUTPUT`, and `VCF_INDEXES_OUTPUT` must
   be `s3://` URIs — checked before any split is scheduled
 
 ---
@@ -298,8 +321,8 @@ already processed, which would otherwise be zero work. Writes
 **Class:** [`MergeAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/MergeAllConceptsJob.java)
 **Runs:** once (skipped under `PREFLIGHT_ONLY`)
 
-Scans `MERGE_ALLCONCEPTS_INPUT` (blank = `SPLIT_OUTPUT`) recursively and, for every
-`{study_id}/c{code}/` folder whose `{study_id}_c{code}_allConcepts_MERGED.csv` is missing,
+Scans `MERGE_ALLCONCEPTS_INPUT` (blank = `DATA_ROOT`) and, for every
+`{study_id}/allConcepts/c{code}/` folder whose `{study_id}_c{code}_allConcepts_MERGED.csv` is missing,
 older than a source file, or older than a source deletion, concatenates the folder's
 allConcepts files into it. See
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-7-merge-allconcepts).
@@ -340,7 +363,7 @@ Legacy allConcepts CSV ───────────────────
                                    split-allconcepts
                                             │
                                             ▼
-                                   {study_id}/c{code}/{study_id}_allConcepts_c{code}.csv
+                                   {study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv
                                             │
                                             ▼
                                    merge-allconcepts ─▶ {study_id}_c{code}_allConcepts_MERGED.csv
@@ -356,19 +379,17 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `MANAGED_INPUTS` | `…/__migration__/managed_inputs.csv` | Study list CSV |
-| `DATA_FOLDER` | `…/__migration__/current` | Base of the legacy export (`general/completed/`, `{abv_lower}/`, `{abv_lower}/rawData/`) |
+| `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders (see [S3 Layout](#s3-layout)); passed to `participants-migration` as `DATA_FOLDER`, used for the split input, mapping uploads, and split output (must be `s3://`) |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
 | `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready |
 | `PARTICIPANTS_MIGRATION_JOB` | `participants-migration` | Participants runner job |
 | `SPLIT_ALLCONCEPTS_JOB` | `split-allconcepts` | Split runner job |
-| `MAPPING_UPLOAD_BASE` | `…/__migration__/mappings` | Where mapping CSVs are uploaded (a per-build tag is appended) |
-| `SPLIT_OUTPUT` | `…/split_allconcepts/` | Output for split allConcepts files (must be `s3://`). Deliberately not under `__migration__/`: it is the shared per-consent allConcepts location the permanent pipeline also writes to and merges from |
 | `ALL_CONCEPTS_JOB` | `generate-global-all-concepts` | Global AllConcepts runner job |
 | `ALL_CONCEPTS_OUTPUT` | `…/__migration__/global_allconcepts/` | Output for global AllConcepts (must be `s3://`) |
 | `VCF_INDEXES_JOB` | `create-vcf-indexes` | VCF index runner job |
 | `VCF_INDEXES_OUTPUT` | `…/__migration__/vcf_indexes/` | Output for VCF indexes (must be `s3://`) |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
-| `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge; blank = `SPLIT_OUTPUT` |
+| `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge; blank = `DATA_ROOT` |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep splitting remaining studies when one fails |

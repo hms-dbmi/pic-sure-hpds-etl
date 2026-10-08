@@ -138,7 +138,7 @@ checks every `s3://` output parameter before anything is provisioned.
 ### SSTR Discovery
 
 Staged SSTRs keep NHLBI's own file name, so the URI cannot be derived from the study id
-alone. The pipeline lists `{INPUT_BASE}/{abv_lower}/rawData/` and picks the file by the same
+alone. The pipeline lists `{DATA_ROOT}/{study_id}/rawData/` and picks the file by the same
 rule `participants-migration` uses:
 
 - a `.txt` whose name contains the study id and starts with `sstr_` or
@@ -152,12 +152,11 @@ Derived from the study's folder, like the SSTR, and checked to exist:
 
 | Input | Location | Check |
 |-------|----------|-------|
-| decoded data CSVs | `{INPUT_BASE}/{abv_lower}/{DECODED_DATA_DIR}/` (default `decoded_data/`) | at least one `.csv` |
-| concept mapping | `{INPUT_BASE}/{abv_lower}/{CONCEPT_MAPPING_FILE}` (default `mappings/mapping2.csv`) | the object exists |
+| decoded data CSVs | `{DATA_ROOT}/{study_id}/{DECODED_DATA_DIR}/` (default `decoded_data/`) | at least one `.csv` |
+| concept mapping | `{DATA_ROOT}/{study_id}/{CONCEPT_MAPPING_FILE}` (default `mappings/mapping2.csv`) | the object exists |
 
 If any unprocessed study lacks its SSTR or either allConcepts input, the stage fails listing
-every such study — before the database is started or any runner is provisioned. A single
-study therefore needs a `Study Abbreviated Name` in managed inputs even when `INPUT` is given.
+every such study — before the database is started or any runner is provisioned.
 
 ---
 
@@ -332,18 +331,17 @@ Read the concept mapping ─▶ (unless SKIP_ANALYSIS) re-analyse each column's 
 Stream each decoded data CSV ─▶ resolve each patient to its hpds_id ─▶ route rows to the
                                  patient's consent group
         ▼
-Overwrite {PER_STUDY_ALL_CONCEPTS_PREFIX}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv
+Overwrite {DATA_ROOT}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv
 for every consent group with rows
         ▼
-Delete this job's own file in any other c{code}/ folder of the study (a group that produced
+Delete this job's own file in any other allConcepts/c{code}/ folder of the study (a group that produced
 no rows this run, or that a reload removed)
 ```
 
 ### Output
 
-Per-consent allConcepts files under `PER_STUDY_ALL_CONCEPTS_PREFIX` — the shared
-`split_allconcepts/` prefix the migration's `split-allconcepts` also wrote to, and which other
-sources will write into too.
+Per-consent allConcepts files under `{DATA_ROOT}/{study_id}/allConcepts/` — the same folders
+the migration's `split-allconcepts` writes to, and which other sources will write into too.
 
 - **Overwrite, not append.** Each run replaces the study's files in place; S3 versioning keeps
   every earlier version (including a migrated split file it replaces). The runner's pre-flight
@@ -372,18 +370,20 @@ and re-run it with `STUDY_ID`; its files are simply overwritten.
 
 ### Input
 
-`PER_STUDY_ALL_CONCEPTS_PREFIX`: the shared `s3://` prefix (versioned bucket) holding
-`{study_id}/c{code}/` folders of `*_allConcepts_*` files from every source — Stage 7's
+`DATA_ROOT`: the `s3://` root (versioned bucket) of the per-study folders. Only
+`{study_id}/allConcepts/c{code}/` folders are scanned — never `{study_id}/legacy/allConcepts/` or
+the rest of the study folder — for `*_allConcepts_*` files from every source: Stage 7's
 generator, the migration's `split-allconcepts`, and further sources to come. The generator's
 output and the merge's input are one parameter, so they cannot drift apart.
 
 ### Flow
 
 ```
-List every file under the input prefix (recursively)
+List the phs###### study folders under the input prefix (or take --study-ids)
         │
         ▼
-Group *_allConcepts_* files by consent folder (ignoring existing *_MERGED.csv)
+List each study's allConcepts/ folder; group *_allConcepts_* files directly inside
+an allConcepts/c{code}/ folder by that folder (ignoring existing *_MERGED.csv)
         │
         ▼
 For each folder, decide whether {study}_c{code}_allConcepts_MERGED.csv needs rebuilding:
@@ -458,7 +458,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `STUDY_ID` | (blank) | Blank for sweep mode; `phs######` for single study |
 | `INPUT` | (blank) | With `STUDY_ID`: the SSTR URI, overriding discovery |
 | `MANAGED_INPUTS` | (blank) | **Required.** Managed inputs CSV URI |
-| `INPUT_BASE` | `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl` | Root of the per-study folders; SSTRs are discovered in `{INPUT_BASE}/{abv_lower}/rawData/` |
+| `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders, one per study id (must be `s3://`, versioned bucket). SSTRs are discovered in `{DATA_ROOT}/{study_id}/rawData/`; the generator writes `{study_id}/allConcepts/c{code}/` files there and the merge reads them; shared with the migration's `DATA_ROOT` |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
 | `SSTR_JOB` | `sstr-populate-rds-participants` | SSTR runner job |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
@@ -470,10 +470,9 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `VCF_INDEXES_JOB` | `create-vcf-indexes` | VCF index runner job |
 | `VCF_INDEXES_OUTPUT` | `…/vcf_indexes/` | Output location for VCF indexes (must be `s3://`) |
 | `ALL_CONCEPTS_GENERATOR_JOB` | `all-concepts-data-generator` | Per-study allConcepts runner job |
-| `DECODED_DATA_DIR` | `decoded_data` | Decoded data folder, relative to `{INPUT_BASE}/{abv_lower}/` |
-| `CONCEPT_MAPPING_FILE` | `mappings/mapping2.csv` | Concept mapping file, relative to `{INPUT_BASE}/{abv_lower}/` |
+| `DECODED_DATA_DIR` | `decoded_data` | Decoded data folder, relative to `{DATA_ROOT}/{study_id}/` |
+| `CONCEPT_MAPPING_FILE` | `mappings/mapping2.csv` | Concept mapping file, relative to `{DATA_ROOT}/{study_id}/` |
 | `SKIP_ANALYSIS` | `false` | Use the mapping's data types as-is instead of re-analysing |
-| `PER_STUDY_ALL_CONCEPTS_PREFIX` | `…/split_allconcepts/` | Where the generator writes `{study_id}/c{code}/` files and what the merge reads (must be `s3://`, versioned bucket); shared with the migration's `SPLIT_OUTPUT` |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |

@@ -4,14 +4,14 @@
 // Generates per-consent allConcepts CSV files for a single study. Reads decoded
 // data CSVs and a mapping file, resolves participant/consent associations from
 // the participant database, runs data type analysis, and writes one
-// {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv per consent group.
+// {output}/{study_id}/allConcepts/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv per consent group.
 //
 // Triggered per unprocessed study by the permanent orchestrator's "Generate per-study
 // AllConcepts" stage (/Jenkinsfile), after that study's SSTR load; also runnable standalone
 // (with the participant DB up -- see docs/PARTICIPANT_DB.md).
 //
-// Output is overwritten in place, by design: OUTPUT is the shared split_allconcepts/ prefix
-// other sources also write into, and the bucket's S3 versioning keeps every previous version.
+// Output is overwritten in place, by design: OUTPUT is the shared root of the per-study folders,
+// whose {study_id}/allConcepts/ folders other sources (the migration's split) also write into, and the bucket's S3 versioning keeps every previous version.
 // Pre-flight refuses an unversioned output bucket. A consent group that produces no rows this
 // run has this job's own file from an earlier run removed (a recoverable delete marker), so
 // merge-allconcepts never keeps merging stale rows; other sources' files are never touched.
@@ -23,11 +23,11 @@
 //   --study-id     dbGaP study id (phs######)
 //   --data-dir     decoded data CSVs (local path or s3:// URI)
 //   --mapping      mapping CSV (local path or s3:// URI)
-//   --output       output directory for per-consent allConcepts files
+//   --output       root of the per-study folders
 //   participant DB credentials fetched on the runner from Secrets Manager by instance role
 //
 // Outputs
-//   {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv per consent group
+//   {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv per consent group
 //   all-concepts-data-generator-<runId>.json report with per-consent row counts
 //
 // Exit codes (see ExitCode.java)
@@ -55,8 +55,8 @@ pipeline {
                description: 'REQUIRED. --data-dir: S3 prefix or local path containing decoded data CSVs')
         string(name: 'MAPPING', defaultValue: '',
                description: 'REQUIRED. --mapping: S3 URI or local path to the mapping CSV')
-        string(name: 'OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/split_allconcepts/',
-               description: '--output: the s3:// prefix the {study_id}/c{code}/ files are written under -- the shared split_allconcepts/ location merge-allconcepts reads. Must be s3:// on a versioned bucket.')
+        string(name: 'OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing/',
+               description: '--output: root of the per-study folders; files are written under {study_id}/allConcepts/c{code}/, which merge-allconcepts reads. Must be s3:// on a versioned bucket.')
         booleanParam(name: 'SKIP_ANALYSIS', defaultValue: false,
                description: 'Skip data type re-analysis and use mapping types as-is')
         string(name: 'RUN_ID', defaultValue: '',

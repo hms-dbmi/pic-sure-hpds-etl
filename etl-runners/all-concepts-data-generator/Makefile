@@ -11,7 +11,7 @@
 # Generate locally:
 #   export TF_VAR_run_id=local-1 TF_VAR_study_id=phs001412 \
 #     TF_VAR_data_dir=s3://.../{abv}/decoded_data/ TF_VAR_mapping_uri=s3://.../{abv}/mappings/mapping2.csv \
-#     TF_VAR_output_uri=s3://.../split_allconcepts/ TF_VAR_name_suffix=local1
+#     TF_VAR_output_uri=s3://.../BAM_testing/ TF_VAR_name_suffix=local1
 #   make package && make run && make fetch-reports && make validate
 NAME := all-concepts-data-generator
 

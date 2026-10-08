@@ -56,16 +56,16 @@ import java.util.stream.Stream;
  *   <li>{@link ManagedInputsService}: provides the study list (columns "Study Abbreviated Name",
  *       "Study Identifier", and "Data is ready to process"), configured via
  *       {@code etl.managed-inputs.uri} or {@code --managed-inputs=<uri>}.</li>
- *   <li>{@code --data-folder}: a base URI (local or {@code s3://}) whose subfolders hold
- *       per-study data. The layout is:
+ *   <li>{@code --data-folder}: a base URI (local or {@code s3://}) whose subfolders, one per
+ *       study id, hold per-study data. The layout is:
  *       <ul>
  *         <li>{@code {base}/general/completed/GLOBAL_allConcepts_merged.csv} — shared across
  *             all studies (headerless, all-quoted AllConcepts format)</li>
- *         <li>{@code {base}/{abv_lowercase}/rawData/sstr_{studyId}.{v}.txt} — optional dbGaP
+ *         <li>{@code {base}/{studyId}/rawData/sstr_{studyId}.{v}.txt} — optional dbGaP
  *             SSTR export (tab-delimited; matched case-insensitively, including the legacy
  *             folder-flattened {@code SSTR__sstr_*} and {@code BDC-ingestion-only__sstr_*}
  *             names; the canonical lowercase name is preferred when several exist)</li>
- *         <li>{@code {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv} — per-study
+ *         <li>{@code {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv} — per-study
  *             patient mapping (headerless; columns: id, abv, legacy hpds id)</li>
  *       </ul>
  *       All files are staged (copied) into a local temporary directory organized by study id
@@ -174,10 +174,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return JobExpectations.of(
                 List.of(
                         ParamSpec.required("data-folder",
-                                "Base URI whose subfolders hold per-study data: "
+                                "Base URI whose subfolders, one per study id, hold per-study data: "
                                         + "{base}/general/completed/GLOBAL_allConcepts_merged.csv, "
-                                        + "{base}/{abv_lower}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
-                                        + "{base}/{abv_lower}/data/{ABV_UPPER}_PatientMapping.v2.csv "
+                                        + "{base}/{studyId}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
+                                        + "{base}/{studyId}/legacy/data/{ABV_UPPER}_PatientMapping.v2.csv "
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
                         ParamSpec.optional("batch-size", "Rows per batch insert", "1000"),
@@ -253,11 +253,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     private StagedStudyFiles stageStudyFiles(String baseUri, ManagedInputRow row, Path stagingDir) {
         String studyId = row.studyId();
-        String abvLower = row.abv().toLowerCase(Locale.ROOT);
         String abvUpper = row.abv().toUpperCase(Locale.ROOT);
         Path studyDir = stagingDir.resolve(studyId);
+        String studyBase = joinPath(baseUri, studyId);
 
-        String rawDataDir = joinPath(joinPath(baseUri, abvLower), "rawData");
+        String rawDataDir = joinPath(studyBase, "rawData");
         List<String> rawDataFiles = io.listFileNames(rawDataDir);
         // Staged SSTRs arrive under three naming families, all the same NHLBI artifact:
         // the canonical 'sstr_{phs}.{v}.txt' filename, plus legacy folder-flattened copies
@@ -284,7 +284,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
 
         String pmFileName = abvUpper + "_PatientMapping.v2.csv";
-        String pmUri = joinPath(joinPath(joinPath(baseUri, abvLower), "data"), pmFileName);
+        String pmUri = joinPath(joinPath(studyBase, "legacy/data"), pmFileName);
         Path localPm = studyDir.resolve(pmFileName);
         io.copyToLocal(pmUri, localPm);
 
@@ -341,7 +341,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         List<String> skippedHpdsIds = unmatched.stream().map(PatientMappingRow::oldHpdsId).toList();
         if (!unmatched.isEmpty()) {
-            writeUnmatchedReport(ctx, row.abv(), unmatched);
+            writeUnmatchedReport(ctx, row.studyId(), unmatched);
             log.warn("Study '{}': {} of {} patient mapping row(s) had no entry in {}; written to unmatched report",
                     studyId, unmatched.size(), patientMappings.size(), ALL_CONCEPTS_FILE_NAME);
         }
@@ -594,7 +594,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
     }
 
-    private void writeUnmatchedReport(JobContext ctx, String abv, List<PatientMappingRow> unmatched) {
+    private void writeUnmatchedReport(JobContext ctx, String studyId, List<PatientMappingRow> unmatched) {
         StringBuilder csv = new StringBuilder("id,old_hpds_id\n");
         for (PatientMappingRow pm : unmatched) {
             csv.append(Strings.csvQuote(pm.id())).append(',').append(Strings.csvQuote(pm.oldHpdsId())).append('\n');
@@ -602,9 +602,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         try {
             Path dir = ctx.reportsDir();
             Files.createDirectories(dir);
-            Files.writeString(dir.resolve(abv + "_unmatched_mappings.csv"), csv.toString());
+            Files.writeString(dir.resolve(studyId + "_unmatched_mappings.csv"), csv.toString());
         } catch (IOException e) {
-            throw new InfrastructureException("Failed to write unmatched report for " + abv, e);
+            throw new InfrastructureException("Failed to write unmatched report for study " + studyId, e);
         }
     }
 

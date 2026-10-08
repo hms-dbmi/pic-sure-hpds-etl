@@ -358,17 +358,17 @@ the process table and `docker inspect`. `xtrace` is disabled in both bootstraps 
 
 ### Full Migration
 
-Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_FOLDER`. Set
+Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_ROOT`. Set
 `PREFLIGHT_ONLY` to validate the export layout without provisioning anything.
 
 ### Permanent Sweep
 
 Run `hpds-etl-pipeline` with `STUDY_ID` blank and `MANAGED_INPUTS` set. Every study marked
 "Data is ready to process" = Yes and not yet "Data Processed" is loaded, one ephemeral runner each,
-sequentially. Each study's SSTR is discovered under `{INPUT_BASE}/{abv_lower}/rawData/` as
+sequentially. Each study's SSTR is discovered under `{DATA_ROOT}/{study_id}/rawData/` as
 `sstr_{study_id}.{v}.txt` (case-insensitive; `BDC-ingestion-only__sstr_*` also accepted) — the
 same rule `participants-migration` uses. Its per-study allConcepts inputs are
-`{INPUT_BASE}/{abv_lower}/decoded_data/` and `{INPUT_BASE}/{abv_lower}/mappings/mapping2.csv`
+`{DATA_ROOT}/{study_id}/decoded_data/` and `{DATA_ROOT}/{study_id}/mappings/mapping2.csv`
 (`DECODED_DATA_DIR` / `CONCEPT_MAPPING_FILE`). A study missing any of the three fails the build
 before anything is provisioned. `CONTINUE_ON_STUDY_FAILURE` (default on) lets one bad study fail without stopping the
 rest; the build ends with a per-study summary table.

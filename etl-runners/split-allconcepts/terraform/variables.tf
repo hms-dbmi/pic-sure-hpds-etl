@@ -104,7 +104,7 @@ variable "input_uri" {
   type        = string
   description = <<-EOT
     --input: S3 URI of the study's allConcepts CSV, e.g.
-    s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/{abv_lower}/completed/{study_id}/{study_id}_allConcepts_new_search_with_data_analyzer.csv
+    s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/{study_id}/legacy/allConcepts/{study_id}_allConcepts_new_search_with_data_analyzer.csv
   EOT
 }
 
@@ -116,8 +116,8 @@ variable "mapping_uri" {
 variable "output_uri" {
   type        = string
   description = <<-EOT
-    --output: output directory for split files. Structure:
-    {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv
+    --output: root of the per-study folders. Structure:
+    {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv
   EOT
 }
 

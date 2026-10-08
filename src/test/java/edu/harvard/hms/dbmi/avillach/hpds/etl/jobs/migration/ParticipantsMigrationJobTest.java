@@ -141,7 +141,7 @@ class ParticipantsMigrationJobTest {
         String folder = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv",
                 "\"2002\",\"µ_consentsµ\",\"\",\"study-02.c1\",\"0\"\n",
-                "abv2/data/ABV2_PatientMapping.v2.csv", "\"p1\",\"ABV2\",\"2002\"\n"));
+                "study-02/legacy/data/ABV2_PatientMapping.v2.csv", "\"p1\",\"ABV2\",\"2002\"\n"));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder, "study-filter", "study-02"),
@@ -183,7 +183,7 @@ class ParticipantsMigrationJobTest {
 
         String folder = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
-                "abv1/data/ABV1_PatientMapping.v2.csv", ""));
+                "study-01/legacy/data/ABV1_PatientMapping.v2.csv", ""));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-empty-patient-mapping");
@@ -210,7 +210,7 @@ class ParticipantsMigrationJobTest {
 
         String folder = baseUri(Map.of(
                 "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"study-01.c1\",\"0\"\n",
-                "abv1/data/ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
+                "study-01/legacy/data/ABV1_PatientMapping.v2.csv", "SUBJ1,ABV1,2002\n"));
 
         JobResult result = newExecutor().run(job,
                 Map.of("data-folder", folder), "unit-db-down");

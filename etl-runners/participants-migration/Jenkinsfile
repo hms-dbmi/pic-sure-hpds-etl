@@ -11,15 +11,15 @@
 // What the job does
 //   Moves every ready study's participant identities off the legacy system into the
 //   participants / consents / samples RDS tables. Per study:
-//     - {studyid}_sstr.tsv present: SstrPopulateRdsParticipantsJob loads RDS and this job only
+//     - {study_id}/rawData/sstr_{study_id}.{v}.txt present: SstrPopulateRdsParticipantsJob loads RDS and this job only
 //       resolves legacy-hpds-id -> new-hpds-id pairs
 //     - otherwise: this job populates participants/consents itself, joining
-//       {ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
+//       {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).
 //
 // Inputs
 //   --managed-inputs   study list CSV        (params.MANAGED_INPUTS)
-//   --data-folder      per-study file folder (params.DATA_FOLDER)
+//   --data-folder      root of the per-study folders (params.DATA_FOLDER)
 //   --batch-size       rows per batch insert (params.BATCH_SIZE)
 //   RDS credentials    fetched on the runner from Secrets Manager by instance role; they never
 //                      pass through Jenkins
@@ -60,8 +60,8 @@ pipeline {
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
                description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
         string(name: 'DATA_FOLDER',
-               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/current',
-               description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
+               description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/sstr_{study_id}.{v}.txt (optional), {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv, and the shared {root}/general/completed/GLOBAL_allConcepts_merged.csv')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: '--study-filter: comma-separated study ids to process; blank processes every ready study')
         string(name: 'BATCH_SIZE', defaultValue: '1000',

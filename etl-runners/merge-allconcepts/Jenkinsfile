@@ -1,7 +1,7 @@
 // =============================================================================
 // PERMANENT -- merge-allconcepts (JobType.PERMANENT)
 //
-// Scans {study_id}/c{consent}/ folders under the input prefix, detects stale or
+// Scans {study_id}/allConcepts/c{consent}/ folders under the input prefix, detects stale or
 // missing merged files, and concatenates all per-consent allConcepts CSVs into
 // {study_id}_c{code}_allConcepts_MERGED.csv. Uses S3 object versioning to detect
 // deletions since the last merge.
@@ -11,7 +11,7 @@
 // or can be run standalone.
 //
 // Inputs
-//   --input       S3 prefix containing {study_id}/c{consent}/ folders
+//   --input       S3 prefix containing {study_id}/allConcepts/c{consent}/ folders
 //   --study-ids   optional comma-separated filter
 //
 // Outputs
@@ -39,7 +39,7 @@ pipeline {
 
     parameters {
         string(name: 'INPUT', defaultValue: '',
-               description: 'REQUIRED. --input: S3 prefix containing {study_id}/c{consent}/ folders with allConcepts files.')
+               description: 'REQUIRED. --input: S3 prefix containing {study_id}/allConcepts/c{consent}/ folders with allConcepts files (the root of the per-study folders).')
         string(name: 'STUDY_IDS', defaultValue: '',
                description: 'Optional comma-separated study ids to check. Blank discovers all study folders under INPUT.')
         string(name: 'RUN_ID', defaultValue: '',

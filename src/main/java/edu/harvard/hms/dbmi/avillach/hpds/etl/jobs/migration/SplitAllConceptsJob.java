@@ -76,13 +76,13 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                                 "FHS"),
                         ParamSpec.required("input",
                                 "S3 URI of the study's allConcepts CSV",
-                                "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/fhs/completed/phs000123/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
+                                "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/phs000123/legacy/allConcepts/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
                         ParamSpec.required("mapping",
                                 "S3 URI of the hpds_id_mapping.csv from participants-migration (columns: old_hpds_id, new_hpds_id, common_dbgap_id)",
-                                "s3://bucket/reports/phs000123_hpds_id_mapping.csv"),
+                                "s3://bucket/phs000123/mappings/<build-tag>/phs000123_hpds_id_mapping.csv"),
                         ParamSpec.required("output",
-                                "Output directory for split files (local path or s3:// URI). "
-                                        + "Structure: {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv",
+                                "Root of the per-study folders (local path or s3:// URI). "
+                                        + "Structure: {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv",
                                 "./output")),
                 List.of("Per-consent allConcepts files with new hpds IDs replacing legacy hpds IDs"));
     }
@@ -195,7 +195,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 String consentLabel = "c" + code;
 
                 String outputUri = joinPath(outputBase,
-                        studyId, consentLabel,
+                        studyId, "allConcepts", consentLabel,
                         studyId + "_allConcepts_" + consentLabel + ".csv");
 
                 io.writeOutputFile(outputUri, tmp);

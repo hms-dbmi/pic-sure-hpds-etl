@@ -83,12 +83,13 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                                 "Mapping CSV file (local path or s3:// URI)",
                                 "s3://bucket/study/mappings/mapping2.csv"),
                         ParamSpec.required("output",
-                                "Output directory for per-consent allConcepts files (local path or s3:// URI)",
-                                "s3://bucket/study/completed/"),
+                                "Root of the per-study folders; files go under {output}/{study_id}/allConcepts/ "
+                                        + "(local path or s3:// URI)",
+                                "s3://bucket/root/"),
                         ParamSpec.optional("skip-analysis",
                                 "Skip data type re-analysis and use mapping types as-is (default: false)",
                                 "false")),
-                List.of("One {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv "
+                List.of("One {output}/{study_id}/allConcepts/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv "
                         + "per consent group"));
     }
 
@@ -212,8 +213,12 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
     }
 
     static String outputFileFor(String outputDir, String studyId, String consentLabel) {
-        return outputDir + studyId + "/" + consentLabel + "/"
+        return studyAllConceptsDir(outputDir, studyId) + consentLabel + "/"
                 + studyId + "_allConcepts_" + consentLabel + ".csv";
+    }
+
+    static String studyAllConceptsDir(String outputDir, String studyId) {
+        return outputDir + studyId + "/allConcepts/";
     }
 
     /**
@@ -226,7 +231,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
      */
     private List<String> removeStaleOutputs(String outputDir, String studyId, Set<String> writtenLabels) {
         List<String> removed = new ArrayList<>();
-        for (String folder : io.listDirectoryNames(outputDir + studyId + "/")) {
+        for (String folder : io.listDirectoryNames(studyAllConceptsDir(outputDir, studyId))) {
             if (!CONSENT_FOLDER_PATTERN.matcher(folder).matches() || writtenLabels.contains(folder)) {
                 continue;
             }

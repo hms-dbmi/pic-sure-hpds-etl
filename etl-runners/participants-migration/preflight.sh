@@ -121,8 +121,8 @@ note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process
 ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
 check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed): $ALL_CONCEPTS" uri_exists "$ALL_CONCEPTS"
 # --- per-study files -----------------------------------------------------
-# Layout: {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt (optional)
+# Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt (optional)
 echo ""
 echo "  Per-study inputs:"
 SSTR_STUDIES=0
@@ -131,12 +131,11 @@ DIRECT_STUDIES=0
 while IFS=$'\t' read -r abv sid state; do
   [[ "$state" != "ready" ]] && continue
 
-  abv_lower=$(printf '%s' "$abv" | tr '[:upper:]' '[:lower:]')
   abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
-  mapping="$DATA_FOLDER/${abv_lower}/data/${abv_upper}_PatientMapping.v2.csv"
+  mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
 
-  # Find SSTR file by listing the rawData directory for a file matching SSTR_*{studyId}*.txt
-  raw_data_dir="$DATA_FOLDER/${abv_lower}/rawData"
+  # Find SSTR file by listing the rawData directory for a file matching sstr_*{studyId}*.txt
+  raw_data_dir="$DATA_FOLDER/${sid}/rawData"
   # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
   # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
   # case-insensitively, preferring the canonical name -- mirrors the job's discovery.

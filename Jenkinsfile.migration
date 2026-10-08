@@ -49,9 +49,9 @@ pipeline {
         string(name: 'MANAGED_INPUTS',
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
                description: 'participants-migration --managed-inputs: study list CSV with "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
-        string(name: 'DATA_FOLDER',
-               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/current',
-               description: 'participants-migration --data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
+        string(name: 'DATA_ROOT',
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
+               description: 'Root of the per-study folders, one per study id. Must be an s3:// URI. Inputs: {root}/{study_id}/legacy/allConcepts/ (pre-split allConcepts), {root}/{study_id}/legacy/data/ (patient mapping), {root}/{study_id}/rawData/ (SSTR), and the shared {root}/general/completed/GLOBAL_allConcepts_merged.csv. Outputs: {root}/{study_id}/allConcepts/c{code}/ (split + merged allConcepts) and {root}/{study_id}/mappings/<build-tag>/ (hpds id mapping and unmatched report).')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every migration job')
         string(name: 'STUDY_FILTER', defaultValue: '',
@@ -60,11 +60,6 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
                description: 'Jenkins job that runs etl-runners/split-allconcepts/Jenkinsfile')
-        string(name: 'MAPPING_UPLOAD_BASE',
-               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/mappings',
-               description: 'S3 prefix the orchestrator uploads each {studyid}_hpds_id_mapping.csv to before triggering split-allconcepts (the split container cannot see this workspace). A per-build tag is appended.')
-        string(name: 'SPLIT_OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/split_allconcepts/',
-               description: 'Output location for split allConcepts files. Must be an s3:// URI: a local path resolves INSIDE the runner container (/app), which is destroyed with the instance, silently discarding every per-consent CSV.')
         string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
         string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/global_allconcepts/',
@@ -76,7 +71,7 @@ pipeline {
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
         string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: '',
-               description: 'S3 prefix to scan for allConcepts files to merge. Blank defaults to SPLIT_OUTPUT (the merge job discovers nested study/consent folders recursively).')
+               description: 'S3 prefix to scan for {study_id}/allConcepts/c{code}/ folders to merge. Blank defaults to DATA_ROOT.')
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_STOP_JOB', defaultValue: 'participant-db-stop',
@@ -164,7 +159,7 @@ pipeline {
                         propagate: false,
                         parameters: [
                             string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS),
-                            string(name: 'DATA_FOLDER',    value: params.DATA_FOLDER),
+                            string(name: 'DATA_FOLDER',    value: params.DATA_ROOT),
                             string(name: 'BATCH_SIZE',     value: params.BATCH_SIZE),
                             string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
@@ -215,13 +210,11 @@ pipeline {
                     // Jenkins keeps serving until the job re-processes its parameters block,
                     // and which Rebuild copies forward) here, once, instead of scheduling
                     // 28 downstream builds that each fail the same runner-side guard.
-                    if (!params.SPLIT_OUTPUT.trim().startsWith('s3://')) {
-                        error("SPLIT_OUTPUT must be an s3:// URI, got '${params.SPLIT_OUTPUT}'. A local path " +
+                    if (!params.DATA_ROOT.trim().startsWith('s3://')) {
+                        error("DATA_ROOT must be an s3:// URI, got '${params.DATA_ROOT}'. A local path " +
                               'resolves inside the runner container and the split results are destroyed with the instance.')
                     }
-                    if (!params.MAPPING_UPLOAD_BASE.trim().startsWith('s3://')) {
-                        error("MAPPING_UPLOAD_BASE must be an s3:// URI, got '${params.MAPPING_UPLOAD_BASE}'.")
-                    }
+                    def dataRoot = params.DATA_ROOT.trim().replaceAll('/+$', '')
                     if (!params.ALL_CONCEPTS_OUTPUT.trim().startsWith('s3://')) {
                         error("ALL_CONCEPTS_OUTPUT must be an s3:// URI, got '${params.ALL_CONCEPTS_OUTPUT}'. " +
                               'A local path resolves inside the runner container and is destroyed with it.')
@@ -284,12 +277,13 @@ pipeline {
                     // (WORKDIR /app, only /reports mounted) on its own EC2 instance, so a
                     // workspace path can never resolve there; it travels via the data bucket
                     // instead. (Not the runner reports prefix: the -r2 infra-retry suffix makes
-                    // that path non-deterministic.) Sequential on purpose: the env-var handoff
-                    // into sh is not safe under `parallel`.
+                    // that path non-deterministic.) Each study's files go under its own folder,
+                    // {root}/{study_id}/mappings/<build-tag>/. Sequential on purpose: the env-var
+                    // handoff into sh is not safe under `parallel`.
                     def mappingTag  = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
-                    def mappingBase = "${params.MAPPING_UPLOAD_BASE.trim().replaceAll('/+$', '')}/${mappingTag}"
                     for (study in studies) {
                         def sid = study.studyId
+                        def mappingBase = "${dataRoot}/${sid}/mappings/${mappingTag}"
                         def remoteMapping = "${mappingBase}/${sid}_hpds_id_mapping.csv"
                         if (params.PREFLIGHT_ONLY) {
                             // Nothing has produced a mapping yet; pass the would-be URI so the
@@ -306,6 +300,14 @@ pipeline {
                         env.MAP_DST = remoteMapping
                         sh 'aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
                         study.mappingUri = remoteMapping
+
+                        // Only written when some patient-mapping rows found no consent entry.
+                        def localUnmatched = "downstream-artifacts/participants-migration/${sid}_unmatched_mappings.csv"
+                        if (fileExists(localUnmatched)) {
+                            env.MAP_SRC = localUnmatched
+                            env.MAP_DST = "${mappingBase}/${sid}_unmatched_mappings.csv"
+                            sh 'aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
+                        }
                     }
 
                     def results = java.util.Collections.synchronizedList([])
@@ -316,9 +318,8 @@ pipeline {
                         branches[s.studyId] = {
                             def sid = s.studyId
                             def abv = s.abv
-                            def abvLower = abv.toLowerCase()
 
-                            def inputUri = "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/${abvLower}/completed/${sid}/${sid}_allConcepts_new_search_with_data_analyzer.csv"
+                            def inputUri = "${dataRoot}/${sid}/legacy/allConcepts/${sid}_allConcepts_new_search_with_data_analyzer.csv"
 
                             def mappingUri = s.mappingUri
 
@@ -337,7 +338,7 @@ pipeline {
                                         string(name: 'ABBREVIATION', value: abv),
                                         string(name: 'INPUT',        value: inputUri),
                                         string(name: 'MAPPING',      value: mappingUri),
-                                        string(name: 'OUTPUT',       value: params.SPLIT_OUTPUT),
+                                        string(name: 'OUTPUT',       value: dataRoot),
                                         string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
                                         string(name: 'ENV',          value: params.ENV),
                                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -491,7 +492,7 @@ pipeline {
                     echo 'Merging per-consent allConcepts files where needed...'
 
                     def mergeInput = params.MERGE_ALLCONCEPTS_INPUT?.trim()
-                            ?: params.SPLIT_OUTPUT.trim()
+                            ?: params.DATA_ROOT.trim()
                     echo "merge input: ${mergeInput}"
 
                     def mergeParams = [

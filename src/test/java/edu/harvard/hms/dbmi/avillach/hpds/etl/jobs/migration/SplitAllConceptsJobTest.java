@@ -77,8 +77,8 @@ class SplitAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        Path c1File = outputDir.resolve("phs001412/c1/phs001412_allConcepts_c1.csv");
-        Path c2File = outputDir.resolve("phs001412/c2/phs001412_allConcepts_c2.csv");
+        Path c1File = outputDir.resolve("phs001412/allConcepts/c1/phs001412_allConcepts_c1.csv");
+        Path c2File = outputDir.resolve("phs001412/allConcepts/c2/phs001412_allConcepts_c2.csv");
         assertThat(c1File).exists();
         assertThat(c2File).exists();
 
@@ -115,7 +115,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-upper");
 
-        Path expected = outputDir.resolve("phs000999/c1/phs000999_allConcepts_c1.csv");
+        Path expected = outputDir.resolve("phs000999/allConcepts/c1/phs000999_allConcepts_c1.csv");
         assertThat(expected).exists();
     }
 
@@ -139,7 +139,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-no-old-ids");
 
-        Path outFile = outputDir.resolve("phs000111/c1/phs000111_allConcepts_c1.csv");
+        Path outFile = outputDir.resolve("phs000111/allConcepts/c1/phs000111_allConcepts_c1.csv");
         String content = Files.readString(outFile, StandardCharsets.UTF_8);
         assertThat(content).doesNotContain("old-legacy-id-999");
         assertThat(content).contains(String.valueOf(id1));
@@ -307,7 +307,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-format");
 
-        Path outFile = outputDir.resolve("phs000777/c1/phs000777_allConcepts_c1.csv");
+        Path outFile = outputDir.resolve("phs000777/allConcepts/c1/phs000777_allConcepts_c1.csv");
         String line = Files.readAllLines(outFile, StandardCharsets.UTF_8).getFirst();
         assertThat(line).isEqualTo(
                 "\"%s\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"".formatted(id1));
@@ -333,7 +333,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-quotes");
 
-        Path outFile = outputDir.resolve("phs000888/c1/phs000888_allConcepts_c1.csv");
+        Path outFile = outputDir.resolve("phs000888/allConcepts/c1/phs000888_allConcepts_c1.csv");
         String line = Files.readAllLines(outFile, StandardCharsets.UTF_8).getFirst();
         assertThat(line).contains("value with \"\"quotes\"\"");
     }
@@ -369,8 +369,8 @@ class SplitAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        Path c1 = outputDir.resolve("phs000123/c1/phs000123_allConcepts_c1.csv");
-        Path c2 = outputDir.resolve("phs000123/c2/phs000123_allConcepts_c2.csv");
+        Path c1 = outputDir.resolve("phs000123/allConcepts/c1/phs000123_allConcepts_c1.csv");
+        Path c2 = outputDir.resolve("phs000123/allConcepts/c2/phs000123_allConcepts_c2.csv");
         assertThat(c1).exists();
         assertThat(c2).exists();
         assertThat(Files.readAllLines(c1)).hasSize(2);

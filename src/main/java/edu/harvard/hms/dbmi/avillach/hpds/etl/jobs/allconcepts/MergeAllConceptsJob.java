@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Component
@@ -37,6 +38,10 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
 
     private static final String MERGED_SUFFIX = "_allConcepts_MERGED.csv";
     private static final String ALL_CONCEPTS_MARKER = "_allConcepts_";
+    /** Per-study subfolder holding the per-consent folders; {@code legacy/allConcepts/} is never scanned. */
+    static final String ALL_CONCEPTS_DIR = "allConcepts";
+    private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
+    private static final Pattern CONSENT_FOLDER_PATTERN = Pattern.compile("c[^/]+");
 
     private final IoResolver io;
     private final S3Client s3;
@@ -61,7 +66,7 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
         return JobExpectations.of(
                 List.of(
                         ParamSpec.required("input",
-                                "S3 prefix containing {study_id}/c{consent}/ folders with allConcepts files",
+                                "S3 prefix containing {study_id}/allConcepts/c{consent}/ folders with allConcepts files",
                                 "s3://bucket/output/"),
                         ParamSpec.optional("study-ids",
                                 "Comma-separated study ids to check. Blank discovers all study folders under input.",
@@ -82,36 +87,33 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
         String inputBase = normalizeDir(ctx.require("input"));
         Set<String> studyFilter = parseStudyFilter(ctx.get("study-ids").orElse(""));
 
-        List<String> allFiles = io.listFilesRecursive(inputBase);
-        log.info("Found {} file(s) under {}", allFiles.size(), inputBase);
+        // Each study folder also holds legacy inputs (legacy/allConcepts/, rawData/, ...), so only
+        // {study_id}/allConcepts/ is listed, never the study folder as a whole.
+        List<String> studyIds = studyFilter.isEmpty()
+                ? io.listDirectoryNames(inputBase).stream()
+                        .filter(name -> STUDY_ID_PATTERN.matcher(name).matches())
+                        .sorted()
+                        .toList()
+                : studyFilter.stream().sorted().toList();
+        log.info("Checking {} study folder(s) under {}", studyIds.size(), inputBase);
 
         Map<String, List<String>> sourceFilesByFolder = new LinkedHashMap<>();
-        for (String relativePath : allFiles) {
-            String fileName = relativePath.contains("/")
-                    ? relativePath.substring(relativePath.lastIndexOf('/') + 1)
-                    : relativePath;
-
-            if (!fileName.contains(ALL_CONCEPTS_MARKER)) {
-                continue;
-            }
-            if (fileName.endsWith(MERGED_SUFFIX)) {
-                continue;
-            }
-
-            String folder = relativePath.contains("/")
-                    ? relativePath.substring(0, relativePath.lastIndexOf('/') + 1)
-                    : "";
-
-            if (!studyFilter.isEmpty()) {
-                String studyId = extractStudyId(folder);
-                if (studyId != null && !studyFilter.contains(studyId)) {
+        for (String studyId : studyIds) {
+            String studyAllConcepts = studyId + "/" + ALL_CONCEPTS_DIR + "/";
+            for (String relativePath : io.listFilesRecursive(inputBase + studyAllConcepts)) {
+                // Only files directly inside a consent folder: c{code}/{file}
+                String[] parts = relativePath.split("/");
+                if (parts.length != 2 || !CONSENT_FOLDER_PATTERN.matcher(parts[0]).matches()) {
                     continue;
                 }
+                String fileName = parts[1];
+                if (!fileName.contains(ALL_CONCEPTS_MARKER) || fileName.endsWith(MERGED_SUFFIX)) {
+                    continue;
+                }
+                sourceFilesByFolder
+                        .computeIfAbsent(studyAllConcepts + parts[0] + "/", k -> new ArrayList<>())
+                        .add(fileName);
             }
-
-            sourceFilesByFolder
-                    .computeIfAbsent(folder, k -> new ArrayList<>())
-                    .add(fileName);
         }
 
         log.info("Discovered {} consent folder(s) containing allConcepts files{}",
@@ -153,25 +155,15 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
         return new Output(sourceFilesByFolder.size(), foldersMerged, foldersSkipped, totalFilesMerged, actions);
     }
 
-    static String extractStudyId(String folderPath) {
-        for (String segment : folderPath.split("/")) {
-            if (segment.matches("phs\\d{6}")) {
-                return segment;
-            }
-        }
-        return null;
-    }
-
+    /** {@code {study_id}/allConcepts/c{code}/} &rarr; {@code {study_id}_c{code}_allConcepts_MERGED.csv}. */
     static String buildMergedFileName(String folderPath) {
         String studyId = null;
         String consentDir = null;
         String[] segments = folderPath.split("/");
-        for (int i = 0; i < segments.length; i++) {
-            if (segments[i].matches("phs\\d{6}")) {
+        for (int i = 0; i + 2 < segments.length; i++) {
+            if (STUDY_ID_PATTERN.matcher(segments[i]).matches() && segments[i + 1].equals(ALL_CONCEPTS_DIR)) {
                 studyId = segments[i];
-                if (i + 1 < segments.length) {
-                    consentDir = segments[i + 1];
-                }
+                consentDir = segments[i + 2];
             }
         }
         if (studyId != null && consentDir != null) {

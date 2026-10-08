@@ -399,7 +399,7 @@ class AllConceptsDataGeneratorJobTest {
         setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\n");
 
         String outputDir = tempDir.resolve("output").toString();
-        String studyDir = outputDir + "/" + STUDY_ID + "/";
+        String studyDir = outputDir + "/" + STUDY_ID + "/allConcepts/";
         // Last run left files in c1, c2, and c3 (a group the SSTR reload has since removed).
         when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2", "c3", "notes"));
         String staleC2 = studyDir + "c2/" + STUDY_ID + "_allConcepts_c2.csv";
@@ -425,7 +425,7 @@ class AllConceptsDataGeneratorJobTest {
         setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\n");
 
         String outputDir = tempDir.resolve("output").toString();
-        String studyDir = outputDir + "/" + STUDY_ID + "/";
+        String studyDir = outputDir + "/" + STUDY_ID + "/allConcepts/";
         // c2 holds only another source's file, not this job's.
         when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2"));
 

@@ -88,7 +88,7 @@ variable "name_suffix" {
 
 variable "input_uri" {
   type        = string
-  description = "--input: S3 prefix containing {study_id}/c{consent}/ folders with allConcepts files"
+  description = "--input: S3 prefix containing {study_id}/allConcepts/c{consent}/ folders with allConcepts files"
 }
 
 variable "study_ids" {

@@ -18,11 +18,11 @@
 //   --abbreviation   study abbreviated name     (params.ABBREVIATION)
 //   --input          allConcepts CSV S3 URI     (params.INPUT)
 //   --mapping        hpds_id_mapping CSV S3 URI (params.MAPPING)
-//   --output         output directory           (params.OUTPUT)
+//   --output         root of per-study folders  (params.OUTPUT)
 //   RDS credentials  fetched on the runner from Secrets Manager by instance role
 //
 // Outputs
-//   Per-consent CSVs:  {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv
+//   Per-consent CSVs:  {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv
 //   split-allconcepts-<runId>.json   the JobResult
 //
 // Exit codes (see ExitCode.java)
@@ -56,8 +56,8 @@ pipeline {
                defaultValue: '',
                description: '--mapping: S3 URI of the hpds_id_mapping.csv from participants-migration')
         string(name: 'OUTPUT',
-               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/split_allconcepts/',
-               description: '--output: output location for split files. Must be an s3:// URI (or a path under /reports): any other local path resolves inside the runner container and is destroyed with the instance.')
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing/',
+               description: '--output: root of the per-study folders; split files go to {output}/{study_id}/allConcepts/c{code}/. Must be an s3:// URI (or a path under /reports): any other local path resolves inside the runner container and is destroyed with the instance.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',

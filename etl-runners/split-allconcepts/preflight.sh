@@ -57,7 +57,7 @@ check "abbreviation is non-empty" test -n "$ABV"
 # --- input allConcepts exists ------------------------------------------------
 check "allConcepts input exists: $INPUT" uri_exists "$INPUT"
 # --- mapping CSV exists ------------------------------------------------------
-# The mapping CSV is uploaded by the orchestrator (MAPPING_UPLOAD_BASE) after
+# The mapping CSV is uploaded by the orchestrator ({DATA_ROOT}/{study_id}/mappings/) after
 # participants-migration completes; it does not exist yet when running
 # preflight-only, so this stays a soft check. Runs on the Jenkins agent as its
 # own role (bdc-etl-jenkins-role), which reads the data bucket directly.
