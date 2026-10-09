@@ -161,7 +161,7 @@ provider "aws" {
 module "etl_runner" {
   source = "../../../terraform-modules/etl-runner"
 
-  # ...module_name, stack_s3_bucket, AMI, instance_type, job_name, run_id, image_tar...
+  # ...module_name, stack_s3_bucket, AMI, instance_type, job_name, run_id, context_tar...
   vpc_id                 = var.vpc_id
   subnet_id              = var.subnet_id          # blank = lowest-id subnet of vpc_id
   vpc_security_group_ids = var.vpc_security_group_ids

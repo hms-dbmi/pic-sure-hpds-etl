@@ -58,11 +58,29 @@ trap publish_status EXIT
 
 # --------------------------------------------------------------------------
 PHASE=install
+# SRCE RHEL9 golden image, initialised the way the pheno ETL environment's hosts are
+# (avillach-jenkins-bdc-etl). No containers here, so podman stays off.
+say "SRCE golden image startup"
+echo "ENABLE_PODMAN=false" > /opt/srce/startup.config
+if [ -f /opt/srce/scripts/start-gsstools.sh ]; then
+  sh /opt/srce/scripts/start-gsstools.sh
+fi
+dnf -y update
+
+# RHEL9 ships PostgreSQL as module streams; the stream selects the major version.
 say "Installing PostgreSQL ${pg_version}"
-dnf install -y "postgresql${pg_version}" "postgresql${pg_version}-server" jq tar amazon-ssm-agent
+dnf module reset -y postgresql
+dnf module enable -y "postgresql:${pg_version}"
+dnf install -y postgresql postgresql-server jq tar
 command -v aws >/dev/null 2>&1 || dnf install -y awscli
 # SSM only -- no SSH key. participant-db-stop runs the backup through it.
 systemctl enable --now amazon-ssm-agent
+
+# The golden image's nftables firewall drops unlisted inbound ports; the security group still
+# limits 5432 to the runner groups. Persisted the same way the pheno hosts persist 443.
+nft add rule inet filter input tcp dport 5432 accept
+nft list ruleset > /etc/nftables/nftables.rules
+systemctl restart nftables
 
 # --------------------------------------------------------------------------
 PHASE=configure

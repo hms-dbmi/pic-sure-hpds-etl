@@ -96,12 +96,20 @@ trap finish EXIT
 
 # --------------------------------------------------------------------------
 PHASE=install
+# SRCE RHEL9 golden image, initialised the way the pheno ETL environment's runners are
+# (avillach-jenkins-bdc-etl: pipelines/hpds-ingest/terraform/user_data.sh.integration.tpl):
+# podman is the container runtime, enabled through the SRCE startup config.
+say "SRCE golden image startup (podman)"
+echo "ENABLE_PODMAN=true" > /opt/srce/startup.config
+if [ -f /opt/srce/scripts/start-gsstools.sh ]; then
+  sh /opt/srce/scripts/start-gsstools.sh
+fi
+
 say "Installing runtime packages"
-dnf update -y
-dnf install -y docker jq amazon-ssm-agent
+dnf -y update
+dnf install -y podman jq
 command -v aws >/dev/null 2>&1 || dnf install -y awscli
 
-systemctl enable --now docker
 # SSM only -- this instance has no SSH key. The Jenkins monitor tails the log through it.
 systemctl enable --now amazon-ssm-agent
 
@@ -151,7 +159,7 @@ fi
 rm -f "$JQ_ERR"
 
 # Credentials go into --env-file, never -e: this keeps them out of the process table,
-# `docker inspect`, and any command echo.
+# `podman inspect`, and any command echo.
 {
   printf 'DB_URL=%s\n' "$DB_URL"
   printf 'DB_USERNAME=%s\n' "$(printf '%s' "$SECRET_JSON" | jq -r '.username')"
@@ -166,20 +174,29 @@ say "Job does not use the participant database; skipping credential fetch"
 # --------------------------------------------------------------------------
 PHASE=image
 JOB_EXIT=4
-say "Loading container image ${image_tar}"
-aws s3 cp "s3://${stack_s3_bucket}/etl-runner/container/${image_tar}" /tmp/image.tar.gz \
+# The image is built here rather than on the Jenkins agent, so the agent needs no container
+# runtime. The context holds target/hpds-etl.jar, etl-runners/Dockerfile and
+# etl-runners/run-job.sh at repo-relative paths. Pulling the base image needs egress to
+# public.ecr.aws; a failure here is INFRASTRUCTURE_ERROR (4), which Jenkins retries once.
+# The base image is fully qualified, so podman needs no short-name resolution.
+say "Building container image ${image_name} from ${context_tar}"
+aws s3 cp "s3://${stack_s3_bucket}/etl-runner/container/${context_tar}" /tmp/context.tar.gz \
   --region "${aws_region}" --no-progress
-gunzip -c /tmp/image.tar.gz | docker load
-rm -f /tmp/image.tar.gz
+mkdir -p /tmp/context
+tar -xzf /tmp/context.tar.gz -C /tmp/context
+podman build --platform linux/amd64 -f /tmp/context/etl-runners/Dockerfile \
+  -t "${image_name}" /tmp/context
+rm -rf /tmp/context /tmp/context.tar.gz
 
 # --------------------------------------------------------------------------
 PHASE=job
 
 say "Running job ${job_name} (run ${run_id})"
 set +e
-docker run --rm \
+# :Z relabels the reports directory so the container may write it with SELinux enforcing.
+podman run --rm \
   --env-file "$ENV_FILE" \
-  -v "$REPORTS":/reports \
+  -v "$REPORTS":/reports:Z \
   "${image_name}"
 JOB_EXIT=$?
 set -e

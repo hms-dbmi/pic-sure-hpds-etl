@@ -85,8 +85,8 @@ pipeline {
 
                     env.TF_VAR_name_suffix = "merge-allconcepts-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
-                    env.TF_VAR_image_tar = env.IMAGE_TAR
+                    env.CONTEXT_TAR = "hpds-etl-context-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_context_tar = env.CONTEXT_TAR
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} merge-allconcepts"
                     echo "input: ${params.INPUT}"
@@ -97,7 +97,6 @@ pipeline {
                     echo "--- tool versions ---"
                     make -s -C $RUNNER_DIR ensure-terraform
                     aws --version
-                    docker --version
                     jq --version
                     java -version 2>&1 | head -1
                 '''
@@ -129,9 +128,9 @@ pipeline {
             }
         }
 
-        stage('Package runner image') {
+        stage('Upload image build context') {
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                sh "make -C ${RUNNER_DIR} package CONTEXT_TAR=${env.CONTEXT_TAR}"
             }
         }
 
@@ -229,10 +228,10 @@ pipeline {
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                if (env.CONTEXT_TAR) {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
-                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.CONTEXT_TAR} \
                           --region ${AWS_REGION} || true
                     """)
                 }

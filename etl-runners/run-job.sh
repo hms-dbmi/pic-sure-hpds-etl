@@ -12,8 +12,8 @@
 #   ETL_REPORTS_DIR      optional   where the JSON report is written (default /reports)
 #   JAVA_OPTS            optional   JVM flags
 #
-# Extra arguments passed to the container are appended verbatim, so `docker run hpds-etl-runner
-# --help` still works. Values must not contain newlines: they arrive through a docker --env-file.
+# Extra arguments passed to the container are appended verbatim, so `podman run hpds-etl-runner
+# --help` still works. Values must not contain newlines: they arrive through a podman --env-file.
 set -uo pipefail
 
 JAR=/app/hpds-etl.jar

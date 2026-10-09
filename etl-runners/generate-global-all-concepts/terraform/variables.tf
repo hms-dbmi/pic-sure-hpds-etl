@@ -103,10 +103,14 @@ variable "allow_empty" {
   description = "When 'true', the job exits 0 even if the database has no data (preflight mode)."
 }
 
-variable "image_tar" {
+variable "context_tar" {
   type        = string
-  default     = "hpds-etl-runner.tar.gz"
-  description = "Container tarball under s3://<stack_s3_bucket>/etl-runner/container/"
+  default     = "hpds-etl-context.tar.gz"
+  description = <<-EOT
+    Build-context tarball (JAR, Dockerfile, run-job.sh) under s3://<stack_s3_bucket>/etl-runner/container/;
+    the instance builds the image from it. Jenkins passes a per-run name so two pipelines building
+    different commits cannot overwrite each other's context between upload and instance boot.
+  EOT
 }
 
 variable "java_opts" {

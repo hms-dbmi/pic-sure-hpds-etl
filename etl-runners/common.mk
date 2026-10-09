@@ -40,13 +40,15 @@ ENV         ?= development
 ENV_TFVARS  := $(abspath ../environments/$(ENV).tfvars)
 
 JAR         := $(REPO_ROOT)/target/hpds-etl.jar
-IMAGE_TAR   ?= hpds-etl-runner.tar.gz
-IMAGE_NAME  := $(basename $(basename $(notdir $(IMAGE_TAR))))
+# Build context for the runner image: exactly what etl-runners/Dockerfile COPYs, at
+# repo-relative paths. The image itself is built on the ephemeral instance, not here.
+CONTEXT_TAR   ?= hpds-etl-context.tar.gz
+CONTEXT_FILES := target/hpds-etl.jar etl-runners/Dockerfile etl-runners/run-job.sh
 
 # Single source of truth for the bucket: check environment file first, then runner tfvars.
 STACK_S3_BUCKET ?= $(or $(shell sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(ENV_TFVARS) 2>/dev/null),$(shell sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS)))
 AWS_REGION      ?= $(or $(shell sed -n 's/^aws_region[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(ENV_TFVARS) 2>/dev/null),$(shell sed -n 's/^aws_region[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' $(TFVARS)))
-S3_IMAGE_URI    := s3://$(STACK_S3_BUCKET)/etl-runner/container/$(IMAGE_TAR)
+S3_CONTEXT_URI  := s3://$(STACK_S3_BUCKET)/etl-runner/container/$(CONTEXT_TAR)
 
 # Per-run Terraform state. Jenkins overrides STATE_KEY so concurrent runs never share
 # state; the default is the single-run-at-a-time path.
@@ -55,7 +57,7 @@ STATE_KEY   ?= tf_backend/etl-runners/hpds-etl/$(NAME)/terraform.tfstate
 REPORTS_DIR ?= $(CURDIR)/reports
 SKIP_TESTS  ?= false
 
-.PHONY: help jar image image-save image-upload package ensure-terraform tf-path init plan apply \
+.PHONY: help jar context context-upload package ensure-terraform tf-path init plan apply \
         run monitor fetch-reports output destroy clean validate-tf
 
 help:
@@ -63,8 +65,8 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  jar            - ./mvnw package at the repo root (SKIP_TESTS=true to skip)"
-	@echo "  image          - docker build the runner image from the repo root"
-	@echo "  package        - image + save + upload the tarball to S3"
+	@echo "  context        - tar the runner image's build context (JAR, Dockerfile, run-job.sh)"
+	@echo "  package        - context + upload it to S3 (the instance builds the image)"
 	@echo ""
 	@echo "Deploy / run:"
 	@echo "  init           - terraform init (STATE_KEY=$(STATE_KEY))"
@@ -85,19 +87,17 @@ help:
 jar:
 	cd $(REPO_ROOT) && ./mvnw -B clean package $(if $(filter true,$(SKIP_TESTS)),-DskipTests,)
 
-image:
+# The agent needs no container runtime: the ephemeral instance's bootstrap (running as root)
+# runs `podman build` over this context. See terraform-modules/etl-runner/user_data.sh.tpl.
+context:
 	@test -f $(JAR) || { echo "ERROR: $(JAR) not found -- run 'make jar' first"; exit 1; }
-	cd $(REPO_ROOT) && docker build --platform linux/amd64 \
-		-f etl-runners/Dockerfile -t $(IMAGE_NAME) .
+	tar -czf $(CONTEXT_TAR) -C $(REPO_ROOT) $(CONTEXT_FILES)
 
-image-save: image
-	docker save $(IMAGE_NAME) | gzip > $(IMAGE_TAR)
+context-upload: context
+	aws s3 cp $(CONTEXT_TAR) $(S3_CONTEXT_URI) --region $(AWS_REGION) --no-progress
+	@echo "Uploaded $(S3_CONTEXT_URI)"
 
-image-upload: image-save
-	aws s3 cp $(IMAGE_TAR) $(S3_IMAGE_URI) --region $(AWS_REGION) --no-progress
-	@echo "Uploaded $(S3_IMAGE_URI)"
-
-package: image-upload
+package: context-upload
 
 # --- Terraform -----------------------------------------------------------
 
@@ -175,4 +175,4 @@ destroy:
 	$(TF) -chdir=$(TF_DIR) destroy -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS)) --auto-approve
 
 clean: destroy
-	rm -f $(IMAGE_TAR)
+	rm -f $(CONTEXT_TAR)

@@ -20,19 +20,19 @@ variable "name_suffix" {
 
 variable "stack_s3_bucket" {
   type        = string
-  description = "S3 bucket holding the Docker image tarball, run logs, and job reports."
+  description = "S3 bucket holding the image build-context tarball, run logs, and job reports."
 }
 
 variable "ami_owner_id" {
   type        = string
-  default     = "amazon"
-  description = "AMI owner account ID. Use 'amazon' for official Amazon Linux AMIs."
+  default     = "752463128620"
+  description = "AMI owner account ID. Defaults to the SRCE golden-image account."
 }
 
 variable "ami_name_pattern" {
   type        = string
-  default     = "al2023-ami-2023.*-x86_64"
-  description = "Glob pattern selecting the most recent matching AMI. Defaults to Amazon Linux 2023 x86_64."
+  default     = "srce-rhel9-golden*"
+  description = "Glob pattern selecting the most recent matching AMI. Defaults to the SRCE RHEL9 golden image, whose container runtime (podman) user_data.sh.tpl assumes."
 }
 
 variable "instance_type" {
@@ -100,20 +100,20 @@ variable "job_params" {
 
   validation {
     condition     = alltrue([for k, v in var.job_params : !can(regex("\n", v))])
-    error_message = "job_params values must not contain newlines -- they are written as lines in a docker --env-file."
+    error_message = "job_params values must not contain newlines -- they are written as lines in a podman --env-file."
   }
 }
 
 variable "image_name" {
   type        = string
   default     = "hpds-etl-runner"
-  description = "Docker image name (repository) loaded from the tarball."
+  description = "Name the instance tags the image it builds from the context tarball."
 }
 
-variable "image_tar" {
+variable "context_tar" {
   type        = string
-  default     = "hpds-etl-runner.tar.gz"
-  description = "Tarball filename under s3://<stack_s3_bucket>/etl-runner/container/."
+  default     = "hpds-etl-context.tar.gz"
+  description = "Build-context tarball (JAR, Dockerfile, run-job.sh) under s3://<stack_s3_bucket>/etl-runner/container/. The instance builds the image from it."
 }
 
 variable "java_opts" {

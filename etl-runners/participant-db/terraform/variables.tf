@@ -22,7 +22,7 @@ variable "ami_owner_id" {
 
 variable "ami_name_pattern" {
   type        = string
-  description = "Glob selecting the most recent matching AMI (Amazon Linux 2023: postgresqlNN packages)"
+  description = "Glob selecting the most recent matching AMI (SRCE RHEL9 golden: PostgreSQL from module streams)"
 }
 
 variable "iam_role_name" {
@@ -70,7 +70,7 @@ variable "root_volume_size" {
 variable "pg_version" {
   type        = string
   default     = "16"
-  description = "PostgreSQL major version (Amazon Linux 2023 package postgresqlNN-server). Restore needs >= the dump's server version."
+  description = "PostgreSQL major version: the RHEL9 module stream postgresql:<NN>. Restore needs >= the dump's server version."
 }
 
 variable "max_connections" {

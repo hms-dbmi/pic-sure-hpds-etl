@@ -25,11 +25,11 @@ module "etl_runner" {
   iam_role_name          = var.iam_role_name
   root_volume_size = var.root_volume_size
 
-  job_name  = "generate-identity-consent-mapping"
-  run_id    = var.run_id
-  image_tar = var.image_tar
-  java_opts = var.java_opts
-  log_level = var.log_level
+  job_name    = "generate-identity-consent-mapping"
+  run_id      = var.run_id
+  context_tar = var.context_tar
+  java_opts   = var.java_opts
+  log_level   = var.log_level
 
   # Touches no database: blank skips the credential fetch, so this job runs whether or
   # not the participant database is up.

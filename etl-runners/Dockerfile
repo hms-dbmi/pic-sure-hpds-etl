@@ -7,11 +7,13 @@
 #
 # The JAR is built on the Jenkins agent rather than in a builder stage: the agent already has
 # JDK 25 and the Maven cache, the image therefore runs the exact artifact the tests ran against,
-# and the ephemeral instance needs no Maven Central access.
+# and the ephemeral instance needs no Maven Central access. The image itself is built on the
+# ephemeral instance (`make package` uploads only this context), so the agent needs no Docker.
 
-# Amazon Corretto 25 (LTS) matches <java.version> in the pom. Overridable so a base image bump is
-# a build argument rather than an edit.
-ARG JAVA_IMAGE=amazoncorretto:25
+# Amazon Corretto 25 (LTS) matches <java.version> in the pom. Pulled from ECR Public rather than
+# Docker Hub: every instance pulls it, and parallel runs (one per study) would hit Docker Hub's
+# anonymous rate limit. Overridable so a base image bump is a build argument rather than an edit.
+ARG JAVA_IMAGE=public.ecr.aws/amazoncorretto/amazoncorretto:25
 FROM ${JAVA_IMAGE}
 
 # No AWS CLI or jq needed: the host does all AWS work, and the JAR reads s3:// inputs through the

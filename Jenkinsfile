@@ -58,7 +58,7 @@ pipeline {
         string(name: 'SSTR_JOB', defaultValue: 'sstr-populate-rds-participants',
                description: 'Jenkins job that runs etl-runners/sstr-populate-rds-participants/Jenkinsfile')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
-               description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state.')
+               description: 'Run the Testcontainers *IT suites, in AWS CodeBuild (etl-runners/integration-tests; the agent needs no Docker). These are the only checks that assert real DB state.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep loading the remaining studies when one fails, then fail the build with a summary. Safe: each study is loaded in its own transaction, scoped to its own study_id.')
         booleanParam(name: 'PARALLEL_STUDY_LOADS', defaultValue: false,
@@ -106,7 +106,12 @@ pipeline {
 
         stage('Tests') {
             steps {
-                sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
+                // With integration tests on, `./mvnw verify` (unit + *IT suites) runs in AWS
+                // CodeBuild: Testcontainers needs a container runtime, and the agent has none.
+                // run-codebuild.sh brings the JUnit reports back to target/ for the step below.
+                sh(params.RUN_INTEGRATION_TESTS
+                    ? 'etl-runners/integration-tests/run-codebuild.sh "$ENV" "$BUILD_TAG"'
+                    : './mvnw -B test')
             }
             post {
                 always {

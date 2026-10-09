@@ -10,17 +10,20 @@
 aws_region       = "us-east-1"
 aws_account_id   = "515157839325"
 stack_s3_bucket  = "bdc-etl-data-d0d6191"
-ami_owner_id     = "amazon"
-ami_name_pattern = "al2023-ami-2023.*-x86_64"
+# SRCE RHEL9 golden image, the same AMI the pheno ETL environment's runners and Jenkins host use
+# (avillach-jenkins-bdc-etl: pipelines/hpds-ingest/terraform/hpds-ingest.tfvars). Its container
+# runtime is podman; the bootstraps enable it through /opt/srce/startup.config.
+ami_owner_id     = "752463128620"
+ami_name_pattern = "srce-rhel9-golden*"
 
 # Instance profile role for every ephemeral instance (runners and the participant DB).
 iam_role_name = "bdc-etl-jenkins-role"
 
-# Network. subnet_id blank = the lowest-id subnet in vpc_id. Pin it once the subnet with
-# routes to S3 and SSM is confirmed -- the runners and the participant DB must share it (or
-# at least share routing) for the runners to reach Postgres.
+# Network. The private subnet the pheno environment's hpds-ingest runners use (it carries the
+# subnet-type=private tag the pheno Jenkins host selects by). The runners and the participant DB
+# must share it (or at least share routing) for the runners to reach Postgres.
 vpc_id                 = "vpc-0fcb0b3dc2167e8b4"
-subnet_id              = ""
+subnet_id              = "subnet-03a30d72bd12478fc"
 vpc_security_group_ids = ["sg-0932143f21f7c533b"]
 
 # Participant database. Created by participant-db-start and destroyed by participant-db-stop;

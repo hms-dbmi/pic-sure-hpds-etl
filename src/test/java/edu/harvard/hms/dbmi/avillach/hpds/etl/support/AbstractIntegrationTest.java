@@ -13,7 +13,8 @@ import org.testcontainers.utility.DockerImageName;
  * both.
  *
  * <p>Extend this and {@code @Autowired} the beans under test. Requires Docker to be
- * running -- these tests exercise the real JDBC/S3 paths, not mocks.
+ * running -- these tests exercise the real JDBC/S3 paths, not mocks. Jenkins runs them in AWS
+ * CodeBuild (etl-runners/integration-tests); locally, any Docker daemon works.
  *
  * <p>The containers are started in a static initializer rather than with {@code @Testcontainers}
  * and {@code @Container}. That extension stops static containers when each test class finishes and
@@ -25,11 +26,15 @@ import org.testcontainers.utility.DockerImageName;
 @SpringBootTest
 public abstract class AbstractIntegrationTest {
 
+    // ECR Public mirrors rather than Docker Hub: CodeBuild (where Jenkins runs these suites)
+    // shares egress IPs, and anonymous Docker Hub pulls from them hit the rate limit.
     protected static final PostgreSQLContainer POSTGRES =
-            new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
+            new PostgreSQLContainer(DockerImageName.parse("public.ecr.aws/docker/library/postgres:16-alpine")
+                    .asCompatibleSubstituteFor("postgres"));
 
     protected static final LocalStackContainer LOCALSTACK =
-            new LocalStackContainer(DockerImageName.parse("localstack/localstack:3.4"))
+            new LocalStackContainer(DockerImageName.parse("public.ecr.aws/localstack/localstack:3.4")
+                    .asCompatibleSubstituteFor("localstack/localstack"))
                     .withServices("s3");
 
     static {

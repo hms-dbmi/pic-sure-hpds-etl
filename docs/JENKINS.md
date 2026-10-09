@@ -115,14 +115,14 @@ The participant DB lifecycle, dump location, and recovery are in
 Jenkins agent                          ephemeral EC2 (self-terminating)
 ─────────────                          ────────────────────────────────
 ./mvnw package        ─ target/hpds-etl.jar
-docker build          ─ hpds-etl-runner image
-docker save | gzip    ─▶ s3://<stack>/etl-runner/container/<run>.tar.gz
+tar JAR + Dockerfile  ─▶ s3://<stack>/etl-runner/container/hpds-etl-context-<run>.tar.gz
+  + run-job.sh            (build context only: the agent has no container runtime)
 require-db.sh         ─ DB-backed runners only: fail fast if the participant DB is down
 terraform apply       ─▶ launch instance ──▶ user_data:
                                               fetch participant DB secret (instance role)
                                                 → DB_URL / DB_USERNAME / DB_PASSWORD
                                                 (skipped for DB-free jobs)
-                                              docker load + docker run
+                                              podman build (context from S3) + podman run
                                               java -jar hpds-etl.jar --job=… --run-id=…
                                               sync /reports  ─▶ s3://…/etl-runner/reports/<run>/
                                               upload log     ─▶ s3://…/etl-runner/logs/<run>.log
@@ -272,12 +272,15 @@ Validators never abort on the first failure, so one console read shows everythin
 |------------------------|--------------------------------------------------------------------------|
 | JDK 25                 | matches `<java.version>` in `pom.xml`                                    |
 | Maven wrapper          | `./mvnw`, checked into the repo                                          |
-| Docker                 | builds the runner image; also needed for the `*IT` suites                |
 | Terraform ≥ 1.3        | provisions runners and the participant DB (`common.mk` installs 1.9.8 if missing) |
-| AWS CLI v2             | image upload, report sync, SSM, EC2 describe, Secrets Manager describe   |
+| AWS CLI v2             | build-context upload, report sync, SSM, EC2 describe, Secrets Manager describe, CodeBuild |
 | `jq`                   | report and sentinel parsing                                              |
 | `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module |
+| `git`                  | `run-codebuild.sh` zips the commit with `git archive`                    |
 | `bdc-etl-jenkins-role` | the agent's own role; it does all AWS work as this role (no profiles)    |
+
+The agent needs **no container runtime**: runner images are built on the ephemeral instances,
+and the `*IT` suites run in CodeBuild (see [Integration Tests in CodeBuild](#3-integration-tests-in-codebuild)).
 
 ### Jenkins Plugins
 
@@ -308,8 +311,8 @@ its value once Postgres has restored, and `participant-db-stop` deletes it. Deta
 `bdc-etl-jenkins-role` is the instance profile for every runner and the participant DB, and the
 Jenkins agent's role. It needs:
 
-- **S3** read/write on `bdc-etl-data-d0d6191`: `etl-runner/*` (image tarballs, logs, reports,
-  DB boot sentinels), `tf_backend/*` (Terraform state), and `avillach-73-bdcatalyst-etl/*`
+- **S3** read/write on `bdc-etl-data-d0d6191`: `etl-runner/*` (image build contexts, CodeBuild
+  sources and test reports, logs, reports, DB boot sentinels), `tf_backend/*` (Terraform state), and `avillach-73-bdcatalyst-etl/*`
   (job inputs and outputs, mapping handoffs, participant DB dumps); plus `s3:ListBucket`,
   `s3:DeleteObject` (the generator's stale-file removal), and `s3:GetBucketVersioning` (the
   generator's pre-flight). Versioning must be **Enabled** on `bdc-etl-data-d0d6191`.
@@ -324,6 +327,9 @@ Jenkins agent's role. It needs:
   temporary secret-access policy for as long as the database is up
 - **Secrets Manager**: `CreateSecret`, `DeleteSecret`, `DescribeSecret`, `TagResource` on
   `hpds-etl-*` secrets (Get/Put on the live secret is granted by the DB stack itself)
+- **CodeBuild**: `StartBuild`, `BatchGetBuilds`, `StopBuild` on `hpds-etl-integration-tests`,
+  and `logs:GetLogEvents` on its log group — attached to this role by the integration-tests stack
+  itself (see below), not granted by hand
 - **STS**: `sts:AssumeRole` on the NHLBI exchange roles
   (`arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3` and its 600168050588 twin),
   which trust this role
@@ -331,26 +337,80 @@ Jenkins agent's role. It needs:
 A minimal runner policy is in
 [`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md).
 
-### 3. Networking
+### 3. Integration Tests in CodeBuild
+
+The orchestrators run `./mvnw verify` (unit + Testcontainers `*IT` suites) in the CodeBuild
+project `hpds-etl-integration-tests`, defined in
+[`etl-runners/integration-tests/`](../etl-runners/integration-tests/). It is a **persistent**
+stack, one state per environment like the participant DB's, applied **once** (and again only
+when its Terraform changes):
+
+```bash
+cd etl-runners/integration-tests
+make init plan     # review
+make init apply
+make verify        # optional smoke test: runs the suites for the current HEAD
+```
+
+Each pipeline run, [`run-codebuild.sh`](../etl-runners/integration-tests/run-codebuild.sh)
+uploads `git archive HEAD` to `s3://<stack>/etl-runner/codebuild/<BUILD_TAG>/source.zip`, starts
+a build, polls it, prints the log tail on failure, and syncs the JUnit reports back into
+`target/` for the `junit` step. An aborted Jenkins build stops its CodeBuild build. The build's
+own spec is [`buildspec.yml`](../etl-runners/integration-tests/buildspec.yml), shipped inside the
+source zip, so it changes with the commit and needs no apply.
+
+The project runs **outside the VPC** (it needs Maven Central, `corretto.aws`, and ECR Public, not
+anything in the VPC) and in **privileged mode**, which CodeBuild requires for the Docker daemon
+Testcontainers uses. Test images come from ECR Public, not Docker Hub, to avoid Docker Hub's
+anonymous pull limit on CodeBuild's shared IPs.
+
+**Permissions.** The stack creates and wires everything below; nothing is granted by hand.
+
+| Who | Gets | Created by |
+|-----|------|-----------|
+| CodeBuild service role `hpds-etl-integration-tests-codebuild` (new) | `logs:CreateLogStream`/`PutLogEvents` on its log group; `s3:GetObject`/`GetObjectVersion`/`PutObject` on `etl-runner/codebuild/*`; `s3:GetBucketLocation`/`GetBucketAcl` on the bucket | the stack |
+| `bdc-etl-jenkins-role` (existing) | `codebuild:StartBuild`/`BatchGetBuilds`/`StopBuild` on the project; `logs:GetLogEvents` on its log group | the stack (inline policy, as the participant DB does for its secret) |
+
+**Applying it needs more than Jenkins has.** Whoever runs `make apply` needs `iam:CreateRole`,
+`iam:PutRolePolicy`, `iam:PassRole` (on the new service role), `iam:GetRole`/`DeleteRole`/
+`DeleteRolePolicy`, `codebuild:CreateProject`/`UpdateProject`/`BatchGetProjects`/`DeleteProject`,
+and `logs:CreateLogGroup`/`PutRetentionPolicy`/`DescribeLogGroups`/`DeleteLogGroup`, plus the
+state bucket. `bdc-etl-jenkins-role` is not expected to hold `iam:CreateRole`, so this is a
+one-time apply by an account administrator. After that, pipeline runs need only the Jenkins
+permissions in the table.
+
+### 4. Networking and AMI
+
+Aligned with the pheno ETL environment (`avillach-jenkins-bdc-etl`), which runs in the same
+account, VPC, and bucket:
 
 | Setting                  | Value                                                                             |
 |--------------------------|-----------------------------------------------------------------------------------|
 | VPC                      | `vpc-0fcb0b3dc2167e8b4`                                                           |
+| Subnet                   | `subnet-03a30d72bd12478fc` (private; the pheno hpds-ingest runners' subnet), runners and DB alike |
 | Runner security group    | `sg-0932143f21f7c533b`                                                            |
-| Subnet                   | `subnet_id = ""` → the lowest-id subnet in the VPC, for runners and DB alike      |
+| AMI                      | newest `srce-rhel9-golden*` owned by `752463128620` (SRCE RHEL9 golden image)     |
+| Container runtime        | podman, enabled by `ENABLE_PODMAN=true` in `/opt/srce/startup.config`             |
 
-The subnet must have an S3 path (gateway endpoint or NAT) and reach SSM. Pin `subnet_id` once the
-right subnet is confirmed rather than relying on the lookup. The participant DB gets its own
-security group allowing 5432 **only** from the runner security group(s), created and destroyed
-with the database, so the shared group is never modified.
+Every bootstrap starts the way the pheno hosts do: write `/opt/srce/startup.config`, run
+`/opt/srce/scripts/start-gsstools.sh`, `dnf -y update`. Runners then `podman build` the job image
+and `podman run` it (reports mounted with `:Z`, so SELinux stays enforcing). The participant DB
+installs Postgres from the RHEL9 `postgresql:<pg_version>` module stream and adds an nftables rule
+for 5432, since the golden image's firewall drops unlisted inbound ports.
+
+The subnet must have an S3 path (gateway endpoint or NAT) and reach SSM, and runners need
+outbound HTTPS to `public.ecr.aws` (NAT or internet gateway): each one pulls the
+`amazoncorretto:25` base image when it builds the job image. No VPC endpoint serves ECR Public.
+The participant DB gets its own security group allowing 5432 **only** from the runner security
+group(s), created and destroyed with the database, so the shared group is never modified.
 
 ### Credential Handling
 
 Credentials never reach Jenkins. The DB password is generated on the DB instance and leaves it only
 through Secrets Manager: it is never in Terraform state, user data, or the console log. Runners
 receive the secret's name, fetch it with their instance role, and write the values to a `600`-mode
-file passed as `docker --env-file` (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`), keeping them out of
-the process table and `docker inspect`. `xtrace` is disabled in both bootstraps for the same reason.
+file passed as `podman --env-file` (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`), keeping them out of
+the process table and `podman inspect`. `xtrace` is disabled in both bootstraps for the same reason.
 
 ---
 
@@ -494,7 +554,8 @@ Jenkinsfile                     permanent orchestrator
 Jenkinsfile.migration           migration orchestrator (TEMPORARY)
 terraform-modules/etl-runner/   shared self-terminating-runner module
 etl-runners/
-├─ Dockerfile                   one image for every job (the JAR selects the job at runtime)
+├─ Dockerfile                   one image for every job (the JAR selects the job at runtime);
+│                               built on each ephemeral instance, never on the agent
 ├─ run-job.sh                   container entrypoint: env vars to --flags, java -jar, exit code
 ├─ common.mk                    shared build/deploy/monitor targets
 ├─ environments/
@@ -504,6 +565,9 @@ etl-runners/
 │  ├─ monitor-runner.sh         polls for the sentinel; exits with the job's exit code
 │  ├─ require-db.sh             fails fast on the agent when the participant DB is down
 │  └─ validate-report.sh        assertions true of every JobResult report
+├─ integration-tests/           SHARED: CodeBuild project the orchestrators run the *IT suites in
+│  ├─ Makefile  buildspec.yml  run-codebuild.sh
+│  └─ terraform/                project, service role, log group, Jenkins-role policy
 ├─ participant-db/              SHARED: the per-pipeline Postgres server
 │  ├─ Jenkinsfile.start  Jenkinsfile.stop  Makefile  wait-ready.sh  backup-via-ssm.sh
 │  └─ terraform/                instance, SG, secret, user_data.sh.tpl, backup.sh.tpl
