@@ -106,7 +106,15 @@ pipeline {
 
         stage('Tests') {
             steps {
-                sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
+                // Jenkins runs in a podman container that reaches the HOST's podman through the
+                // mounted /var/run/docker.sock. Ryuk (Testcontainers' cleanup container) would bind
+                // that path from the host, where it does not exist, and never start; and the test
+                // containers publish their ports on the host, which is not this container's
+                // localhost. Containers are still removed when the JVM exits normally.
+                withEnv(['TESTCONTAINERS_RYUK_DISABLED=true',
+                         'TESTCONTAINERS_HOST_OVERRIDE=host.containers.internal']) {
+                    sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
+                }
             }
             post {
                 always {
