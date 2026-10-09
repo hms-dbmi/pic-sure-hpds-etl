@@ -28,7 +28,6 @@ etl-runners/
 ├── common.mk                           Shared build/deploy/monitor targets
 ├── common/                             Shared shell libraries
 ├── environments/                       Per-environment tfvars (development.tfvars)
-├── integration-tests/                  SHARED: CodeBuild project for the *IT suites (docs/JENKINS.md)
 ├── participant-db/                     SHARED: participant DB start/stop (docs/PARTICIPANT_DB.md)
 ├── participants-migration/             TEMPORARY (JobType.MIGRATION)
 ├── split-allconcepts/                  TEMPORARY (JobType.MIGRATION)
@@ -95,9 +94,10 @@ Defined in `common.mk` unless noted.
 |-----------------|---------------------------------------------------------------------------|
 | `help`          | List targets for this runner (default goal)                               |
 | `jar`           | `./mvnw clean package` at the repository root (`SKIP_TESTS=true` to skip) |
-| `context`       | Tar the image build context (JAR, `Dockerfile`, `run-job.sh`) to `$(CONTEXT_TAR)` |
-| `context-upload`| Upload the tarball to `s3://<stack>/etl-runner/container/`                |
-| `package`       | `context` + `context-upload`; the instance runs `podman build` from it    |
+| `image`         | `docker buildx build` the runner image from the repository root           |
+| `image-save`    | `docker save` the image to `$(IMAGE_TAR)`                                 |
+| `image-upload`  | Upload the tarball to `s3://<stack>/etl-runner/container/`                |
+| `package`       | `image` + `image-save` + `image-upload`                                   |
 | `init`          | `terraform init -reconfigure` with the backend config and `STATE_KEY`     |
 | `validate-tf`   | `terraform validate`                                                      |
 | `plan`          | `terraform plan`                                                          |
@@ -107,7 +107,7 @@ Defined in `common.mk` unless noted.
 | `fetch-reports` | `aws s3 sync` the run's reports into `$(REPORTS_DIR)`                     |
 | `output`        | `terraform output`                                                        |
 | `destroy`       | `terraform destroy --auto-approve`                                        |
-| `clean`         | `destroy` plus removal of the local context tarball                       |
+| `clean`         | `destroy` plus removal of the local image tarball                         |
 | `preflight`     | Per-runner: input-layout checks (defined in the runner's `Makefile`)      |
 | `validate`      | Per-runner: report assertions (defined in the runner's `Makefile`)        |
 
@@ -125,9 +125,10 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 |----------------------|------------------------------------------------------------|-----------------------------------------------------------------------------------|
 | `TF_VAR_run_id`      | (required)                                                 | Correlation id; becomes `--run-id`, the report filename, and the S3 report prefix |
 | `TF_VAR_name_suffix` | `""`                                                       | Per-run suffix keeping AWS resource names unique                                  |
-| `TF_VAR_context_tar` | `hpds-etl-context.tar.gz`                                  | Per-run image build-context tarball name                                          |
+| `TF_VAR_image_tar`   | `hpds-etl-runner.tar.gz`                                   | Per-run container tarball name                                                    |
 | `STATE_KEY`          | `tf_backend/etl-runners/hpds-etl/<name>/terraform.tfstate` | Terraform state key; set per run for concurrent builds                            |
-| `CONTEXT_TAR`        | `hpds-etl-context.tar.gz`                                  | Local tarball name, matched to `TF_VAR_context_tar`                               |
+| `IMAGE_TAR`          | `hpds-etl-runner.tar.gz`                                   | Local tarball name, matched to `TF_VAR_image_tar`                                 |
+| `IMAGE_NAME`         | `hpds-etl-runner`                                          | Docker image name                                                                 |
 | `ENV`                | `development`                                              | Target environment; selects `environments/<ENV>.tfvars`                           |
 | `SKIP_TESTS`         | `false`                                                    | Skip the JAR test suites in `make jar`                                            |
 | `REPORTS_DIR`        | `<runner>/reports`                                         | Where `fetch-reports` syncs to                                                    |

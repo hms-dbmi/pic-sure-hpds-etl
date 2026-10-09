@@ -169,5 +169,3 @@ an environment may run.
 ```
 
 Integration tests (`*IT`) require a running Docker daemon (Testcontainers Postgres + LocalStack).
-Jenkins runs them in AWS CodeBuild instead, so its agent needs no Docker; see
-[docs/JENKINS.md](docs/JENKINS.md#3-integration-tests-in-codebuild).

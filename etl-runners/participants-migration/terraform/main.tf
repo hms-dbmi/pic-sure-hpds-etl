@@ -23,11 +23,11 @@ module "etl_runner" {
   iam_role_name          = var.iam_role_name
   root_volume_size = var.root_volume_size
 
-  job_name    = "participants-migration"
-  run_id      = var.run_id
-  context_tar = var.context_tar
-  java_opts   = var.java_opts
-  log_level   = var.log_level
+  job_name  = "participants-migration"
+  run_id    = var.run_id
+  image_tar = var.image_tar
+  java_opts = var.java_opts
+  log_level = var.log_level
 
   db_secret_id = var.db_secret_id
 

@@ -79,7 +79,7 @@ pipeline {
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
-               description: 'Run the Testcontainers *IT suites, in AWS CodeBuild (etl-runners/integration-tests; the agent needs no Docker). These are the only checks that assert real DB state, so leaving them on is strongly preferred before a migration.')
+               description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state, so leaving them on is strongly preferred before a migration.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate every migration input layout and stop, without provisioning anything (the participant DB included)')
         choice(name: 'ENV', choices: ['development'],
@@ -101,16 +101,11 @@ pipeline {
 
         // The gate for the whole run: nothing is provisioned until the suites pass.
         // `verify` runs surefire (*Test) and then failsafe (*IT, Testcontainers Postgres +
-        // LocalStack), in CodeBuild; `test` runs surefire alone, on the agent. There is no supported way to run only the
+        // LocalStack); `test` runs surefire alone. There is no supported way to run only the
         // ITs, and the unit suites are fast, so the two modes are simply verify vs test.
         stage('Tests') {
             steps {
-                // With integration tests on, `./mvnw verify` (unit + *IT suites) runs in AWS
-                // CodeBuild: Testcontainers needs a container runtime, and the agent has none.
-                // run-codebuild.sh brings the JUnit reports back to target/ for the step below.
-                sh(params.RUN_INTEGRATION_TESTS
-                    ? 'etl-runners/integration-tests/run-codebuild.sh "$ENV" "$BUILD_TAG"'
-                    : './mvnw -B test')
+                sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
             }
             post {
                 always {

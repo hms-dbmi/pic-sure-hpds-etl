@@ -20,7 +20,7 @@ variable "name_suffix" {
 
 variable "stack_s3_bucket" {
   type        = string
-  description = "S3 bucket holding the image build-context tarball, run logs, and job reports."
+  description = "S3 bucket holding the Docker image tarball, run logs, and job reports."
 }
 
 variable "ami_owner_id" {
@@ -107,13 +107,13 @@ variable "job_params" {
 variable "image_name" {
   type        = string
   default     = "hpds-etl-runner"
-  description = "Name the instance tags the image it builds from the context tarball."
+  description = "Image name (repository) podman loads from the tarball."
 }
 
-variable "context_tar" {
+variable "image_tar" {
   type        = string
-  default     = "hpds-etl-context.tar.gz"
-  description = "Build-context tarball (JAR, Dockerfile, run-job.sh) under s3://<stack_s3_bucket>/etl-runner/container/. The instance builds the image from it."
+  default     = "hpds-etl-runner.tar.gz"
+  description = "Tarball filename under s3://<stack_s3_bucket>/etl-runner/container/."
 }
 
 variable "java_opts" {

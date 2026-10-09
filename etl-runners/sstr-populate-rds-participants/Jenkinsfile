@@ -36,7 +36,7 @@
 //   0 success | 2 validation | 3 data, study rolled back | 4 infrastructure, retried once |
 //   5 config | 1 unknown | 124 monitor timeout
 //
-// Agent requirements: JDK 25, Maven wrapper, Terraform >= 1.3, AWS CLI v2, jq, and the
+// Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, and the
 // bdc-etl-jenkins-role instance profile.
 // =============================================================================
 
@@ -129,8 +129,8 @@ pipeline {
                     // Unique per study AND per build: a sweep may run several of these at once.
                     env.TF_VAR_name_suffix = "${params.STUDY_ID}-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.CONTEXT_TAR = "hpds-etl-context-${env.BASE_RUN_ID}.tar.gz"
-                    env.TF_VAR_context_tar = env.CONTEXT_TAR
+                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_image_tar = env.IMAGE_TAR
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.STUDY_ID}"
                     echo "study:  ${params.STUDY_ID}"
@@ -142,6 +142,7 @@ pipeline {
                     echo "--- tool versions ---"
                     make -s -C $RUNNER_DIR ensure-terraform
                     aws --version
+                    docker --version
                     jq --version
                     java -version 2>&1 | head -1
                 '''
@@ -153,7 +154,7 @@ pipeline {
                 // `package` runs the unit suites; a failing test must stop the run before any
                 // infrastructure exists. The Testcontainers *IT suites bind on `verify` and
                 // are gated by the orchestrator (/Jenkinsfile) instead, so a
-                // single-study reload does not pay for container-backed Postgres and LocalStack.
+                // single-study reload does not pay for Docker-backed Postgres and LocalStack.
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
             post {
@@ -179,10 +180,10 @@ pipeline {
             }
         }
 
-        stage('Upload image build context') {
+        stage('Package runner image') {
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
-                sh "make -C ${RUNNER_DIR} package CONTEXT_TAR=${env.CONTEXT_TAR}"
+                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
             }
         }
 
@@ -296,10 +297,10 @@ pipeline {
                              "sstr-populate-rds-participants-etl-instance-profile-${env.TF_VAR_name_suffix}"
                     }
                 }
-                if (env.CONTEXT_TAR) {
+                if (env.IMAGE_TAR) {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
-                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.CONTEXT_TAR} \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
                 }

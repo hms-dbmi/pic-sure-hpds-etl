@@ -174,19 +174,13 @@ say "Job does not use the participant database; skipping credential fetch"
 # --------------------------------------------------------------------------
 PHASE=image
 JOB_EXIT=4
-# The image is built here rather than on the Jenkins agent, so the agent needs no container
-# runtime. The context holds target/hpds-etl.jar, etl-runners/Dockerfile and
-# etl-runners/run-job.sh at repo-relative paths. Pulling the base image needs egress to
-# public.ecr.aws; a failure here is INFRASTRUCTURE_ERROR (4), which Jenkins retries once.
-# The base image is fully qualified, so podman needs no short-name resolution.
-say "Building container image ${image_name} from ${context_tar}"
-aws s3 cp "s3://${stack_s3_bucket}/etl-runner/container/${context_tar}" /tmp/context.tar.gz \
+# Built and saved (docker build / docker save | gzip) on the Jenkins agent, loaded here with
+# podman -- the same split the pheno ETL environment's hpds-ingest runners use.
+say "Loading container image ${image_tar}"
+aws s3 cp "s3://${stack_s3_bucket}/etl-runner/container/${image_tar}" /tmp/image.tar.gz \
   --region "${aws_region}" --no-progress
-mkdir -p /tmp/context
-tar -xzf /tmp/context.tar.gz -C /tmp/context
-podman build --platform linux/amd64 -f /tmp/context/etl-runners/Dockerfile \
-  -t "${image_name}" /tmp/context
-rm -rf /tmp/context /tmp/context.tar.gz
+gunzip -c /tmp/image.tar.gz | podman load
+rm -f /tmp/image.tar.gz
 
 # --------------------------------------------------------------------------
 PHASE=job

@@ -62,8 +62,8 @@ locals {
       module_name     = var.module_name
       job_name        = var.job_name
       run_id          = var.run_id
-      image_name      = var.image_name
-      context_tar     = var.context_tar
+      image_name      = trimsuffix(trimsuffix(var.image_tar, ".gz"), ".tar")
+      image_tar       = var.image_tar
       db_secret_id      = var.db_secret_id
       reports_prefix    = local.reports_prefix
       container_env_b64 = local.container_env_b64

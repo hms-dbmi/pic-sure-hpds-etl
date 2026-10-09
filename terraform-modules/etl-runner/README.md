@@ -6,9 +6,8 @@ publishes its `ExitCode` plus JSON reports to S3.
 The instance:
 
 - boots the SRCE RHEL9 golden image (the pheno ETL environment's AMI) with podman enabled
-- pulls the image build context (JAR, `Dockerfile`, `run-job.sh`) from S3, `podman build`s the
-  `hpds-etl-runner` image, and runs it -- so the Jenkins agent needs no container runtime. The
-  base image comes from `public.ecr.aws`, which the subnet must be able to reach
+- pulls the `hpds-etl-runner` image tarball (built and saved on the Jenkins agent) from S3, and
+  `podman load`s and `podman run`s it
 - for jobs that use the participant database, fetches its credentials from the temporary Secrets
   Manager secret (`db_secret_id`) with its instance profile and passes them to the container as
   `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` through a `600`-mode `--env-file` (never `-e`, never
@@ -97,8 +96,8 @@ The shared values (`aws_region`, `stack_s3_bucket`, `vpc_id`, `subnet_id`,
 | `ami_owner_id`                               | AMI owner account id                                                        | `string`       | `"amazon"`                             | no       |
 | `ami_name_pattern`                           | Glob selecting the most recent matching AMI                                 | `string`       | `"srce-rhel9-golden*"`           | no       |
 | `instance_type`                              | EC2 instance type                                                           | `string`       | `"m5.large"`                           | no       |
-| `image_name`                                 | Name the instance tags the image it builds                                  | `string`       | `"hpds-etl-runner"`                    | no       |
-| `context_tar`                                | Build-context tarball filename under `etl-runner/container/`                | `string`       | `"hpds-etl-context.tar.gz"`            | no       |
+| `image_name`                                 | Docker image name loaded from the tarball                                   | `string`       | `"hpds-etl-runner"`                    | no       |
+| `image_tar`                                  | Tarball filename under `etl-runner/container/`                              | `string`       | `"hpds-etl-runner.tar.gz"`             | no       |
 | `java_opts`                                  | `JAVA_OPTS` for the container JVM                                           | `string`       | `"-XX:MaxRAMPercentage=75"`            | no       |
 | `log_level`                                  | `LOG_LEVEL` for the hpds loggers                                            | `string`       | `"INFO"`                               | no       |
 | `reports_s3_prefix`                          | Override the report prefix                                                  | `string`       | `etl-runner/reports/<module>/<run_id>` | no       |
