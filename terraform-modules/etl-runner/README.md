@@ -57,6 +57,7 @@ module "etl_runner" {
   subnet_id              = var.subnet_id
   vpc_security_group_ids = var.vpc_security_group_ids
   iam_role_name          = var.iam_role_name      # bdc-etl-jenkins-role
+  iam_instance_profile_name = var.iam_instance_profile_name   # bdc-etl-jenkins-temp-profile
   root_volume_size       = var.root_volume_size
 
   job_name = "sstr-populate-rds-participants"
@@ -94,7 +95,8 @@ the Jenkins server (empty when there is none).
 | `vpc_id`                                     | VPC; its lowest-id subnet is used when `subnet_id` is blank                 | `string`       | `""`                                   | one of   |
 | `subnet_id`                                  | Subnet to launch in; blank = looked up from `vpc_id`                        | `string`       | `""`                                   | one of   |
 | `vpc_security_group_ids`                     | Security groups (blank = VPC default)                                       | `list(string)` | `[]`                                   | no       |
-| `iam_role_name`                              | Pre-existing role attached as instance profile                              | `string`       | `"bdc-etl-jenkins-role"`               | no       |
+| `iam_role_name`                              | Pre-existing role the instance runs as                                      | `string`       | `"bdc-etl-jenkins-role"`               | no       |
+| `iam_instance_profile_name`                  | Pre-existing instance profile to attach; blank creates one per run          | `string`       | `""`                                   | no       |
 | `uses_participant_db`                        | Job needs the participant DB; `false` skips the credential step             | `bool`         | `false`                                | no       |
 | `db_credentials_json`                        | Participant DB credentials JSON (sensitive); required when the above is set | `string`       | `""`                                   | no       |
 | `job_params`                                 | Job parameters, keys with underscores → `--kebab-case` flags                | `map(string)`  | `{}`                                   | no       |
@@ -131,8 +133,10 @@ container does all S3 work as the instance role. The one job that reads another 
 
 ## IAM
 
-The module attaches, but does not create, `var.iam_role_name` (`bdc-etl-jenkins-role`). It is the
-only principal the job runs as, so it needs:
+The module does not create `var.iam_role_name` (`bdc-etl-jenkins-role`). With
+`iam_instance_profile_name` set (`bdc-etl-jenkins-temp-profile` in development) it attaches that
+existing profile and creates no IAM resources at all; blank, it creates a per-run profile around
+the role. The role is the only principal the job runs as, so it needs:
 
 ```json
 {

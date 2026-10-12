@@ -70,6 +70,15 @@ variable "iam_role_name" {
   EOT
 }
 
+variable "iam_instance_profile_name" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Pre-existing instance profile to attach (it must wrap iam_role_name). Blank creates a
+    per-run profile, <module_name>-etl-instance-profile[-<name_suffix>], around iam_role_name.
+  EOT
+}
+
 # ---------------------------------------------------------------------------
 # hpds-etl job contract
 #

@@ -166,6 +166,7 @@ module "etl_runner" {
   subnet_id              = var.subnet_id          # blank = lowest-id subnet of vpc_id
   vpc_security_group_ids = var.vpc_security_group_ids
   iam_role_name          = var.iam_role_name      # bdc-etl-jenkins-role
+  iam_instance_profile_name = var.iam_instance_profile_name   # bdc-etl-jenkins-temp-profile
 
   # DB-backed jobs only; omit both if the job touches no database.
   uses_participant_db = true
@@ -175,7 +176,7 @@ module "etl_runner" {
 }
 ```
 
-Declare `aws_account_id`, `vpc_id`, `subnet_id`, and `iam_role_name` in its `variables.tf`
+Declare `aws_account_id`, `vpc_id`, `subnet_id`, `iam_role_name`, and `iam_instance_profile_name` in its `variables.tf`
 (copy them from an existing runner). A DB-backed job also declares the credentials variable:
 
 ```hcl

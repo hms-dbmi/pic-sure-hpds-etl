@@ -19,6 +19,11 @@ ami_name_pattern = "srce-rhel9-golden*"
 # Instance profile role for every ephemeral instance (runners and the participant DB).
 iam_role_name = "bdc-etl-jenkins-role"
 
+# Pre-existing instance profile every ephemeral instance attaches (the one the Jenkins server
+# uses; it wraps iam_role_name). This account does not allow creating instance profiles at
+# runtime. Blank would make each stack create its own around iam_role_name instead.
+iam_instance_profile_name = "bdc-etl-jenkins-temp-profile"
+
 # Network. The private subnet the pheno environment's hpds-ingest runners use (it carries the
 # subnet-type=private tag the pheno Jenkins host selects by). The runners and the participant DB
 # must share it (or at least share routing) for the runners to reach Postgres.

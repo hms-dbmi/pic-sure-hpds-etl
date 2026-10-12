@@ -28,7 +28,7 @@ Stack: [`etl-runners/participant-db/`](../etl-runners/participant-db/). Schema r
 orchestrator (/Jenkinsfile or /Jenkinsfile.migration)
   Build ▸ Tests ▸ (Resolve studies)
   ▸ Start participant DB ── participant-db-start
-  │     terraform apply: instance profile, EC2 instance
+  │     terraform apply: EC2 instance (shared instance profile)
   │     instance boot:   install Postgres ▸ restore backups/participant_db.tar (or fresh schema)
   │                      ▸ write host/port/dbname/username/password to
   │                        /etc/participant-db/credentials.json (root-only, on the instance)
@@ -41,7 +41,7 @@ orchestrator (/Jenkinsfile or /Jenkinsfile.migration)
         SSM: pg_dump --format=d ▸ tar ▸ upload ▸ verify size and dumped-at
              SUCCESS or UNSTABLE:  overwrite participant_db.tar               (the restore point)
              otherwise:            overwrite participant_db_not_promoted.tar
-        terraform destroy: instance, profile
+        terraform destroy: instance
         forget-credentials: delete the credentials file on the Jenkins server
 ```
 

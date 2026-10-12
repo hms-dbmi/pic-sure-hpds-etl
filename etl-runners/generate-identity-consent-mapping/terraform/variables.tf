@@ -49,6 +49,12 @@ variable "iam_role_name" {
   description = "Instance profile role; the job does all S3 work as this role"
 }
 
+variable "iam_instance_profile_name" {
+  type        = string
+  default     = ""
+  description = "Pre-existing instance profile to attach (environments/<ENV>.tfvars). Blank creates one around iam_role_name."
+}
+
 variable "vpc_security_group_ids" {
   type        = list(string)
   default     = []

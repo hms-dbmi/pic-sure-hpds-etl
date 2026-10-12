@@ -308,8 +308,10 @@ writes its connection details to a root-only file on itself once Postgres has re
 
 ### 2. IAM
 
-`bdc-etl-jenkins-role` is the instance profile for every runner and the participant DB, and the
-Jenkins agent's role. It needs:
+`bdc-etl-jenkins-role` is the role every runner and the participant DB run as, and the Jenkins
+agent's role. They attach it through the pre-existing instance profile
+`bdc-etl-jenkins-temp-profile` (`iam_instance_profile_name` in `environments/<ENV>.tfvars`, the same
+profile the Jenkins server uses); nothing creates an instance profile at runtime. The role needs:
 
 - **S3** read/write on `bdc-etl-data-d0d6191`: `etl-runner/*` (image tarballs, logs, reports,
   DB boot sentinels), `tf_backend/*` (Terraform state), and `avillach-73-bdcatalyst-etl/*`
@@ -321,8 +323,8 @@ Jenkins agent's role. It needs:
   DB backup, and fetching the DB credentials)
 - **EC2 / IAM for Terraform**: create/describe/terminate instances (`require-db.sh` also uses
   `ec2:DescribeInstances` to check the DB is running), describe subnets/VPCs/AMIs (no
-  security-group permissions: no group is created at runtime); `iam:CreateInstanceProfile`/`DeleteInstanceProfile`/
-  `AddRoleToInstanceProfile`/`RemoveRoleFromInstanceProfile`, and `iam:PassRole` on itself
+  security-group permissions: no group is created at runtime); `iam:PassRole` on itself, to launch
+  instances with `bdc-etl-jenkins-temp-profile` (no instance-profile permissions: none is created)
 - **STS**: `sts:AssumeRole` on the NHLBI exchange roles
   (`arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3` and its 600168050588 twin),
   which trust this role
@@ -572,12 +574,6 @@ etl-runners/
 
 The monitor gives up at `JOB_TIMEOUT_SECONDS` (default 7200) and exits 124. The instance still
 terminates itself. Check the tail of the runner log in S3 for the last phase reached.
-
-### Leaked Instance Profile
-
-`terraform destroy` runs in `post { always }`. If a build is hard-killed, the instance profile
-`<job>-etl-instance-profile-<suffix>` can survive; the instance itself always terminates, so no
-compute is billed. Delete the profile manually or re-run `make destroy` with the same `STATE_KEY`.
 
 ### Participant DB Left Running
 

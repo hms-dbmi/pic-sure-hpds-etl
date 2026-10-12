@@ -75,10 +75,13 @@ data "aws_vpc" "selected" {
 
 # --- Instance ---------------------------------------------------------------
 
+# Only when no pre-existing profile is named: this account does not allow creating instance
+# profiles at runtime, so environments set iam_instance_profile_name.
 resource "aws_iam_instance_profile" "db" {
-  name = "${local.name}-profile"
-  role = var.iam_role_name
-  tags = local.tags
+  count = var.iam_instance_profile_name == "" ? 1 : 0
+  name  = "${local.name}-profile"
+  role  = var.iam_role_name
+  tags  = local.tags
 }
 
 resource "aws_instance" "db" {
@@ -86,7 +89,7 @@ resource "aws_instance" "db" {
   instance_type          = var.instance_type
   subnet_id              = local.subnet_id
   vpc_security_group_ids = var.vpc_security_group_ids
-  iam_instance_profile   = aws_iam_instance_profile.db.name
+  iam_instance_profile   = var.iam_instance_profile_name != "" ? var.iam_instance_profile_name : aws_iam_instance_profile.db[0].name
 
   # NOT terminate-on-shutdown, unlike the runners: between a successful start and a
   # successful stop, the instance holds the only copy of the pipeline's writes. An

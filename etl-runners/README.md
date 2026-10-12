@@ -211,6 +211,7 @@ block so `make` picks it up automatically; the orchestrators pass it to every jo
    | `aws_region`             | Region (if different)                                                |
    | `stack_s3_bucket`        | Bucket for container images, logs, reports, and Terraform state     |
    | `iam_role_name`          | Instance profile role (and the agent's role) in that account         |
+   | `iam_instance_profile_name` | Existing instance profile wrapping that role; blank creates one per run |
    | `vpc_id` / `subnet_id`   | Target VPC; blank `subnet_id` uses its lowest-id subnet — pin it     |
    | `vpc_security_group_ids` | Runner security group(s); the only sources allowed to reach the DB   |
    | `ami_owner_id` / `ami_name_pattern` | AMI: the SRCE RHEL9 golden image (bootstraps assume podman and RHEL9 module streams) |

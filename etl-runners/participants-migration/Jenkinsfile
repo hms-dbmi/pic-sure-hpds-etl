@@ -272,13 +272,12 @@ pipeline {
             script {
                 if (env.TF_INITIALISED == 'true') {
                     // The instance self-terminates, so this only reclaims the Terraform
-                    // state and the instance profile -- never fatal.
+                    // state -- never fatal.
                     int rc = sh(returnStatus: true,
                                 script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
                     if (rc != 0) {
-                        echo "WARNING: terraform destroy returned ${rc}. The runner terminates itself, " +
-                             "but check for a leftover instance profile: " +
-                             "participants-migration-etl-instance-profile-${env.BUILD_NUMBER}"
+                        echo "WARNING: terraform destroy returned ${rc}. The runner terminates itself; " +
+                             "only its Terraform state is left behind."
                     }
                 }
                 // Don't leave per-build images in the deployment bucket.

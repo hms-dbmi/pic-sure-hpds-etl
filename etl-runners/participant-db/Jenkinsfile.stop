@@ -2,8 +2,8 @@
 // SHARED -- participant-db-stop
 //
 // Takes the participant database down at the end of a pipeline run: pg_dumps it to S3 over SSM,
-// verifies the dump landed, and only then destroys the instance and its instance profile, and
-// deletes the credentials saved on this Jenkins server.
+// verifies the dump landed, and only then destroys the instance, and deletes the credentials
+// saved on this Jenkins server.
 //
 // PROMOTE_BACKUP decides whether the next participant-db-start restores this dump: true
 // overwrites backups/participant_db.tar. The orchestrators pass true only when the pipeline

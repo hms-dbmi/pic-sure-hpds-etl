@@ -82,10 +82,13 @@ locals {
   merged_tags = merge(local.default_tags, var.tags)
 }
 
+# Only when no pre-existing profile is named: this account does not allow creating instance
+# profiles at runtime, so environments set iam_instance_profile_name.
 resource "aws_iam_instance_profile" "etl_runner_profile" {
-  name = "${var.module_name}-etl-instance-profile${local.suffix}"
-  role = var.iam_role_name
-  tags = local.merged_tags
+  count = var.iam_instance_profile_name == "" ? 1 : 0
+  name  = "${var.module_name}-etl-instance-profile${local.suffix}"
+  role  = var.iam_role_name
+  tags  = local.merged_tags
 }
 
 module "etl_runner" {
@@ -101,7 +104,7 @@ module "etl_runner" {
   # not allow creating them at runtime, so runners use only vpc_security_group_ids (whose
   # egress rules must allow S3, SSM, and package mirrors).
   create_security_group = false
-  iam_instance_profile                 = aws_iam_instance_profile.etl_runner_profile.name
+  iam_instance_profile                 = var.iam_instance_profile_name != "" ? var.iam_instance_profile_name : aws_iam_instance_profile.etl_runner_profile[0].name
   instance_initiated_shutdown_behavior = "terminate"
 
   user_data_replace_on_change = true

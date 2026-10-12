@@ -22,6 +22,7 @@ module "etl_runner" {
   subnet_id              = var.subnet_id
   vpc_security_group_ids = var.vpc_security_group_ids
   iam_role_name          = var.iam_role_name
+  iam_instance_profile_name = var.iam_instance_profile_name
   root_volume_size = var.root_volume_size
 
   job_name  = "all-concepts-data-generator"
