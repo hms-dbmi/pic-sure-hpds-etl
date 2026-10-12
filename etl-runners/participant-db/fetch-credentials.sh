@@ -28,11 +28,22 @@ CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --region "$REGION" \
 
 START=$(date +%s)
 while :; do
-    STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-               --region "$REGION" --query Status --output text 2>/dev/null || echo Pending)
+    # InvocationDoesNotExist is normal for a few seconds after send-command; any other error
+    # (e.g. AccessDenied) is fatal and shown, not mistaken for Pending.
+    if ! STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+                    --region "$REGION" --query Status --output text 2>&1); then
+        if [[ "$STATUS" != *InvocationDoesNotExist* ]]; then
+            echo "ERROR: ssm get-command-invocation failed: $STATUS"
+            exit 1
+        fi
+        STATUS=Pending
+    fi
     case "$STATUS" in Pending|InProgress|Delayed) ;; *) break ;; esac
     if (( $(date +%s) - START >= TIMEOUT )); then
-        echo "ERROR: gave up waiting for the credentials command (last status $STATUS)"
+        echo "ERROR: gave up waiting for the credentials command (last status $STATUS)."
+        echo "       Pending means the instance's SSM agent never picked it up: check that the instance"
+        echo "       is Online in Systems Manager > Fleet Manager (AmazonSSMManagedInstanceCore on its"
+        echo "       role, and a network path to the ssm/ssmmessages/ec2messages endpoints)."
         exit 1
     fi
     sleep "$POLL"
