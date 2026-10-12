@@ -48,6 +48,8 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the migration orchestrator (Jenkinsfile.migration) copy this job's reports.
+        copyArtifactPermission('hpds-etl/*')
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
         // Two concurrent migrations would write the same RDS tables from different
         // snapshots of the legacy export. Never allow it.

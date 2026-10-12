@@ -94,7 +94,7 @@ jar:
 
 image:
 	@test -f $(JAR) || { echo "ERROR: $(JAR) not found -- run 'make jar' first"; exit 1; }
-	cd $(REPO_ROOT) && docker buildx build --platform linux/amd64 \
+	cd $(REPO_ROOT) && docker buildx build --platform linux/amd64 --load \
 		-f etl-runners/Dockerfile -t $(IMAGE_NAME) .
 
 image-save: image
