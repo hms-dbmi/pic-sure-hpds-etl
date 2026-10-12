@@ -129,8 +129,8 @@ variable "restore_from" {
   type        = string
   default     = ""
   description = <<-EOT
-    What to restore at boot. Blank: the dump named by <backups>/LATEST (a fresh schema from
-    schema.sql if there is no LATEST). "none": a fresh schema even if dumps exist. Otherwise a
+    What to restore at boot. Blank: <backups>/participant_db.tar (a fresh schema from
+    schema.sql if there is none). "none": a fresh schema even if a dump exists. Otherwise a
     dump file name under <backups>/, or a full s3:// URI to a tarred pg_dump --format=d dump.
   EOT
 

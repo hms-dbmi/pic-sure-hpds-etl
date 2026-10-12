@@ -15,8 +15,9 @@ locals {
   subnet_id = var.subnet_id != "" ? var.subnet_id : sort(data.aws_subnets.vpc[0].ids)[0]
 
   # Where dumps live: s3://<backup_s3_bucket>/<backup_s3_prefix>/<env>/backups/
-  #   participant_db_<UTC timestamp>.tar   one per participant-db-stop
-  #   LATEST                               file name of the dump the next start restores
+  #   participant_db.tar               the restore point; each promoted stop overwrites it
+  #   participant_db_not_promoted.tar  the last failed run's dump
+  # The bucket is versioned: earlier dumps are older versions of these two keys.
   backup_key_prefix = "${var.backup_s3_prefix}/${var.env_name}/backups"
 
   # Boot sentinel and log, next to the runners' own (s3://<stack>/etl-runner/...).

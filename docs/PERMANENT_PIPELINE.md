@@ -35,7 +35,7 @@ Build ▸ Tests ▸ Resolve studies
                       │
                       ▼
           ┌───────────────────────┐
-          │  Start participant DB │  participant-db-start: restore LATEST dump from S3
+          │  Start participant DB │  participant-db-start: restore participant_db.tar from S3
           └───────────┬───────────┘
                       ▼
           ┌───────────────────────┐
@@ -64,7 +64,7 @@ Build ▸ Tests ▸ Resolve studies
           │  Merge AllConcepts    │  (consent folders needing a merge)
           └───────────────────────┘
 
-post { always }:  participant-db-stop  (pg_dump to S3; LATEST promoted only on SUCCESS/UNSTABLE)
+post { always }:  participant-db-stop  (pg_dump to S3; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
 ```
 
 Each stage runs only if the previous stage succeeded. The participant database exists only
@@ -164,11 +164,12 @@ every such study — before the database is started or any runner is provisioned
 
 **Job:** `participant-db-start` ([`etl-runners/participant-db/Jenkinsfile.start`](../etl-runners/participant-db/Jenkinsfile.start))
 
-Brings up the Postgres server, restoring the dump named by `backups/LATEST` (or a fresh
+Brings up the Postgres server, restoring `backups/participant_db.tar` (or a fresh
 schema when there is none), and publishes its connection details to a temporary secret the
-runners read. Fails if a database is already running in the environment — another pipeline is
-using it, or a previous stop failed. Only a database this build started is stopped by this
-build. Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+runners read. If a database is already running in the environment, it is reused as-is
+(`RESTART_DB_IF_RUNNING=false`, the default) or dumped and replaced from the restore point
+(`true`). This build stops whichever database it started or reused; it never stops one when its
+start failed. Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -412,10 +413,12 @@ Runs only if Stage 7 succeeded (or was skipped because no study is unprocessed).
 
 Runs in `post { always }` whenever this build started the database. It `pg_dump`s the
 database to S3, verifies the upload, and destroys the server and its secret. The dump becomes
-the next run's restore point (`LATEST`) only if the build result so far is SUCCESS or
-UNSTABLE; a failed or aborted run is still dumped, but `LATEST` stays on the last good dump.
+the next run's restore point (`participant_db.tar`) only if the build result so far is SUCCESS or
+UNSTABLE; a failed or aborted run is still dumped, but `participant_db.tar` stays on the last good dump.
 If the stop fails, the build fails and the database is left running with its writes intact —
-re-run `participant-db-stop`. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+re-run `participant-db-stop`. With `KEEP_DB_ON_FAILURE` (the default), a FAILED build skips the
+stop altogether and leaves the database up for debugging; run `participant-db-stop` with
+`PROMOTE_BACKUP=false` when done. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -476,6 +479,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
+| `RESTART_DB_IF_RUNNING` | `false` | If a participant DB is already running: `false` reuses it, `true` dumps it (not promoted), destroys it, and starts fresh (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#when-a-database-is-already-running)) |
+| `KEEP_DB_ON_FAILURE` | `true` | On a FAILED build, skip the stop and leave the database running for debugging (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#debugging-a-failed-run)) |
 | `ENV` | `development` | Selects `etl-runners/environments/<ENV>.tfvars` |
 
 Job-name parameters resolve relative to the `hpds-etl` Jenkins folder.

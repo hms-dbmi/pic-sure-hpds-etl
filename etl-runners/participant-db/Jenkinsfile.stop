@@ -5,10 +5,12 @@
 // verifies the dump landed, and only then destroys the instance, its security group, its
 // instance profile, and the temporary Secrets Manager secret.
 //
-// PROMOTE_BACKUP decides whether the next participant-db-start restores this dump. The
-// orchestrators pass true only when the pipeline succeeded (SUCCESS or UNSTABLE); a failed run
-// is still dumped -- kept for inspection or a deliberate RESTORE_FROM -- but LATEST stays on the
-// last good dump.
+// PROMOTE_BACKUP decides whether the next participant-db-start restores this dump: true
+// overwrites backups/participant_db.tar. The orchestrators pass true only when the pipeline
+// succeeded (SUCCESS or UNSTABLE); a failed run is still dumped, to
+// participant_db_not_promoted.tar -- kept for inspection or a deliberate RESTORE_FROM -- and
+// participant_db.tar stays on the last good dump. The bucket is versioned, so an overwrite
+// keeps the previous dump as an older version.
 //
 // If the backup fails, the database is LEFT RUNNING and this job fails: destroying it would
 // lose every write since the last dump. Fix the cause and re-run this job.
@@ -28,7 +30,7 @@ pipeline {
 
     parameters {
         booleanParam(name: 'PROMOTE_BACKUP', defaultValue: true,
-               description: 'Point backups/LATEST at this dump, so the next start restores it. Orchestrators pass false when the pipeline failed.')
+               description: 'Overwrite backups/participant_db.tar with this dump, so the next start restores it. False writes participant_db_not_promoted.tar instead. Orchestrators pass false when the pipeline failed.')
         booleanParam(name: 'SKIP_BACKUP', defaultValue: false,
                description: 'DANGER: destroy WITHOUT dumping, discarding every write since the last dump. Only for a database known to hold nothing new (e.g. cleaning up after a failed start).')
         string(name: 'BACKUP_TIMEOUT_SECONDS', defaultValue: '7200',
@@ -113,7 +115,7 @@ pipeline {
         success {
             echo "Participant database in '${env.ENV}' is down" +
                  (env.DB_INSTANCE_ID && !params.SKIP_BACKUP
-                     ? (params.PROMOTE_BACKUP ? '; its dump is the new LATEST.' : '; dumped, LATEST unchanged.')
+                     ? (params.PROMOTE_BACKUP ? '; its dump is the new participant_db.tar.' : '; dumped to participant_db_not_promoted.tar, participant_db.tar unchanged.')
                      : '.')
         }
         failure {

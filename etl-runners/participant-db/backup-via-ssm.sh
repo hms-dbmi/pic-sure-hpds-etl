@@ -4,6 +4,10 @@
 # confirms from the agent side that the dump it reports is really in S3. Only after this exits
 # 0 may the database be destroyed.
 #
+# The dump overwrites a fixed key (participant_db.tar, or participant_db_not_promoted.tar), so
+# the previous dump survives only as an S3 version: this refuses to start unless the bucket's
+# versioning is Enabled.
+#
 # Usage: backup-via-ssm.sh <instance-id> <promote: true|false> <timeout-seconds> <backup-s3-uri>
 # Exit:  0 dump uploaded and verified | 1 anything else
 set -uo pipefail
@@ -14,6 +18,17 @@ TIMEOUT="${3:-7200}"
 BACKUP_URI="${4:?backup s3 uri}"
 REGION="${AWS_REGION:-us-east-1}"
 POLL=15
+
+BUCKET="${BACKUP_URI#s3://}"; BUCKET="${BUCKET%%/*}"
+PREFIX="${BACKUP_URI#s3://$BUCKET/}"; PREFIX="${PREFIX%/}"
+
+VERSIONING=$(aws s3api get-bucket-versioning --bucket "$BUCKET" --region "$REGION" \
+               --query Status --output text 2>&1)
+if [[ "$VERSIONING" != "Enabled" ]]; then
+    echo "ERROR: versioning on s3://$BUCKET is '$VERSIONING', not Enabled. The backup overwrites the"
+    echo "       previous dump, which would then be lost. Enable versioning on the bucket and re-run."
+    exit 1
+fi
 
 echo "Backing up participant DB $INSTANCE_ID (promote=$PROMOTE, timeout ${TIMEOUT}s)"
 
@@ -58,26 +73,20 @@ fi
 
 FILE=$(sed -n 's/^BACKUP_RESULT file=\([^ ]*\) .*/\1/p' <<<"$OUT" | tail -1)
 BYTES=$(sed -n 's/^BACKUP_RESULT .*bytes=\([0-9]*\) .*/\1/p' <<<"$OUT" | tail -1)
-if [[ -z "$FILE" || -z "$BYTES" ]]; then
+DUMPED_AT=$(sed -n 's/^BACKUP_RESULT .*dumped_at=\([^ ]*\) .*/\1/p' <<<"$OUT" | tail -1)
+if [[ -z "$FILE" || -z "$BYTES" || -z "$DUMPED_AT" ]]; then
     echo "ERROR: backup reported success but printed no BACKUP_RESULT line"
     exit 1
 fi
 
-BUCKET="${BACKUP_URI#s3://}"; BUCKET="${BUCKET%%/*}"
-PREFIX="${BACKUP_URI#s3://$BUCKET/}"; PREFIX="${PREFIX%/}"
-REMOTE=$(aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$FILE" --region "$REGION" \
-           --query ContentLength --output text 2>/dev/null || echo missing)
-if [[ "$REMOTE" != "$BYTES" ]]; then
-    echo "ERROR: s3://$BUCKET/$PREFIX/$FILE is $REMOTE bytes, the instance reported $BYTES"
+# Size and dumped-at both match: the current version is this dump, not an earlier one.
+read -r REMOTE REMOTE_AT < <(aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$FILE" --region "$REGION" \
+           --query '[ContentLength, Metadata."dumped-at"]' --output text 2>/dev/null || echo missing missing)
+if [[ "$REMOTE" != "$BYTES" || "$REMOTE_AT" != "$DUMPED_AT" ]]; then
+    echo "ERROR: s3://$BUCKET/$PREFIX/$FILE is $REMOTE bytes dumped-at $REMOTE_AT;" \
+         "the instance reported $BYTES bytes dumped-at $DUMPED_AT"
     exit 1
 fi
 
-if [[ "$PROMOTE" == "true" ]]; then
-    LATEST=$(aws s3 cp "s3://$BUCKET/$PREFIX/LATEST" - --region "$REGION" 2>/dev/null | tr -d '[:space:]')
-    if [[ "$LATEST" != "$FILE" ]]; then
-        echo "ERROR: LATEST is '$LATEST', expected '$FILE'"
-        exit 1
-    fi
-fi
-
-echo "Verified s3://$BUCKET/$PREFIX/$FILE ($BYTES bytes)$([[ "$PROMOTE" == true ]] && echo '; LATEST points at it')"
+echo "Verified s3://$BUCKET/$PREFIX/$FILE ($BYTES bytes, dumped-at $DUMPED_AT)" \
+     "$([[ "$PROMOTE" == true ]] && echo '-- the next start restores it' || echo '-- not promoted; participant_db.tar unchanged')"

@@ -24,6 +24,6 @@ output "log_s3_uri" {
 }
 
 output "backup_s3_uri" {
-  description = "Prefix holding participant_db_<ts>.tar dumps and the LATEST pointer"
+  description = "Prefix holding participant_db.tar (the restore point) and participant_db_not_promoted.tar"
   value       = "s3://${var.backup_s3_bucket}/${local.backup_key_prefix}/"
 }

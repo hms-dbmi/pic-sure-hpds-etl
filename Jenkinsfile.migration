@@ -20,7 +20,9 @@
 //
 // The participant database is not long-lived: 'Start participant DB' brings it up (restoring the
 // last promoted dump from S3) after the tests, and post { always } dumps it back to S3 and tears
-// it down -- promoting the dump only when this build succeeded. See docs/PARTICIPANT_DB.md.
+// it down -- promoting the dump only when this build succeeded. A failed build leaves the
+// database running for debugging instead (KEEP_DB_ON_FAILURE, on by default). See
+// docs/PARTICIPANT_DB.md.
 //
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
 // SKIP_TESTS=true: they rebuild the JAR in their own workspace but do not re-run suites this
@@ -76,6 +78,10 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_STOP_JOB', defaultValue: 'participant-db-stop',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.stop')
+        booleanParam(name: 'RESTART_DB_IF_RUNNING', defaultValue: false,
+               description: 'If a participant database is already running (e.g. kept by a failed build): false reuses it as-is, writes and all. True dumps it to participant_db_not_promoted.tar, destroys it, and starts fresh from participant_db.tar.')
+        booleanParam(name: 'KEEP_DB_ON_FAILURE', defaultValue: true,
+               description: 'If this build FAILS, leave the participant database running (not dumped, not destroyed) for debugging. Run DB_STOP_JOB with PROMOTE_BACKUP=false when done; until then the next pipeline reuses it (see RESTART_DB_IF_RUNNING). Aborted builds are always torn down.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
@@ -133,15 +139,15 @@ pipeline {
                         propagate: false,
                         parameters: [
                             string(name: 'RUN_ID', value: "${env.BUILD_TAG}-db"),
+                            booleanParam(name: 'RESTART_IF_RUNNING', value: params.RESTART_DB_IF_RUNNING),
                             string(name: 'ENV',    value: params.ENV),
                         ])
                     if (downstream.result != 'SUCCESS') {
                         error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}: the participant " +
-                              'database did not come up. If it says a database is already running, another pipeline ' +
-                              'is using it or a previous stop failed -- see that job\'s console.')
+                              'database did not come up -- see that job\'s console.')
                     }
-                    // Only now does post { always } own the teardown. Never stop a database this
-                    // build did not start: it may be another pipeline's.
+                    // Only now does post { always } own the teardown -- including of a database this
+                    // build reused rather than started. Never stop one when the start failed.
                     env.DB_STARTED = 'true'
                 }
             }
@@ -540,7 +546,7 @@ pipeline {
     post {
         always {
             script {
-                stopParticipantDb(params.DB_STOP_JOB, params.ENV)
+                stopParticipantDb(params.DB_STOP_JOB, params.ENV, params.KEEP_DB_ON_FAILURE)
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
@@ -560,11 +566,27 @@ pipeline {
 }
 
 // Dumps the participant DB to S3 and tears it down, if this build started it. The dump becomes
-// the next run's restore point (LATEST) only when the build got this far without failing; a
-// failed or aborted run is still dumped, but LATEST stays on the last good dump. A failed stop
+// the next run's restore point (participant_db.tar) only when the build got this far without failing; a
+// failed or aborted run is still dumped, but participant_db.tar stays on the last good dump. A failed stop
 // fails the build loudly: the database is then still up, holding writes no dump has captured.
-def stopParticipantDb(String stopJob, String envName) {
+//
+// With keepOnFailure, a FAILED build skips the stop entirely and leaves the database up for
+// debugging. Nothing is dumped or lost: the instance holds the run's writes until someone runs the
+// stop job; a pipeline run meanwhile reuses it unless RESTART_DB_IF_RUNNING is set.
+def stopParticipantDb(String stopJob, String envName, boolean keepOnFailure) {
     if (env.DB_STARTED != 'true') {
+        return
+    }
+    if (keepOnFailure && currentBuild.currentResult == 'FAILURE') {
+        echo "KEEP_DB_ON_FAILURE: the build failed, so the participant database in '${envName}' is LEFT RUNNING " +
+             "for debugging (not dumped, not destroyed).\n" +
+             "  Connect:  aws ssm start-session --target <id of EC2 instance hpds-etl-participant-db-${envName}>,\n" +
+             "            then sudo -u postgres psql etl_db\n" +
+             "  Finish:   run ${stopJob} with ENV=${envName}, PROMOTE_BACKUP=false. It dumps to\n" +
+             "            participant_db_not_promoted.tar and destroys the instance; participant_db.tar is untouched.\n" +
+             "  Until then the next pipeline in '${envName}' reuses this database, writes and all, unless\n" +
+             "  it sets RESTART_DB_IF_RUNNING=true (dump it, then start fresh from participant_db.tar)."
+        currentBuild.description = "participant DB left running (${envName}) -- run ${stopJob} when done"
         return
     }
     boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']

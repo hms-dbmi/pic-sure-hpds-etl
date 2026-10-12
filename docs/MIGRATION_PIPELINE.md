@@ -47,7 +47,7 @@ Build ▸ Tests
       │
       ▼
 ┌─────────────────────────┐
-│  Start participant DB    │  participant-db-start: restore LATEST dump from S3
+│  Start participant DB    │  participant-db-start: restore participant_db.tar from S3
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
@@ -76,7 +76,7 @@ Build ▸ Tests
 │  Merge AllConcepts       │  (consent folders under DATA_ROOT needing a merge)
 └─────────────────────────┘
 
-post { always }:  participant-db-stop  (pg_dump to S3; LATEST promoted only on SUCCESS/UNSTABLE)
+post { always }:  participant-db-stop  (pg_dump to S3; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
 ```
 
 Stage ordering is strict: each stage runs only if the previous stage succeeded (UNSTABLE
@@ -143,9 +143,9 @@ jobs skip tests.
 
 ## Stage 2: Start Participant DB
 
-**Job:** `participant-db-start`. Restores the dump named by `backups/LATEST` (or a fresh schema
-from `schema.sql`) and publishes the connection secret. Fails if a database is already running
-in the environment. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial
+**Job:** `participant-db-start`. Restores `backups/participant_db.tar` (or a fresh schema
+from `schema.sql`) and publishes the connection secret. A database already running in the
+environment is reused, or with `RESTART_DB_IF_RUNNING=true` dumped and replaced. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial
 seed dump of the legacy RDS database must be placed.
 
 ---
@@ -332,8 +332,10 @@ allConcepts files into it. See
 ## Post: Stop Participant DB
 
 **Job:** `participant-db-stop`, in `post { always }` whenever this build started the database.
-Dumps it to S3 and destroys it; the dump becomes `LATEST` only if the build is SUCCESS or
-UNSTABLE. A failed stop fails the build and leaves the database running. See
+Dumps it to S3 and destroys it; the dump becomes `participant_db.tar` only if the build is SUCCESS or
+UNSTABLE. A failed stop fails the build and leaves the database running. With
+`KEEP_DB_ON_FAILURE` (the default), a FAILED build skips the stop altogether and leaves the
+database up for debugging; run `participant-db-stop` with `PROMOTE_BACKUP=false` when done. See
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
@@ -392,6 +394,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge; blank = `DATA_ROOT` |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
+| `RESTART_DB_IF_RUNNING` | `false` | If a participant DB is already running: `false` reuses it, `true` dumps it (not promoted), destroys it, and starts fresh (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#when-a-database-is-already-running)) |
+| `KEEP_DB_ON_FAILURE` | `true` | On a FAILED build, skip the stop and leave the database running for debugging (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#debugging-a-failed-run)) |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep splitting remaining studies when one fails |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
 | `PREFLIGHT_ONLY` | `false` | Validate inputs and stop without provisioning (see [Pre-flight Only](#pre-flight-only)) |

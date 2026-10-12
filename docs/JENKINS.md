@@ -312,7 +312,7 @@ Jenkins agent's role. It needs:
   DB boot sentinels), `tf_backend/*` (Terraform state), and `avillach-73-bdcatalyst-etl/*`
   (job inputs and outputs, mapping handoffs, participant DB dumps); plus `s3:ListBucket`,
   `s3:DeleteObject` (the generator's stale-file removal), and `s3:GetBucketVersioning` (the
-  generator's pre-flight). Versioning must be **Enabled** on `bdc-etl-data-d0d6191`.
+  generator's pre-flight and the participant DB backup). Versioning must be **Enabled** on `bdc-etl-data-d0d6191`.
 - **SSM**: `AmazonSSMManagedInstanceCore` for the instances; `ssm:SendCommand`,
   `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation` for the agent (log tailing and the
   DB backup)
@@ -466,10 +466,11 @@ Notes:
 
 ## Concurrency
 
-There is **one participant database per environment**. `participant-db-start` refuses to start a
-second while the environment's Terraform state still holds an instance, so two pipelines cannot
-silently share or replace it; the second fails at its `Start participant DB` stage, and its
-`post` does not touch the first pipeline's database.
+There is **one participant database per environment**. A `participant-db-start` that finds one
+already running reuses it (or, with `RESTART_DB_IF_RUNNING=true`, dumps and replaces it), so
+**do not run two pipelines at once in the same environment**: the second would share or replace
+the first's database, and whichever finishes first stops it under the other. See
+[PARTICIPANT_DB.md](PARTICIPANT_DB.md#when-a-database-is-already-running).
 
 Study loads are **sequential by default** (`PARALLEL_STUDY_LOADS`, default `false`, on the
 permanent orchestrator). Parallel loads are correct but rarely worth it. Study scoping alone does
@@ -567,9 +568,10 @@ compute is billed. Delete the profile manually or re-run `make destroy` with the
 
 ### Participant DB Left Running
 
-If an orchestrator ends with "participant-db-stop … ended FAILURE", or a later start says a
-database is already running, the instance is still up and may hold writes no dump has captured.
-Re-run `participant-db-stop`; it backs up before destroying. See
+If an orchestrator ends with "participant-db-stop … ended FAILURE", the instance is still up and
+may hold writes no dump has captured. A failed build with `KEEP_DB_ON_FAILURE=true` (the default)
+leaves it up on purpose, for debugging. Re-run `participant-db-stop`; it backs up before
+destroying. The next pipeline reuses a database left running unless `RESTART_DB_IF_RUNNING=true`. See
 [PARTICIPANT_DB.md](PARTICIPANT_DB.md#recovery-and-troubleshooting).
 
 ### Cost

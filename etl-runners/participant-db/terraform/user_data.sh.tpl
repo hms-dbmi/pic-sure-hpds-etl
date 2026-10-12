@@ -137,11 +137,24 @@ DUMP_URI=""
 
 case "$RESTORE_FROM" in
   "")
-    LATEST=$(aws s3 cp "$BACKUPS/LATEST" - --region "${aws_region}" 2>/dev/null | tr -d '[:space:]' || true)
-    if [[ -n "$LATEST" ]]; then
-      DUMP_URI="$BACKUPS/$LATEST"
+    # The restore point is always participant_db.tar (older dumps are its S3 versions).
+    # Prefixes from before the single dump have timestamped dumps named by a LATEST pointer;
+    # restore from that until the first promoted stop writes participant_db.tar.
+    # Only a 404 means "no dump": any other error must not quietly fall through to a fresh schema.
+    if HEAD_ERR=$(aws s3api head-object --bucket "${backup_s3_bucket}" \
+                    --key "${backup_key_prefix}/participant_db.tar" --region "${aws_region}" 2>&1 >/dev/null); then
+      DUMP_URI="$BACKUPS/participant_db.tar"
+    elif [[ "$HEAD_ERR" != *"Not Found"* && "$HEAD_ERR" != *"404"* ]]; then
+      say "ERROR: cannot check $BACKUPS/participant_db.tar: $HEAD_ERR"
+      exit 1
     else
-      say "No $BACKUPS/LATEST -- starting from a fresh schema"
+      LEGACY=$(aws s3 cp "$BACKUPS/LATEST" - --region "${aws_region}" 2>/dev/null | tr -d '[:space:]' || true)
+      if [[ -n "$LEGACY" ]]; then
+        say "No $BACKUPS/participant_db.tar yet; the legacy LATEST pointer names $LEGACY"
+        DUMP_URI="$BACKUPS/$LEGACY"
+      else
+        say "No $BACKUPS/participant_db.tar -- starting from a fresh schema"
+      fi
     fi
     ;;
   none) say "RESTORE_FROM=none -- starting from a fresh schema" ;;

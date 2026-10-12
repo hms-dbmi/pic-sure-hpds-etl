@@ -6,7 +6,7 @@
 # Locally:
 #   export TF_VAR_run_id=local-1            # (TF_VAR_restore_from=none for a fresh schema)
 #   make init apply wait-ready              # start
-#   make init backup PROMOTE=false destroy  # stop, keeping LATEST where it was
+#   make init backup PROMOTE=false destroy  # stop, leaving participant_db.tar as it was
 NAME := participant-db
 
 ENV       ?= development
@@ -31,7 +31,8 @@ wait-ready:
 		"$$($(TF) -chdir=$(TF_DIR) output -raw log_s3_uri)" \
 		"$(READY_TIMEOUT_SECONDS)"
 
-# pg_dump to S3 over SSM; PROMOTE=true also moves LATEST to the new dump.
+# pg_dump to S3 over SSM: PROMOTE=true overwrites participant_db.tar (the restore point),
+# PROMOTE=false writes participant_db_not_promoted.tar instead.
 backup:
 	@./backup-via-ssm.sh \
 		"$$($(TF) -chdir=$(TF_DIR) output -raw instance_id)" \
