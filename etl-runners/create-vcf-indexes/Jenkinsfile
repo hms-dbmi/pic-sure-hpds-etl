@@ -13,7 +13,8 @@
 // Inputs
 //   --output       where vcfIndex.tsv and SampleIds.csv are written (local path or s3:// URI)
 //   Managed inputs URI from configuration
-//   RDS credentials fetched on the runner from Secrets Manager by instance role
+//   RDS credentials read from the copy participant-db-start saved on the Jenkins server and
+//                   passed to the runner as a sensitive Terraform variable
 //
 // Outputs
 //   vcfIndex.tsv and SampleIds.csv at the --output location

@@ -66,8 +66,7 @@ variable "iam_role_name" {
     Pre-existing IAM role attached as the instance profile. This module does not create
     the role. It is the only principal the job runs as: it must allow s3 read on the
     container tarball, s3 write on the log and report prefixes, read/write on the data
-    bucket, and ssm core. GetSecretValue on the participant DB secret is granted by the
-    participant-db stack for as long as the database is up. See README for the policy.
+    bucket, and ssm core. See README for the policy.
   EOT
 }
 
@@ -128,16 +127,26 @@ variable "log_level" {
   description = "LOG_LEVEL for edu.harvard.hms.dbmi.avillach.hpds loggers."
 }
 
-variable "db_secret_id" {
+variable "uses_participant_db" {
+  type        = bool
+  default     = false
+  description = <<-EOT
+    Whether the job needs the participant database. False skips the credential step, so jobs
+    that never touch the database run whether or not it is up. True requires
+    db_credentials_json: a runner without it fails in its credentials phase (exit 5).
+  EOT
+}
+
+variable "db_credentials_json" {
   type        = string
   default     = ""
+  sensitive   = true
   description = <<-EOT
-    Secrets Manager id/name of the participant database secret, written by participant-db-start
-    and deleted by participant-db-stop. The runner fetches it with its instance profile at run
-    time; the values never enter Terraform state, the Jenkins console, or the EC2 user-data
-    blob. Expected JSON keys: url (a full JDBC URL) or host/port/dbname, plus username and
-    password. Blank for jobs that never touch the database: the credential fetch is skipped,
-    so those jobs run whether or not the database is up.
+    The participant database's credentials, as saved on the Jenkins server by
+    participant-db-start (etl-runners/common/db-credentials-path.sh); common.mk passes them as
+    TF_VAR_db_credentials_json. JSON keys: url (a full JDBC URL) or host/port/dbname, plus
+    username and password. Written into the runner's 600-mode container env file through user
+    data, so the password is in this runner's EC2 user data and Terraform state for its life.
   EOT
 }
 

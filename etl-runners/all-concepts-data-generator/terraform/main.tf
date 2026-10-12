@@ -30,7 +30,8 @@ module "etl_runner" {
   java_opts = var.java_opts
   log_level = var.log_level
 
-  db_secret_id = var.db_secret_id
+  uses_participant_db = true
+  db_credentials_json = var.db_credentials_json
 
   # Keys use underscores like every other runner; run-job.sh maps them to --study-id etc.
   job_params = {

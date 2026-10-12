@@ -24,7 +24,8 @@
 //   --data-dir     decoded data CSVs (local path or s3:// URI)
 //   --mapping      mapping CSV (local path or s3:// URI)
 //   --output       root of the per-study folders
-//   participant DB credentials fetched on the runner from Secrets Manager by instance role
+//   participant DB credentials read from the copy participant-db-start saved on the Jenkins server and
+//                              passed to the runner as a sensitive Terraform variable
 //
 // Outputs
 //   {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv per consent group

@@ -1,5 +1,5 @@
 # Runner-specific settings for all-concepts-data-generator.
-# Shared infra (account, region, VPC, security group, instance role, DB secret) comes from
+# Shared infra (account, region, VPC, security group, instance role) comes from
 # environments/<ENV>.tfvars, loaded automatically by common.mk.
 
 # instance_type is NOT set here: a -var-file value outranks TF_VAR_instance_type, which would

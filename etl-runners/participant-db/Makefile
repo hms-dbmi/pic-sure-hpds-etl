@@ -5,8 +5,8 @@
 #
 # Locally:
 #   export TF_VAR_run_id=local-1            # (TF_VAR_restore_from=none for a fresh schema)
-#   make init apply wait-ready              # start
-#   make init backup PROMOTE=false destroy  # stop, leaving participant_db.tar as it was
+#   make init apply wait-ready fetch-credentials   # start
+#   make init backup PROMOTE=false destroy forget-credentials   # stop, leaving participant_db.tar as it was
 NAME := participant-db
 
 ENV       ?= development
@@ -21,7 +21,7 @@ READY_TIMEOUT_SECONDS  ?= 3600
 BACKUP_TIMEOUT_SECONDS ?= 7200
 PROMOTE                ?= true
 
-.PHONY: wait-ready backup
+.PHONY: wait-ready backup fetch-credentials forget-credentials
 
 # Blocks until the instance reports ready (exit 0) or failed / timed out (non-zero).
 wait-ready:
@@ -39,3 +39,12 @@ backup:
 		"$(PROMOTE)" \
 		"$(BACKUP_TIMEOUT_SECONDS)" \
 		"$$($(TF) -chdir=$(TF_DIR) output -raw backup_s3_uri)"
+
+# Copies the credentials from the DB instance to the Jenkins server, where DB-backed runners
+# read them (../common/db-credentials-path.sh).
+fetch-credentials:
+	@./fetch-credentials.sh "$$($(TF) -chdir=$(TF_DIR) output -raw instance_id)" "$(ENV)"
+
+# Deletes the Jenkins server's copy. Run after destroy: the password is useless without the instance.
+forget-credentials:
+	@rm -f "$$($(COMMON_DIR)/db-credentials-path.sh $(ENV))"

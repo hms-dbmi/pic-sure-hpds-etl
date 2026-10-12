@@ -28,7 +28,7 @@ variable "ami_name_pattern" {
 variable "iam_role_name" {
   type        = string
   default     = "bdc-etl-jenkins-role"
-  description = "Instance profile role. Must read/write the backup prefix and use SSM; secret access is granted here."
+  description = "Instance profile role. Must read/write the backup prefix and use SSM."
 }
 
 variable "vpc_id" {
@@ -45,12 +45,7 @@ variable "subnet_id" {
 
 variable "vpc_security_group_ids" {
   type        = list(string)
-  description = "The runners' security groups: attached to the DB too, and the only sources allowed to reach 5432"
-}
-
-variable "db_secret_id" {
-  type        = string
-  description = "Name of the temporary Secrets Manager secret the runners read (created and destroyed by this stack)"
+  description = "The runners' shared security groups, attached to the DB too. One must admit TCP 5432 from itself (a standing rule; this stack creates no group)."
 }
 
 # --- Participant DB (participant-db.tfvars) ----------------------------------

@@ -144,7 +144,7 @@ jobs skip tests.
 ## Stage 2: Start Participant DB
 
 **Job:** `participant-db-start`. Restores `backups/participant_db.tar` (or a fresh schema
-from `schema.sql`) and publishes the connection secret. A database already running in the
+from `schema.sql`) and saves its connection details on the Jenkins server for the runners. A database already running in the
 environment is reused, or with `RESTART_DB_IF_RUNNING=true` dumped and replaced. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial
 seed dump of the legacy RDS database must be placed.
 

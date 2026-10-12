@@ -52,7 +52,8 @@ per run, and no JAR. See [`docs/PARTICIPANT_DB.md`](../docs/PARTICIPANT_DB.md).
 | `common.mk`                 | Build, deploy, monitor, and teardown targets, included by each runner's `Makefile`.                                                     |
 | `common/lib.sh`             | Assertion helpers: `check`, `soft`, `fail`, `warn`, `note`, `summary`.                                                                  |
 | `common/monitor-runner.sh`  | Polls EC2 state and the `status.json` sentinel; exits with the job's own exit code.                                                     |
-| `common/require-db.sh`      | Run on the agent before provisioning a DB-backed runner: fails in seconds if the participant DB secret has no current value (DB down).   |
+| `common/require-db.sh`      | Run on the agent before provisioning a DB-backed runner: fails in seconds if the saved DB credentials are missing or their instance is not `running`. |
+| `common/db-credentials-path.sh` | Prints where `participant-db-start` saves the participant DB credentials on the Jenkins server (`${HPDS_ETL_CREDENTIALS_DIR:-$HOME/.hpds-etl}/participant-db-<env>.json`). |
 | `common/validate-report.sh` | Assertions true of every `JobResult` report, independent of which job produced it.                                                      |
 
 Job parameters are passed as environment variables rather than an argv string so that the
@@ -72,11 +73,16 @@ generated EC2 user-data never has to quote a command line.
 
 Six runners read or write the participant DB: `sstr-populate-rds-participants`,
 `participants-migration`, `split-allconcepts`, `generate-global-all-concepts`,
-`create-vcf-indexes`, `all-concepts-data-generator`. Their module call passes
-`db_secret_id = var.db_secret_id`, and their `Provision, run and monitor` stage calls
-`common/require-db.sh` first. `merge-allconcepts` and `generate-identity-consent-mapping` pass
-`db_secret_id = ""`: the runner skips the credential fetch and the job runs whether or not the
-database is up.
+`create-vcf-indexes`, `all-concepts-data-generator`. Their module call sets
+`uses_participant_db = true` and `db_credentials_json = var.db_credentials_json` (a `sensitive`
+variable), and their `Provision, run and monitor` stage calls `common/require-db.sh` first.
+`common.mk`'s `plan` and `apply` fill `TF_VAR_db_credentials_json` from the file
+`participant-db-start` saved on the Jenkins server, so these jobs must run on the same Jenkins
+node as the start job. The password therefore ends up in the runner's user data and Terraform
+state (never in the console); see
+[docs/PARTICIPANT_DB.md](../docs/PARTICIPANT_DB.md#credentials). `merge-allconcepts` and
+`generate-identity-consent-mapping` set neither: the runner skips the credential step and the job
+runs whether or not the database is up.
 
 ### AWS identity
 
@@ -179,7 +185,7 @@ Jenkins job (set them on a manual single-study run; the orchestrator does not pa
 ## Environments
 
 Infrastructure settings shared by every runner and the participant DB (account, region, VPC,
-subnet, security groups, instance role, DB secret name) live in `environments/<ENV>.tfvars`. Each
+subnet, security groups, instance role) live in `environments/<ENV>.tfvars`. Each
 runner's own `<name>.tfvars` holds only runner-specific settings (volume size, tags). `common.mk`
 loads both files: the environment file first, then the runner file.
 
@@ -207,7 +213,6 @@ block so `make` picks it up automatically; the orchestrators pass it to every jo
    | `iam_role_name`          | Instance profile role (and the agent's role) in that account         |
    | `vpc_id` / `subnet_id`   | Target VPC; blank `subnet_id` uses its lowest-id subnet — pin it     |
    | `vpc_security_group_ids` | Runner security group(s); the only sources allowed to reach the DB   |
-   | `db_secret_id`           | Name for the temporary participant DB secret (unique per environment) |
    | `ami_owner_id` / `ami_name_pattern` | AMI: the SRCE RHEL9 golden image (bootstraps assume podman and RHEL9 module streams) |
 
    Also check the bucket in each `terraform/*.backend.tfvars` and the backup bucket/prefix in
@@ -255,8 +260,10 @@ make -C etl-runners/participants-migration plan ENV=<name>
 
 4. In `terraform/main.tf`, set `module_name` and `job_name` to the job's `name()`, and map
    `job_params` to the job's `expectations()` inputs. Keys use underscores; `run-job.sh` converts
-   them to `--kebab-case` flags. If the job never touches the database, set `db_secret_id = ""`
-   and remove the `require-db.sh` check from the Jenkinsfile's provision stage.
+   them to `--kebab-case` flags. If the job never touches the database, remove
+   `uses_participant_db` and `db_credentials_json` from the module call (and the
+   `db_credentials_json` variable), and remove the `require-db.sh` check from the Jenkinsfile's
+   provision stage.
 
 5. Replace the per-run variables in `terraform/variables.tf` with the job's parameters. Keep
    anything Jenkins sets through `TF_VAR_*` out of `<name>.tfvars` (see the precedence note above).

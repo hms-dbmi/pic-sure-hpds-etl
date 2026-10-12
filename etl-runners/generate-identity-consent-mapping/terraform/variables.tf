@@ -46,7 +46,7 @@ variable "subnet_id" {
 variable "iam_role_name" {
   type        = string
   default     = "bdc-etl-jenkins-role"
-  description = "Instance profile role; the job does all S3 and Secrets Manager work as this role"
+  description = "Instance profile role; the job does all S3 work as this role"
 }
 
 variable "vpc_security_group_ids" {
@@ -59,12 +59,6 @@ variable "root_volume_size" {
   type        = number
   default     = 30
   description = "Root EBS size in GiB. Holds the container image and the mapping output."
-}
-
-variable "db_secret_id" {
-  type        = string
-  default     = ""
-  description = "Participant DB secret (environments/<ENV>.tfvars). Unused: this job touches no database."
 }
 
 variable "tags" {

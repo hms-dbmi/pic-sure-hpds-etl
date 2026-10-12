@@ -167,16 +167,31 @@ module "etl_runner" {
   vpc_security_group_ids = var.vpc_security_group_ids
   iam_role_name          = var.iam_role_name      # bdc-etl-jenkins-role
 
-  db_secret_id = var.db_secret_id   # or "" if the job touches no database
+  # DB-backed jobs only; omit both if the job touches no database.
+  uses_participant_db = true
+  db_credentials_json = var.db_credentials_json
 
   job_params = { output = var.output_uri }
 }
 ```
 
-Declare `aws_account_id`, `vpc_id`, `subnet_id`, `iam_role_name`, and `db_secret_id` in its
-`variables.tf` (copy them from an existing runner). There is no role to assume: the instance
-role does all S3 and Secrets Manager work. A job that touches no database passes
-`db_secret_id = ""`, which skips the credential fetch so it runs whether or not the
+Declare `aws_account_id`, `vpc_id`, `subnet_id`, and `iam_role_name` in its `variables.tf`
+(copy them from an existing runner). A DB-backed job also declares the credentials variable:
+
+```hcl
+variable "db_credentials_json" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+```
+
+`common.mk` sets it as `TF_VAR_db_credentials_json` from the file `participant-db-start` saved on
+the Jenkins server, so a DB-backed job must run on the same Jenkins node as the start job, and
+the password ends up in the runner's user data and Terraform state (see
+[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#credentials)). There is no role to assume: the instance
+role does all S3 work. A job that touches no database omits `uses_participant_db` and
+`db_credentials_json`, which skips the credential step so it runs whether or not the
 participant database is up.
 
 **Never put a value the Jenkinsfile sets through `TF_VAR_*` (e.g. `instance_type`) in the

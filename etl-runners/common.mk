@@ -52,6 +52,13 @@ S3_IMAGE_URI    := s3://$(STACK_S3_BUCKET)/etl-runner/container/$(IMAGE_TAR)
 # state; the default is the single-run-at-a-time path.
 STATE_KEY   ?= tf_backend/etl-runners/hpds-etl/$(NAME)/terraform.tfstate
 
+# The participant DB credentials participant-db-start saved on this server, handed to Terraform
+# as TF_VAR_db_credentials_json (sensitive in DB-backed runners; ignored by stacks that do not
+# declare it). Read inside the recipe's shell, so make never echoes the value. Empty when the
+# database is down: require-db.sh normally stops the job before this, and a runner provisioned
+# without them fails in its credentials phase.
+WITH_DB_CREDENTIALS = TF_VAR_db_credentials_json="$$(cat "$$($(COMMON_DIR)/db-credentials-path.sh $(ENV))" 2>/dev/null || true)"
+
 REPORTS_DIR ?= $(CURDIR)/reports
 SKIP_TESTS  ?= false
 
@@ -140,10 +147,10 @@ validate-tf:
 	$(TF) -chdir=$(TF_DIR) validate
 
 plan:
-	$(TF) -chdir=$(TF_DIR) plan -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS))
+	$(WITH_DB_CREDENTIALS) $(TF) -chdir=$(TF_DIR) plan -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS))
 
 apply:
-	$(TF) -chdir=$(TF_DIR) apply -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS)) --auto-approve
+	$(WITH_DB_CREDENTIALS) $(TF) -chdir=$(TF_DIR) apply -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS)) --auto-approve
 
 output:
 	$(TF) -chdir=$(TF_DIR) output

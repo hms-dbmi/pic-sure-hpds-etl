@@ -3,9 +3,10 @@
 //
 // Brings up the participant database (participants / consents / samples) for a pipeline run:
 // a Postgres server on an EC2 instance that restores the most recent promoted pg_dump from S3
-// (or creates a fresh schema when there is none), then publishes its connection details to a
-// temporary Secrets Manager secret the runners read. Paired with participant-db-stop, which
-// dumps the database back to S3 and destroys everything this job created.
+// (or creates a fresh schema when there is none), then copies its connection details to a
+// 600-mode file on this Jenkins server (etl-runners/common/db-credentials-path.sh), which the
+// DB-backed runner jobs read. Paired with participant-db-stop, which dumps the database back to
+// S3, destroys everything this job created, and deletes that file.
 //
 // Both orchestrators (/Jenkinsfile, /Jenkinsfile.migration) call this first and the stop job
 // last. Run it by hand only to use a DB-backed runner standalone -- and run participant-db-stop
@@ -14,7 +15,8 @@
 // One database per environment: the Terraform state is fixed per environment. If it already
 // holds an instance (a failed build kept it for debugging, a manual run, or another pipeline),
 // RESTART_IF_RUNNING decides what happens:
-//   false (default)  reuse it: check it is running and published, and provision nothing
+//   false (default)  reuse it: check it is running, reuse the credentials saved on this server
+//                    (re-fetching them from the instance if the file is gone), provision nothing
 //   true             dump it to participant_db_not_promoted.tar (its writes are kept, the
 //                    restore point is untouched), destroy it, and start fresh from the restore
 //                    point. If that dump fails, nothing is destroyed and the job fails.
@@ -84,6 +86,7 @@ pipeline {
                     """).trim()
                     if (instanceId && !params.RESTART_IF_RUNNING) {
                         env.REUSE_DB = 'true'
+                        env.DB_INSTANCE_ID = instanceId
                         currentBuild.displayName += ' (reused)'
                         echo "A participant database is already running in '${env.ENV}' (${instanceId}): reusing it. " +
                              'RESTORE_FROM and INSTANCE_TYPE are ignored. Set RESTART_IF_RUNNING=true to replace it ' +
@@ -120,7 +123,7 @@ pipeline {
                               'still up. Fix the cause and re-run, or run participant-db-stop.')
                     }
                 }
-                sh "make -C ${DB_DIR} destroy STATE_KEY=${STATE_KEY}"
+                sh "make -C ${DB_DIR} destroy forget-credentials STATE_KEY=${STATE_KEY}"
             }
         }
 
@@ -141,9 +144,20 @@ pipeline {
                 script {
                     if (env.REUSE_DB != 'true') {
                         sh "make -C ${DB_DIR} wait-ready STATE_KEY=${STATE_KEY} READY_TIMEOUT_SECONDS=${params.READY_TIMEOUT_SECONDS.trim()}"
+                        sh "make -C ${DB_DIR} fetch-credentials STATE_KEY=${STATE_KEY}"
+                    } else {
+                        // Reuse the credentials saved when this database started, if they are
+                        // still here and belong to this instance; otherwise fetch them again.
+                        def creds = sh(returnStdout: true, script: "etl-runners/common/db-credentials-path.sh ${env.ENV}").trim()
+                        def savedFor = sh(returnStdout: true, script: "jq -r '.instanceId // empty' '${creds}' 2>/dev/null || true").trim()
+                        if (savedFor && savedFor == env.DB_INSTANCE_ID) {
+                            echo "Using the credentials saved at ${creds}"
+                        } else {
+                            echo "No saved credentials for ${env.DB_INSTANCE_ID} at ${creds}: fetching them from the instance"
+                            sh "make -C ${DB_DIR} fetch-credentials STATE_KEY=${STATE_KEY}"
+                        }
                     }
                 }
-                // A reused database booted long ago; its published secret is the readiness signal.
                 sh "etl-runners/common/require-db.sh ${env.ENV}"
             }
         }
@@ -155,7 +169,7 @@ pipeline {
                 if (env.DB_APPLIED == 'true') {
                     echo 'Start failed after provisioning -- destroying the half-built database (no data is lost: ' +
                          'nothing has written to it, and its restore source is still in S3).'
-                    int rc = sh(returnStatus: true, script: "make -C ${DB_DIR} destroy STATE_KEY=${STATE_KEY}")
+                    int rc = sh(returnStatus: true, script: "make -C ${DB_DIR} destroy forget-credentials STATE_KEY=${STATE_KEY}")
                     if (rc != 0) {
                         echo "WARNING: terraform destroy returned ${rc}. Run participant-db-stop with SKIP_BACKUP=true to clean up."
                     }

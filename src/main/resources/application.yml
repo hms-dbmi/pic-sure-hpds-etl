@@ -6,7 +6,7 @@ spring:
     web-application-type: none
     banner-mode: "off"
   datasource:
-    # Supplied on a runner from the participant-db secret (see docs/PARTICIPANT_DB.md).
+    # Supplied on a runner from the participant DB credentials (see docs/PARTICIPANT_DB.md).
     url: ${DB_URL:jdbc:postgresql://unset:5432/unset}
     username: ${DB_USERNAME:}
     password: ${DB_PASSWORD:}

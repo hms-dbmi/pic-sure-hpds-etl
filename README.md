@@ -33,10 +33,11 @@ java -jar target/hpds-etl.jar --pipeline=migrate-all --input=./participants.csv
 
 Configuration (DB, AWS, reports dir) is environment-driven — see
 [`application.yml`](src/main/resources/application.yml). Nothing is hard-coded. In production
-each job runs on an ephemeral EC2 runner that fetches the participant database credentials
-(`DB_URL` / `DB_USERNAME` / `DB_PASSWORD`) from a temporary Secrets Manager secret with its own
-instance role (`bdc-etl-jenkins-role`), so they never pass through Jenkins. The secret exists only
-while the database is up.
+each job runs on an ephemeral EC2 runner. DB-backed runners receive the participant database
+credentials (`DB_URL` / `DB_USERNAME` / `DB_PASSWORD`) through their user data: `participant-db-start`
+copies them from the DB instance to a `600`-mode file on the Jenkins server, and each runner's
+Terraform apply passes them in. They exist only while the database is up, and the password is never
+printed to the Jenkins console. See [docs/PARTICIPANT_DB.md](docs/PARTICIPANT_DB.md#credentials).
 
 ## Pipelines
 

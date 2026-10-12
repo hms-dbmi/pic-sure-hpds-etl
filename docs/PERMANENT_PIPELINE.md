@@ -165,8 +165,8 @@ every such study — before the database is started or any runner is provisioned
 **Job:** `participant-db-start` ([`etl-runners/participant-db/Jenkinsfile.start`](../etl-runners/participant-db/Jenkinsfile.start))
 
 Brings up the Postgres server, restoring `backups/participant_db.tar` (or a fresh
-schema when there is none), and publishes its connection details to a temporary secret the
-runners read. If a database is already running in the environment, it is reused as-is
+schema when there is none), and saves its connection details to a `600`-mode file on the
+Jenkins server, which the DB-backed runners' Terraform applies pass to them. If a database is already running in the environment, it is reused as-is
 (`RESTART_DB_IF_RUNNING=false`, the default) or dumped and replaced from the restore point
 (`true`). This build stops whichever database it started or reused; it never stops one when its
 start failed. Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
@@ -412,7 +412,7 @@ Runs only if Stage 7 succeeded (or was skipped because no study is unprocessed).
 **Job:** `participant-db-stop` ([`etl-runners/participant-db/Jenkinsfile.stop`](../etl-runners/participant-db/Jenkinsfile.stop))
 
 Runs in `post { always }` whenever this build started the database. It `pg_dump`s the
-database to S3, verifies the upload, and destroys the server and its secret. The dump becomes
+database to S3, verifies the upload, destroys the server, and deletes its saved credentials. The dump becomes
 the next run's restore point (`participant_db.tar`) only if the build result so far is SUCCESS or
 UNSTABLE; a failed or aborted run is still dumped, but `participant_db.tar` stays on the last good dump.
 If the stop fails, the build fails and the database is left running with its writes intact —

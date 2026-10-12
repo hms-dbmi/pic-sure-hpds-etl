@@ -37,8 +37,7 @@ locals {
   reports_prefix = var.reports_s3_prefix != "" ? var.reports_s3_prefix : "etl-runner/reports/${var.module_name}/${var.run_id}"
 
   # Non-secret container environment, rendered as a podman --env-file. The database credentials
-  # are appended to this file on the instance after being fetched from Secrets Manager, so
-  # they never appear here, in Terraform state, or in the user-data blob.
+  # are appended to this file on the instance from db_credentials_b64 (see user_data.sh.tpl).
   #
   # base64-encoded so the value is opaque inside user_data: no heredoc delimiter to break
   # out of, and no newline injection into the env file from a crafted job_params value.
@@ -64,7 +63,8 @@ locals {
       run_id          = var.run_id
       image_name      = trimsuffix(trimsuffix(var.image_tar, ".gz"), ".tar")
       image_tar       = var.image_tar
-      db_secret_id      = var.db_secret_id
+      uses_db            = var.uses_participant_db
+      db_credentials_b64 = base64encode(var.db_credentials_json)
       reports_prefix    = local.reports_prefix
       container_env_b64 = local.container_env_b64
     },
@@ -97,6 +97,10 @@ module "etl_runner" {
   instance_type                        = var.instance_type
   subnet_id                            = local.subnet_id
   vpc_security_group_ids               = length(var.vpc_security_group_ids) > 0 ? var.vpc_security_group_ids : null
+  # The upstream module creates a security group per instance by default; this account does
+  # not allow creating them at runtime, so runners use only vpc_security_group_ids (whose
+  # egress rules must allow S3, SSM, and package mirrors).
+  create_security_group = false
   iam_instance_profile                 = aws_iam_instance_profile.etl_runner_profile.name
   instance_initiated_shutdown_behavior = "terminate"
 

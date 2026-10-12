@@ -23,8 +23,8 @@
 //   --study-id     phs###### (params.STUDY_ID)
 //   --input        the SSTR TSV, local or s3:// (params.INPUT)
 //   --batch-size   rows per batch insert (params.BATCH_SIZE)
-//   RDS credentials fetched on the runner from Secrets Manager by instance role; they never pass
-//                   through Jenkins
+//   RDS credentials read from the copy participant-db-start saved on the Jenkins server and
+//                   passed to the runner as a sensitive Terraform variable
 //
 // Outputs
 //   RDS rows in participants / consents / samples for this study

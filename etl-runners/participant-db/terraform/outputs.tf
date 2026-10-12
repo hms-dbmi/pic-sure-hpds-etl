@@ -4,13 +4,8 @@ output "instance_id" {
 }
 
 output "private_ip" {
-  description = "Address the runners connect to (also written into the secret)"
+  description = "Address the runners connect to (also in the credentials file)"
   value       = aws_instance.db.private_ip
-}
-
-output "db_secret_id" {
-  description = "Secret holding host/port/dbname/username/password while the database is up"
-  value       = aws_secretsmanager_secret.db.name
 }
 
 output "status_s3_uri" {

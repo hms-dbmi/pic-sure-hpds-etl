@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Participant database bootstrap: install Postgres, restore the latest dump from S3 (or create
-# a fresh schema), publish the connection secret, report ready.
+# a fresh schema), save the connection details on this host, report ready.
 #
 # Rendered by Terraform's templatefile(). Every $${...} here is a Terraform placeholder, so bash
 # variables are written without braces to keep the two syntaxes apart. A braced bash expansion
@@ -10,7 +10,8 @@
 # Contract with participant-db-start:
 #   - all output lands in /var/log/participant-db.log, uploaded to S3 on every exit path
 #   - status.json is uploaded LAST: {"status": "ready"|"failed", "phase", "restoredFrom"}
-#   - the secret gets its value only on success, so a reader never sees a half-built database
+#   - /etc/participant-db/credentials.json is written only on success, so the start job never
+#     copies credentials for a half-built database
 #   - unlike a runner, this instance does NOT shut itself down: on success it serves the
 #     pipeline; on failure participant-db-start destroys it (nothing has been written yet,
 #     and the restore source is still in S3)
@@ -76,8 +77,8 @@ command -v aws >/dev/null 2>&1 || dnf install -y awscli
 # SSM only -- no SSH key. participant-db-stop runs the backup through it.
 systemctl enable --now amazon-ssm-agent
 
-# The golden image's nftables firewall drops unlisted inbound ports; the security group still
-# limits 5432 to the runner groups. Persisted the same way the pheno hosts persist 443.
+# The golden image's nftables firewall drops unlisted inbound ports; the shared security group
+# still limits 5432 to its own members. Persisted the same way the pheno hosts persist 443.
 nft add rule inet filter input tcp dport 5432 accept
 nft list ruleset > /etc/nftables/nftables.rules
 systemctl restart nftables
@@ -98,8 +99,8 @@ effective_cache_size = $((MEM_MB * 3 / 4))MB
 maintenance_work_mem = 512MB
 PGCONF
 
-# The app role over TCP (localhost for the restore, the VPC for runners -- the security group
-# further limits that to the runner groups); the postgres superuser over the local socket only.
+# The app role over TCP (localhost for the restore, the VPC for runners -- the shared security
+# group further limits that to its members); the postgres superuser over the local socket only.
 cat > "$PGDATA/pg_hba.conf" <<'PGHBA'
 local all postgres                peer
 host  all ${db_username} 127.0.0.1/32 scram-sha-256
@@ -114,8 +115,9 @@ for _ in $(seq 1 30); do
 done
 runuser -u postgres -- pg_isready
 
-# The password is generated here and leaves this host only through Secrets Manager. It is
-# handed to psql through the environment (\getenv), never on a command line.
+# The password is generated here and leaves this host only through the root-only credentials
+# file, which participant-db-start reads over SSM. It is handed to psql through the environment
+# (\getenv), never on a command line.
 DB_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 export DB_PASSWORD
 runuser -u postgres -- psql -v ON_ERROR_STOP=1 -q <<'SQL'
@@ -212,17 +214,16 @@ chmod 700 /usr/local/bin/participant-db-backup
 # --------------------------------------------------------------------------
 PHASE=publish
 HOST=$(imds local-ipv4)
-SECRET_FILE=$(mktemp)
-chmod 600 "$SECRET_FILE"
-jq -n --arg host "$HOST" --arg db "${db_name}" --arg user "${db_username}" --arg pw "$DB_PASSWORD" \
-      --arg schema "${db_schema}" \
-      '{engine: "postgres", host: $host, port: 5432, dbname: $db, schema: $schema,
-        username: $user, password: $pw}' > "$SECRET_FILE"
-aws secretsmanager put-secret-value --secret-id "${db_secret_id}" --region "${aws_region}" \
-  --secret-string "file://$SECRET_FILE" >/dev/null
-shred -u "$SECRET_FILE" 2>/dev/null || rm -f "$SECRET_FILE"
+CREDS_FILE=/etc/participant-db/credentials.json
+install -d -m 700 -o root -g root /etc/participant-db
+( umask 077
+  jq -n --arg host "$HOST" --arg db "${db_name}" --arg user "${db_username}" --arg pw "$DB_PASSWORD" \
+        --arg schema "${db_schema}" \
+        '{engine: "postgres", host: $host, port: 5432, dbname: $db, schema: $schema,
+          username: $user, password: $pw}' > "$CREDS_FILE.tmp" )
+mv "$CREDS_FILE.tmp" "$CREDS_FILE"
 unset DB_PASSWORD
-say "Published connection details to ${db_secret_id} (host $HOST)"
+say "Saved connection details to $CREDS_FILE (host $HOST)"
 
 PHASE=ready
 STATUS=ready

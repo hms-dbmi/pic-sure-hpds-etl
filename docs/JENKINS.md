@@ -119,9 +119,9 @@ docker buildx build   ─ hpds-etl-runner image
 docker save | gzip    ─▶ s3://<stack>/etl-runner/container/<run>.tar.gz
 require-db.sh         ─ DB-backed runners only: fail fast if the participant DB is down
 terraform apply       ─▶ launch instance ──▶ user_data:
-                                              fetch participant DB secret (instance role)
-                                                → DB_URL / DB_USERNAME / DB_PASSWORD
-                                                (skipped for DB-free jobs)
+  (DB credentials from                        decode participant DB credentials
+   the Jenkins server's                         → DB_URL / DB_USERNAME / DB_PASSWORD
+   saved file)                                  (skipped for DB-free jobs)
                                               podman load + podman run
                                               java -jar hpds-etl.jar --job=… --run-id=…
                                               sync /reports  ─▶ s3://…/etl-runner/reports/<run>/
@@ -136,8 +136,8 @@ terraform destroy     (post: always)
 ```
 
 `merge-allconcepts` and `generate-identity-consent-mapping` touch no database: their module call
-passes `db_secret_id = ""`, so the credential fetch is skipped and they run whether or not the
-participant DB is up.
+leaves `uses_participant_db` at its default `false`, so the credential step is skipped and they
+run whether or not the participant DB is up.
 
 Properties of this model:
 
@@ -146,7 +146,10 @@ Properties of this model:
   is assumed. The only remaining assume is `generate-identity-consent-mapping`'s in-process
   `--role-arn` (the NHLBI exchange role), made by the instance role.
 - **No SSH.** Access is AWS SSM Session Manager only; no instance has a key pair.
-- **No long-lived ETL host** and no Jenkins agent holding database credentials.
+- **No long-lived ETL host.** The participant DB's credentials exist only while it is up: a
+  `600`-mode file on the Jenkins server, written by `participant-db-start` and deleted by
+  `participant-db-stop`. So the start, the stop, and every DB-backed runner job must run on the
+  same Jenkins node (see [Credential Handling](#credential-handling)).
 - **Self-terminating runners.** A runner terminates whether the job succeeded, failed, was
   OOM-killed, or had its spot capacity reclaimed. (The participant DB deliberately does not; see
   [PARTICIPANT_DB.md](PARTICIPANT_DB.md).)
@@ -170,8 +173,8 @@ Properties of this model:
 |  124 | (monitor)                           | timed out waiting for the runner; no retry                                           |
 
 A DB-backed runner started while the participant DB is down exits `5` in its `credentials` phase
-(the secret does not exist). `common/require-db.sh` normally catches this on the agent first, in
-seconds, before anything is provisioned.
+(Terraform found no saved credentials on the Jenkins server). `common/require-db.sh` normally
+catches this on the agent first, in seconds, before anything is provisioned.
 
 ---
 
@@ -274,7 +277,7 @@ Validators never abort on the first failure, so one console read shows everythin
 | Maven wrapper          | `./mvnw`, checked into the repo                                          |
 | Docker CLI + socket    | builds the runner image; also needed for the `*IT` suites. As in the pheno environment, Jenkins runs in a podman container with the host's podman socket mounted at `/var/run/docker.sock`; the `jenkins` user must be able to open it |
 | Terraform ≥ 1.3        | provisions runners and the participant DB (`common.mk` installs 1.9.8 if missing) |
-| AWS CLI v2             | image upload, report sync, SSM, EC2 describe, Secrets Manager describe   |
+| AWS CLI v2             | image upload, report sync, SSM, EC2 describe                             |
 | `jq`                   | report and sentinel parsing                                              |
 | `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module |
 | `bdc-etl-jenkins-role` | the agent's own role; it does all AWS work as this role (no profiles)    |
@@ -296,12 +299,12 @@ Account **515157839325**, region `us-east-1`. Shared settings are in
 [`etl-runners/environments/development.tfvars`](../etl-runners/environments/development.tfvars);
 every provider sets `allowed_account_ids`, so an apply against the wrong account fails fast.
 
-### 1. Participant DB Secret
+### 1. Participant DB Credentials
 
-There is no standing database secret. `participant-db-start` creates
-`hpds-etl-development-participant-db` (the environment's `db_secret_id`), the DB instance writes
-its value once Postgres has restored, and `participant-db-stop` deletes it. Details in
-[PARTICIPANT_DB.md](PARTICIPANT_DB.md#credentials).
+No AWS secret is needed, and none is created. The DB instance generates its password at boot and
+writes its connection details to a root-only file on itself once Postgres has restored.
+`participant-db-start` copies that file over SSM to a `600`-mode file on the Jenkins server, and
+`participant-db-stop` deletes it. Details in [PARTICIPANT_DB.md](PARTICIPANT_DB.md#credentials).
 
 ### 2. IAM
 
@@ -314,16 +317,12 @@ Jenkins agent's role. It needs:
   `s3:DeleteObject` (the generator's stale-file removal), and `s3:GetBucketVersioning` (the
   generator's pre-flight and the participant DB backup). Versioning must be **Enabled** on `bdc-etl-data-d0d6191`.
 - **SSM**: `AmazonSSMManagedInstanceCore` for the instances; `ssm:SendCommand`,
-  `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation` for the agent (log tailing and the
-  DB backup)
-- **EC2 / IAM for Terraform**: create/describe/terminate instances, `ec2:CreateSecurityGroup`,
-  `ec2:AuthorizeSecurityGroupIngress`/`Egress`, `ec2:DeleteSecurityGroup`, describe
-  subnets/VPCs/AMIs; `iam:CreateInstanceProfile`/`DeleteInstanceProfile`/
-  `AddRoleToInstanceProfile`/`RemoveRoleFromInstanceProfile`, `iam:PassRole` on itself, and
-  `iam:PutRolePolicy`/`DeleteRolePolicy`/`GetRolePolicy` on itself — the DB stack attaches a
-  temporary secret-access policy for as long as the database is up
-- **Secrets Manager**: `CreateSecret`, `DeleteSecret`, `DescribeSecret`, `TagResource` on
-  `hpds-etl-*` secrets (Get/Put on the live secret is granted by the DB stack itself)
+  `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation` for the agent (log tailing, the
+  DB backup, and fetching the DB credentials)
+- **EC2 / IAM for Terraform**: create/describe/terminate instances (`require-db.sh` also uses
+  `ec2:DescribeInstances` to check the DB is running), describe subnets/VPCs/AMIs (no
+  security-group permissions: no group is created at runtime); `iam:CreateInstanceProfile`/`DeleteInstanceProfile`/
+  `AddRoleToInstanceProfile`/`RemoveRoleFromInstanceProfile`, and `iam:PassRole` on itself
 - **STS**: `sts:AssumeRole` on the NHLBI exchange roles
   (`arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3` and its 600168050588 twin),
   which trust this role
@@ -352,17 +351,29 @@ enforcing). The participant DB installs Postgres from the RHEL9 `postgresql:<pg_
 stream and adds an nftables rule for 5432, since the golden image's firewall drops unlisted
 inbound ports.
 
-The subnet must have an S3 path (gateway endpoint or NAT) and reach SSM. The participant DB gets
-its own security group allowing 5432 **only** from the runner security group(s), created and
-destroyed with the database, so the shared group is never modified.
+The subnet must have an S3 path (gateway endpoint or NAT) and reach SSM. No security group is
+created at runtime: the participant DB attaches the runners' shared group, which must carry a
+standing inbound rule for TCP 5432 **from itself** (set up by hand on `sg-0932143f21f7c533b`). That
+lets the runners reach Postgres, and so can anything else in that group.
 
 ### Credential Handling
 
-Credentials never reach Jenkins. The DB password is generated on the DB instance and leaves it only
-through Secrets Manager: it is never in Terraform state, user data, or the console log. Runners
-receive the secret's name, fetch it with their instance role, and write the values to a `600`-mode
-file passed as `podman --env-file` (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`), keeping them out of
-the process table and `podman inspect`. `xtrace` is disabled in both bootstraps for the same reason.
+The DB password is generated on the DB instance at boot, and is new for each instance.
+`participant-db-start` reads it over SSM Run Command and saves it, mode `600` (directory `700`), at
+`${HPDS_ETL_CREDENTIALS_DIR:-$HOME/.hpds-etl}/participant-db-<ENV>.json` on the Jenkins server;
+`participant-db-stop` deletes that file. Because it is a local file, `participant-db-start`,
+`participant-db-stop`, and every DB-backed runner job must run on the same Jenkins node (all are
+`agent any`, which is fine on a single-node Jenkins).
+
+The DB-backed runners' `terraform plan`/`apply` read the file into `TF_VAR_db_credentials_json`
+inside the recipe shell, and the runner decodes it from its user data and writes the values to a
+`600`-mode file passed as `podman --env-file` (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`), keeping
+them out of the process table and `podman inspect`. `xtrace` is disabled in both bootstraps.
+
+The password is never printed to the Jenkins console, but it is **not** confined to Jenkins: it
+passes through SSM command output (kept in SSM's command history), and it is stored in each
+DB-backed runner's EC2 user data and Terraform state, including older versions of that state in
+the versioned `tf_backend` bucket. It stays valid only for the life of that one DB instance.
 
 ---
 
@@ -511,15 +522,17 @@ etl-runners/
 ├─ run-job.sh                   container entrypoint: env vars to --flags, java -jar, exit code
 ├─ common.mk                    shared build/deploy/monitor targets
 ├─ environments/
-│  └─ development.tfvars        account, VPC, security group, instance role, DB secret name
+│  └─ development.tfvars        account, VPC, security group, instance role
 ├─ common/
 │  ├─ lib.sh                    check/soft/fail/warn/summary assertion helpers
 │  ├─ monitor-runner.sh         polls for the sentinel; exits with the job's exit code
+│  ├─ db-credentials-path.sh    where the participant DB credentials are saved on Jenkins
 │  ├─ require-db.sh             fails fast on the agent when the participant DB is down
 │  └─ validate-report.sh        assertions true of every JobResult report
 ├─ participant-db/              SHARED: the per-pipeline Postgres server
 │  ├─ Jenkinsfile.start  Jenkinsfile.stop  Makefile  wait-ready.sh  backup-via-ssm.sh
-│  └─ terraform/                instance, SG, secret, user_data.sh.tpl, backup.sh.tpl
+│  ├─ fetch-credentials.sh      copies the DB credentials from the instance to Jenkins (SSM)
+│  └─ terraform/                instance, SG, user_data.sh.tpl, backup.sh.tpl
 ├─ participants-migration/            TEMPORARY
 ├─ split-allconcepts/                 TEMPORARY
 ├─ sstr-populate-rds-participants/    PERMANENT

@@ -122,36 +122,36 @@ JOB_EXIT=5
 { echo '${container_env_b64}' | base64 -d; printf '\n'; } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-%{ if db_secret_id != "" ~}
-say "Fetching participant DB credentials from Secrets Manager (${db_secret_id})"
+%{ if uses_db ~}
+say "Reading participant DB credentials"
 
-# The secret exists only while the participant database is up: participant-db-start
-# creates it, participant-db-stop deletes it. Not found therefore means "database down".
-if ! SECRET_JSON=$(aws secretsmanager get-secret-value \
-    --secret-id "${db_secret_id}" --region "${aws_region}" \
-    --query SecretString --output text 2>/tmp/secret.err); then
-  say "ERROR: could not read ${db_secret_id}: $(cat /tmp/secret.err)"
+# Passed in by the Jenkins job from the credentials participant-db-start saved on the Jenkins
+# server (base64, so no character in them can break out of this script). Empty means the
+# database was not up when this runner was provisioned.
+SECRET_JSON=$(echo '${db_credentials_b64}' | base64 -d)
+if [[ -z "$SECRET_JSON" ]]; then
+  say "ERROR: no participant DB credentials were passed to this runner."
   say "  The participant database is probably not running -- run participant-db-start first."
   exit 5
 fi
 
-say "Secret keys: $(printf '%s' "$SECRET_JSON" | jq -r 'keys | join(", ")' 2>/dev/null || echo '(not valid JSON)')"
+say "Credential keys: $(printf '%s' "$SECRET_JSON" | jq -r 'keys | join(", ")' 2>/dev/null || echo '(not valid JSON)')"
 
 # Accept either a ready-made JDBC url or discrete host/port/dbname fields (what
-# participant-db-start writes).
+# participant-db-start saves).
 JQ_ERR=$(mktemp)
 DB_URL=$(printf '%s' "$SECRET_JSON" | jq -r '
   def nonempty: if (. // "") == "" then null else . end;
   if (.url | nonempty) then .url
   elif (.jdbcUrl | nonempty) then .jdbcUrl
   else "jdbc:postgresql://"
-    + ((.host | nonempty) // error("no host in secret"))
+    + ((.host | nonempty) // error("no host in credentials"))
     + ":" + (((.port | nonempty) // 5432) | tostring)
-    + "/" + (((.dbname | nonempty) // (.dbName | nonempty)) // error("no dbname in secret"))
+    + "/" + (((.dbname | nonempty) // (.dbName | nonempty)) // error("no dbname in credentials"))
   end' 2>"$JQ_ERR") || true
 
 if [[ ! "$DB_URL" =~ ^jdbc: ]]; then
-  say "ERROR: secret yielded no JDBC url"
+  say "ERROR: credentials yielded no JDBC url"
   [[ -s "$JQ_ERR" ]] && say "  jq error: $(cat "$JQ_ERR")"
   rm -f "$JQ_ERR"
   exit 5

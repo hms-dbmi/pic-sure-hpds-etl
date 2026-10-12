@@ -19,7 +19,8 @@
 //   --input          allConcepts CSV S3 URI     (params.INPUT)
 //   --mapping        hpds_id_mapping CSV S3 URI (params.MAPPING)
 //   --output         root of per-study folders  (params.OUTPUT)
-//   RDS credentials  fetched on the runner from Secrets Manager by instance role
+//   RDS credentials  read from the copy participant-db-start saved on the Jenkins server and
+//                    passed to the runner as a sensitive Terraform variable
 //
 // Outputs
 //   Per-consent CSVs:  {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv

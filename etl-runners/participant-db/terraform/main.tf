@@ -61,64 +61,17 @@ data "aws_vpc" "selected" {
 
 # --- Credentials ------------------------------------------------------------
 #
-# The secret is created empty. The instance generates the password itself and writes the
-# secret value (host/port/dbname/username/password) only once Postgres is restored and
-# accepting connections, so the password never enters Terraform state or user data, and
-# "the secret has a current value" doubles as "the database is ready". Destroyed with the
-# stack; recovery_window_in_days = 0 so the next start can recreate the same name at once.
-resource "aws_secretsmanager_secret" "db" {
-  name                    = var.db_secret_id
-  description             = "Temporary credentials for ${local.name}. Exists only while the database is up."
-  recovery_window_in_days = 0
-  tags                    = local.tags
-}
-
-# Grants the shared instance role access to this secret for as long as the database exists:
-# the DB instance writes it, the runners and the agent read it. Removed by destroy.
-resource "aws_iam_role_policy" "db_secret" {
-  name = "${local.name}-secret"
-  role = var.iam_role_name
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:PutSecretValue",
-      ]
-      Resource = [aws_secretsmanager_secret.db.arn]
-    }]
-  })
-}
+# None here. The instance generates the password at boot and writes the connection details to
+# a root-only file on itself (/etc/participant-db/credentials.json) once Postgres is restored,
+# so the password never enters Terraform state or user data. participant-db-start copies that
+# file to the Jenkins server over SSM (fetch-credentials.sh); runners get it from there.
 
 # --- Network ----------------------------------------------------------------
 #
-# Postgres is reachable only from the runners' security groups. Its own group (rather than a
-# rule on the shared one) so destroy leaves the shared group exactly as it found it.
-resource "aws_security_group" "db" {
-  name        = local.name
-  description = "Postgres for ${local.name}, from the ETL runner security groups only"
-  vpc_id      = data.aws_vpc.selected.id
-  tags        = local.tags
-
-  ingress {
-    description     = "Postgres from ETL runners"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = var.vpc_security_group_ids
-  }
-
-  egress {
-    description = "S3, Secrets Manager, SSM, package mirrors"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
+# None created here: the account does not allow creating security groups at runtime. The DB
+# attaches the runners' shared group (vpc_security_group_ids), which carries a standing rule
+# admitting TCP 5432 from itself -- so runners, and anything else in that group, can reach
+# Postgres.
 
 # --- Instance ---------------------------------------------------------------
 
@@ -132,7 +85,7 @@ resource "aws_instance" "db" {
   ami                    = data.aws_ami.base.id
   instance_type          = var.instance_type
   subnet_id              = local.subnet_id
-  vpc_security_group_ids = concat([aws_security_group.db.id], var.vpc_security_group_ids)
+  vpc_security_group_ids = var.vpc_security_group_ids
   iam_instance_profile   = aws_iam_instance_profile.db.name
 
   # NOT terminate-on-shutdown, unlike the runners: between a successful start and a
@@ -166,7 +119,6 @@ resource "aws_instance" "db" {
     backup_s3_bucket  = var.backup_s3_bucket
     backup_key_prefix = local.backup_key_prefix
     restore_from      = var.restore_from
-    db_secret_id      = aws_secretsmanager_secret.db.id
     db_name           = var.db_name
     db_username       = var.db_username
     db_schema         = var.db_schema
@@ -185,7 +137,4 @@ resource "aws_instance" "db" {
 
   tags        = local.tags
   volume_tags = local.tags
-
-  # The instance writes the secret at the end of boot; the grant must exist first.
-  depends_on = [aws_iam_role_policy.db_secret]
 }

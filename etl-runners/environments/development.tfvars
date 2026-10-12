@@ -5,7 +5,7 @@
 # environments by passing ENV=<name> to make (default: development).
 #
 # Data lives in the same account as the runners, so no cross-account role is assumed: every
-# instance does all S3, Secrets Manager, and SSM work as iam_role_name.
+# instance does all S3 and SSM work as iam_role_name.
 
 aws_region       = "us-east-1"
 aws_account_id   = "515157839325"
@@ -25,7 +25,3 @@ iam_role_name = "bdc-etl-jenkins-role"
 vpc_id                 = "vpc-0fcb0b3dc2167e8b4"
 subnet_id              = "subnet-03a30d72bd12478fc"
 vpc_security_group_ids = ["sg-0932143f21f7c533b"]
-
-# Participant database. Created by participant-db-start and destroyed by participant-db-stop;
-# it exists (and holds host/port/dbname/username/password) only while the database is up.
-db_secret_id = "hpds-etl-development-participant-db"

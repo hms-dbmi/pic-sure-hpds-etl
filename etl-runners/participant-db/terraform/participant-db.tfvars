@@ -1,5 +1,5 @@
 # Settings for the participant database. Shared infra (account, region, VPC, security group,
-# instance role, secret name) comes from environments/<ENV>.tfvars, loaded by common.mk.
+# instance role) comes from environments/<ENV>.tfvars, loaded by common.mk.
 #
 # instance_type is NOT set here: a -var-file value outranks TF_VAR_instance_type, which would
 # silently override the Jenkins INSTANCE_TYPE parameter. Its default lives in variables.tf.

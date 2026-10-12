@@ -8,11 +8,11 @@ The instance:
 - boots the SRCE RHEL9 golden image (the pheno ETL environment's AMI) with podman enabled
 - pulls the `hpds-etl-runner` image tarball (built and saved on the Jenkins agent) from S3, and
   `podman load`s and `podman run`s it
-- for jobs that use the participant database, fetches its credentials from the temporary Secrets
-  Manager secret (`db_secret_id`) with its instance profile and passes them to the container as
-  `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` through a `600`-mode `--env-file` (never `-e`, never
-  Terraform state). Jobs that never touch the database pass `db_secret_id = ""` and skip this step
-  entirely, so they run whether or not the database is up
+- for jobs that use the participant database (`uses_participant_db = true`), decodes its
+  credentials from user data (`db_credentials_json`, base64-encoded) and passes them to the
+  container as `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` through a `600`-mode `--env-file` (never
+  `-e`). Jobs that never touch the database leave `uses_participant_db` at `false` and skip this
+  step entirely, so they run whether or not the database is up
 - captures the container's exit code, syncs `/reports` and the full log to S3, and uploads
   `status.json` **last** as the completion sentinel
 - shuts itself down immediately afterwards (`instance_initiated_shutdown_behavior = terminate`)
@@ -36,7 +36,7 @@ Four deliberate differences:
 | `status.json` sentinel carrying the exit code                          | The JAR exits with a precise `ExitCode` (0/2/3/4/5), so the runner records it and Jenkins branches on it. Upstream detects completion by matching log text.         |
 | Reports synced to `s3://<stack>/etl-runner/reports/<module>/<run_id>/` | Every run writes a machine-readable `JobResult` JSON that Jenkins archives and asserts on.                                                                          |
 | `name_suffix`                                                          | Upstream hard-codes the instance-profile name, so two concurrent runs of one pipeline collide. The SSTR sweep can run one instance per study, requiring per-run names. |
-| `job_name` / `job_params` / `db_secret_id` inputs                      | Specialised to the hpds-etl JAR contract (`--job=<name> --run-id=<id> --key=value`) rather than a bare `docker run`.                                                |
+| `job_name` / `job_params` / `uses_participant_db` inputs               | Specialised to the hpds-etl JAR contract (`--job=<name> --run-id=<id> --key=value`) rather than a bare `docker run`.                                                |
 
 The sentinel and `name_suffix` are candidates for porting back upstream.
 
@@ -59,9 +59,12 @@ module "etl_runner" {
   iam_role_name          = var.iam_role_name      # bdc-etl-jenkins-role
   root_volume_size       = var.root_volume_size
 
-  job_name     = "sstr-populate-rds-participants"
-  run_id       = var.run_id
-  db_secret_id = var.db_secret_id                 # "" for jobs that touch no database
+  job_name = "sstr-populate-rds-participants"
+  run_id   = var.run_id
+
+  # Omit both for jobs that touch no database.
+  uses_participant_db = true
+  db_credentials_json = var.db_credentials_json   # declared sensitive in the stack
 
   job_params = {
     input      = var.input_uri
@@ -74,8 +77,10 @@ module "etl_runner" {
 ```
 
 The shared values (`aws_region`, `stack_s3_bucket`, `vpc_id`, `subnet_id`,
-`vpc_security_group_ids`, `iam_role_name`, `db_secret_id`) come from
-`etl-runners/environments/<ENV>.tfvars`.
+`vpc_security_group_ids`, `iam_role_name`) come from
+`etl-runners/environments/<ENV>.tfvars`. `db_credentials_json` is set by `etl-runners/common.mk`'s
+`plan` and `apply` as `TF_VAR_db_credentials_json`, from the file `participant-db-start` saved on
+the Jenkins server (empty when there is none).
 
 ## Inputs
 
@@ -90,7 +95,8 @@ The shared values (`aws_region`, `stack_s3_bucket`, `vpc_id`, `subnet_id`,
 | `subnet_id`                                  | Subnet to launch in; blank = looked up from `vpc_id`                        | `string`       | `""`                                   | one of   |
 | `vpc_security_group_ids`                     | Security groups (blank = VPC default)                                       | `list(string)` | `[]`                                   | no       |
 | `iam_role_name`                              | Pre-existing role attached as instance profile                              | `string`       | `"bdc-etl-jenkins-role"`               | no       |
-| `db_secret_id`                               | Participant DB secret; blank skips the credential fetch                     | `string`       | `""`                                   | no       |
+| `uses_participant_db`                        | Job needs the participant DB; `false` skips the credential step             | `bool`         | `false`                                | no       |
+| `db_credentials_json`                        | Participant DB credentials JSON (sensitive); required when the above is set | `string`       | `""`                                   | no       |
 | `job_params`                                 | Job parameters, keys with underscores → `--kebab-case` flags                | `map(string)`  | `{}`                                   | no       |
 | `name_suffix`                                | Per-run suffix making resource names unique                                 | `string`       | `""`                                   | no       |
 | `ami_owner_id`                               | AMI owner account id                                                        | `string`       | `"amazon"`                             | no       |
@@ -151,20 +157,18 @@ only principal the job runs as, so it needs:
 plus `AmazonSSMManagedInstanceCore` for Session Manager, and `sts:AssumeRole` on the NHLBI
 exchange role for `generate-identity-consent-mapping`.
 
-Secrets Manager access is **not** part of the standing policy: the `participant-db` stack attaches
-an inline policy (`GetSecretValue` / `DescribeSecret` / `PutSecretValue` on its secret only) when
-the database starts and removes it when the database is destroyed. See
-[docs/PARTICIPANT_DB.md](../../docs/PARTICIPANT_DB.md).
+No Secrets Manager access is needed: the runner receives the participant DB credentials in its
+user data. See [docs/PARTICIPANT_DB.md](../../docs/PARTICIPANT_DB.md#credentials).
 
 The Jenkins agent additionally needs `ec2:DescribeInstances`, `ssm:SendCommand`,
 `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation`, and read/write on the stack
 bucket, on top of the usual Terraform/EC2/IAM permissions to create and destroy the runner.
 
-## Secret Format
+## Credentials Format
 
-`db_secret_id` must resolve to JSON with either a ready-made JDBC URL or discrete fields.
-`participant-db-start` writes the second form once Postgres has restored and is accepting
-connections:
+`db_credentials_json` must be JSON with either a ready-made JDBC URL or discrete fields.
+`participant-db-start` saves the second form (plus an `instanceId`, ignored here) once Postgres
+has restored and is accepting connections:
 
 ```json
 { "engine": "postgres", "host": "10.0.1.23", "port": 5432, "dbname": "etl_db",
@@ -183,14 +187,18 @@ connections:
 
 - **Exit codes** are the contract: `0` success, `2` validation, `3` data, `4` infrastructure
   (retryable), `5` config, `1` unknown. Bootstrap failures before the container starts report
-  `4`; a failure resolving the secret reports `5`.
-- **Database not running.** The secret exists only between `participant-db-start` and
-  `participant-db-stop`. If it cannot be read, the bootstrap logs that the participant database is
-  probably not running and exits `5`. The Jenkinsfiles of DB-backed runners check this on the agent
-  first (`etl-runners/common/require-db.sh`), so the usual symptom is a fast, clear failure before
+  `4`; missing or unusable credentials (phase `credentials`) report `5`.
+- **Database not running.** The credentials file exists on the Jenkins server only between
+  `participant-db-start` and `participant-db-stop`. With `uses_participant_db = true` and empty
+  `db_credentials_json`, the bootstrap logs that the participant database is probably not running
+  and exits `5`. The Jenkinsfiles of DB-backed runners check this on the agent first
+  (`etl-runners/common/require-db.sh`), so the usual symptom is a fast, clear failure before
   anything is provisioned.
-- **`user_data` is not secret-bearing.** It contains the secret's id, never its value.
-- **Terraform state** holds no credentials, only instance metadata.
+- **`user_data` and Terraform state carry the DB password** when `uses_participant_db = true`:
+  it is in the instance's user data and in this runner's Terraform state (and older state
+  versions in the versioned `tf_backend` bucket), valid for the life of that one DB instance.
+  The variable is `sensitive`, so Terraform does not print it, and it is never written to the
+  Jenkins console. With `uses_participant_db = false`, neither holds any credentials.
 - **Subnet lookup.** With `subnet_id` blank, every run picks the lowest-id subnet of `vpc_id`
   (sorted, so deterministic). Pin `subnet_id` once the right subnet is confirmed.
 - **Cleanup is the caller's responsibility:** `make clean` or `terraform destroy` in

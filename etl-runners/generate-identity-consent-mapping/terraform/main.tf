@@ -31,9 +31,8 @@ module "etl_runner" {
   java_opts = var.java_opts
   log_level = var.log_level
 
-  # Touches no database: blank skips the credential fetch, so this job runs whether or
-  # not the participant database is up.
-  db_secret_id = ""
+  # Touches no database: uses_participant_db stays false, so this job runs whether or not
+  # the participant database is up.
 
   job_params = merge(
     {

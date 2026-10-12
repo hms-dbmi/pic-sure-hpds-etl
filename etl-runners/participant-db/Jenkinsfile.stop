@@ -2,8 +2,8 @@
 // SHARED -- participant-db-stop
 //
 // Takes the participant database down at the end of a pipeline run: pg_dumps it to S3 over SSM,
-// verifies the dump landed, and only then destroys the instance, its security group, its
-// instance profile, and the temporary Secrets Manager secret.
+// verifies the dump landed, and only then destroys the instance and its instance profile, and
+// deletes the credentials saved on this Jenkins server.
 //
 // PROMOTE_BACKUP decides whether the next participant-db-start restores this dump: true
 // overwrites backups/participant_db.tar. The orchestrators pass true only when the pipeline
@@ -107,6 +107,15 @@ pipeline {
                     }
                 }
                 sh "make -C ${DB_DIR} destroy STATE_KEY=${STATE_KEY}"
+            }
+        }
+
+        stage('Forget credentials') {
+            // Also when there was nothing to destroy: credentials for a database that is gone
+            // are stale. Not reached if an earlier stage failed, so a database left running
+            // keeps its credentials.
+            steps {
+                sh "make -C ${DB_DIR} forget-credentials"
             }
         }
     }

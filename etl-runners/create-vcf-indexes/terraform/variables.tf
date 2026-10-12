@@ -46,7 +46,7 @@ variable "subnet_id" {
 variable "iam_role_name" {
   type        = string
   default     = "bdc-etl-jenkins-role"
-  description = "Instance profile role; the job does all S3 and Secrets Manager work as this role"
+  description = "Instance profile role; the job does all S3 work as this role"
 }
 
 variable "vpc_security_group_ids" {
@@ -61,10 +61,11 @@ variable "root_volume_size" {
   description = "Root EBS size in GiB. Holds the container image and the index output."
 }
 
-variable "db_secret_id" {
+variable "db_credentials_json" {
   type        = string
   default     = ""
-  description = "Participant DB secret, present only while participant-db-start's database is up"
+  sensitive   = true
+  description = "Participant DB credentials, from the Jenkins server's saved copy (common.mk sets TF_VAR_db_credentials_json)"
 }
 
 variable "tags" {
