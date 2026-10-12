@@ -104,9 +104,11 @@ echo "ENABLE_PODMAN=true" > /opt/srce/startup.config
 if [ -f /opt/srce/scripts/start-gsstools.sh ]; then
   sh /opt/srce/scripts/start-gsstools.sh
 fi
+say "SRCE golden image startup done"
 
+# No `dnf -y update`: the golden image is rebuilt monthly, and a full update on every boot of a
+# short-lived instance cost minutes. Only the packages below are installed.
 say "Installing runtime packages"
-dnf -y update
 dnf install -y podman jq
 command -v aws >/dev/null 2>&1 || dnf install -y awscli
 

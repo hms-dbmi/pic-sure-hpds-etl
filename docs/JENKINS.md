@@ -308,29 +308,91 @@ writes its connection details to a root-only file on itself once Postgres has re
 
 ### 2. IAM
 
-`bdc-etl-jenkins-role` is the role every runner and the participant DB run as, and the Jenkins
-agent's role. They attach it through the pre-existing instance profile
-`bdc-etl-jenkins-temp-profile` (`iam_instance_profile_name` in `environments/<ENV>.tfvars`, the same
-profile the Jenkins server uses); nothing creates an instance profile at runtime. The role needs:
+One role, `bdc-etl-jenkins-role`, does everything: the Jenkins server runs as it, and every runner
+and the participant DB attach it through the pre-existing instance profile
+`bdc-etl-jenkins-temp-profile` (`iam_instance_profile_name` in `environments/<ENV>.tfvars`). The
+code creates no IAM resources, security groups, or secrets at runtime. These are the **minimum**
+permissions it needs, derived from every AWS call the Jenkinsfiles, scripts, Terraform, and JAR make.
 
-- **S3** read/write on `bdc-etl-data-d0d6191`: `etl-runner/*` (image tarballs, logs, reports,
-  DB boot sentinels), `tf_backend/*` (Terraform state), and `avillach-73-bdcatalyst-etl/*`
-  (job inputs and outputs, mapping handoffs, participant DB dumps); plus `s3:ListBucket`,
-  `s3:DeleteObject` (the generator's stale-file removal), and `s3:GetBucketVersioning` (the
-  generator's pre-flight and the participant DB backup). Versioning must be **Enabled** on `bdc-etl-data-d0d6191`.
-- **SSM**: `AmazonSSMManagedInstanceCore` for the instances; `ssm:SendCommand`,
-  `ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation` for the agent (log tailing, the
-  DB backup, and fetching the DB credentials)
-- **EC2 / IAM for Terraform**: create/describe/terminate instances (`require-db.sh` also uses
-  `ec2:DescribeInstances` to check the DB is running), describe subnets/VPCs/AMIs (no
-  security-group permissions: no group is created at runtime); `iam:PassRole` on itself, to launch
-  instances with `bdc-etl-jenkins-temp-profile` (no instance-profile permissions: none is created)
-- **STS**: `sts:AssumeRole` on the NHLBI exchange roles
-  (`arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3` and its 600168050588 twin),
-  which trust this role
+**Used by the Jenkins server** (Terraform, monitoring, DB backup and credentials):
 
-A minimal runner policy is in
-[`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md).
+| IAM console service | Actions | Resource | Why |
+|---|---|---|---|
+| EC2 | `ec2:Describe*` | `*` | Terraform's lookups and refreshes (AMI, subnet, VPC, instance, volumes, ENIs, instance types, attributes); `require-db.sh`, `wait-ready.sh`, `monitor-runner.sh`, the start job's reuse check |
+| EC2 | `ec2:RunInstances` | `*` | Launching the DB and every runner |
+| EC2 | `ec2:CreateTags` | `*`, condition `ec2:CreateAction = RunInstances` | Tags applied at launch |
+| EC2 | `ec2:TerminateInstances` | instances tagged `ManagedBy=terraform` | `terraform destroy` of the DB and runners |
+| EC2 | `ec2:ModifyInstanceAttribute` | instances tagged `ManagedBy=terraform` | The AWS provider re-applies `instance_initiated_shutdown_behavior` right after every launch that sets it (the runners' `terminate`), even though `RunInstances` already set it |
+| IAM | `iam:PassRole` | `bdc-etl-jenkins-role` | Launching instances with `bdc-etl-jenkins-temp-profile` |
+| Systems Manager | `ssm:SendCommand` | the instances **and** `document/AWS-RunShellScript` (both required) | DB backup, fetching the DB credentials, runner log tailing |
+| Systems Manager | `ssm:GetCommandInvocation` | `*` (not resource-scopable) | Reading those commands' results |
+| S3 | see below | `bdc-etl-data-d0d6191` | Terraform state (`tf_backend/`), image upload, reports, logs, sentinels |
+
+**Used by the instances** (DB and runners):
+
+| IAM console service | Actions | Resource | Why |
+|---|---|---|---|
+| S3 | `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetBucketVersioning` | `bdc-etl-data-d0d6191` | Listings and `head-bucket`; the merge job's version listing; the DB backup's (and generator pre-flight's) versioning check |
+| S3 | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `bdc-etl-data-d0d6191/*` | Images, dumps and restores, reports, logs, job inputs and outputs, stale-file removal, large multipart uploads |
+| Managed policy | `AmazonSSMManagedInstanceCore` (attach it; it is not in the service list) | | Registers the instances with SSM, without which `SendCommand` has nothing to deliver to |
+| STS | `sts:AssumeRole` | the NHLBI exchange roles | `generate-identity-consent-mapping` only; those roles must also trust `bdc-etl-jenkins-role` |
+
+S3 versioning must be **Enabled** on `bdc-etl-data-d0d6191`: `participant-db-stop` refuses to
+overwrite the restore point otherwise. If the root volumes are encrypted with a customer-managed KMS
+key, launching also needs `kms:CreateGrant`, `kms:GenerateDataKeyWithoutPlaintext`, `kms:Decrypt`,
+and `kms:DescribeKey` on it.
+
+The whole policy (attach `AmazonSSMManagedInstanceCore` alongside it):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "Ec2Read", "Effect": "Allow", "Action": "ec2:Describe*", "Resource": "*" },
+    { "Sid": "Ec2Launch", "Effect": "Allow", "Action": "ec2:RunInstances", "Resource": "*" },
+    { "Sid": "Ec2TagOnLaunch", "Effect": "Allow", "Action": "ec2:CreateTags", "Resource": "*",
+      "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } } },
+    { "Sid": "Ec2ManageOwnInstances", "Effect": "Allow",
+      "Action": ["ec2:TerminateInstances", "ec2:ModifyInstanceAttribute"],
+      "Resource": "arn:aws:ec2:us-east-1:515157839325:instance/*",
+      "Condition": { "StringEquals": { "ec2:ResourceTag/ManagedBy": "terraform" } } },
+    { "Sid": "PassOwnRole", "Effect": "Allow", "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::515157839325:role/bdc-etl-jenkins-role" },
+    { "Sid": "SsmRunCommands", "Effect": "Allow", "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ec2:us-east-1:515157839325:instance/*",
+        "arn:aws:ssm:us-east-1::document/AWS-RunShellScript"
+      ] },
+    { "Sid": "SsmReadCommandResults", "Effect": "Allow", "Action": "ssm:GetCommandInvocation",
+      "Resource": "*" },
+    { "Sid": "S3Bucket", "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketVersioning"],
+      "Resource": "arn:aws:s3:::bdc-etl-data-d0d6191" },
+    { "Sid": "S3Objects", "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+                 "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+      "Resource": "arn:aws:s3:::bdc-etl-data-d0d6191/*" },
+    { "Sid": "AssumeNhlbiExchangeRoles", "Effect": "Allow", "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3",
+        "arn:aws:iam::600168050588:role/nih-nhlbi-TopMed-EC2Access-S3"
+      ] }
+  ]
+}
+```
+
+Notes:
+
+- Every instance this code launches is tagged `ManagedBy=terraform`, which is what scopes
+  `TerminateInstances` and `ModifyInstanceAttribute` above.
+- Any job pointed at a bucket other than `bdc-etl-data-d0d6191` needs that bucket added to both S3
+  statements.
+- **Optional, for manual recovery only:** `ssm:StartSession` (connect to a database kept for
+  debugging), `ec2:StartInstances` (restart a stopped DB), `s3:GetObjectVersion` (restore an older
+  dump by hand).
+- **Not needed** (the code no longer does these): Secrets Manager; creating or deleting instance
+  profiles; `iam:PutRolePolicy` / `DeleteRolePolicy` / `GetRolePolicy`; creating, deleting, or
+  authorizing security groups; `ssm:DescribeInstanceInformation`.
 
 ### 3. Networking and AMI
 
@@ -346,7 +408,8 @@ account, VPC, and bucket:
 | Container runtime        | podman, enabled by `ENABLE_PODMAN=true` in `/opt/srce/startup.config`             |
 
 Every bootstrap starts the way the pheno hosts do: write `/opt/srce/startup.config`, run
-`/opt/srce/scripts/start-gsstools.sh`, `dnf -y update`. As in pheno's hpds-ingest, the image is
+`/opt/srce/scripts/start-gsstools.sh`, then install only the packages they need (no `dnf -y update`: the
+golden image is rebuilt monthly, and a full update on every boot cost minutes). As in pheno's hpds-ingest, the image is
 built and saved on the Jenkins agent (`docker buildx build`, `docker save | gzip`, upload to S3) and the
 runner `podman load`s and `podman run`s it (reports mounted with `:Z`, so SELinux stays
 enforcing). The participant DB installs Postgres from the RHEL9 `postgresql:<pg_version>` module
@@ -534,7 +597,7 @@ etl-runners/
 ├─ participant-db/              SHARED: the per-pipeline Postgres server
 │  ├─ Jenkinsfile.start  Jenkinsfile.stop  Makefile  wait-ready.sh  backup-via-ssm.sh
 │  ├─ fetch-credentials.sh      copies the DB credentials from the instance to Jenkins (SSM)
-│  └─ terraform/                instance, SG, user_data.sh.tpl, backup.sh.tpl
+│  └─ terraform/                instance, user_data.sh.tpl, backup.sh.tpl
 ├─ participants-migration/            TEMPORARY
 ├─ split-allconcepts/                 TEMPORARY
 ├─ sstr-populate-rds-participants/    PERMANENT

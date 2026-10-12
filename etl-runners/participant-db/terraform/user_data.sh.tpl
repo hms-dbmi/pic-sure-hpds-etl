@@ -66,8 +66,10 @@ echo "ENABLE_PODMAN=false" > /opt/srce/startup.config
 if [ -f /opt/srce/scripts/start-gsstools.sh ]; then
   sh /opt/srce/scripts/start-gsstools.sh
 fi
-dnf -y update
+say "SRCE golden image startup done"
 
+# No `dnf -y update`: the golden image is rebuilt monthly, and a full update on every boot of a
+# short-lived instance cost minutes. Only the packages below are installed.
 # RHEL9 ships PostgreSQL as module streams; the stream selects the major version.
 say "Installing PostgreSQL ${pg_version}"
 dnf module reset -y postgresql

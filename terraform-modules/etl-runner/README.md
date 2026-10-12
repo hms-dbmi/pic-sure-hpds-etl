@@ -133,40 +133,14 @@ container does all S3 work as the instance role. The one job that reads another 
 
 ## IAM
 
-The module does not create `var.iam_role_name` (`bdc-etl-jenkins-role`). With
-`iam_instance_profile_name` set (`bdc-etl-jenkins-temp-profile` in development) it attaches that
-existing profile and creates no IAM resources at all; blank, it creates a per-run profile around
-the role. The role is the only principal the job runs as, so it needs:
+The module creates no IAM resources when `iam_instance_profile_name` is set
+(`bdc-etl-jenkins-temp-profile` in development): the runner attaches that existing profile, which
+wraps `var.iam_role_name` (`bdc-etl-jenkins-role`). Left blank, it creates a per-run profile around
+the role instead, which needs instance-profile permissions this account does not grant.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    { "Effect": "Allow",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::<stack-bucket>/etl-runner/container/*" },
-    { "Effect": "Allow",
-      "Action": ["s3:PutObject"],
-      "Resource": [
-        "arn:aws:s3:::<stack-bucket>/etl-runner/logs/*",
-        "arn:aws:s3:::<stack-bucket>/etl-runner/reports/*"
-      ] },
-    { "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
-      "Resource": ["arn:aws:s3:::<data-bucket>", "arn:aws:s3:::<data-bucket>/*"] }
-  ]
-}
-```
-
-plus `AmazonSSMManagedInstanceCore` for Session Manager, and `sts:AssumeRole` on the NHLBI
-exchange role for `generate-identity-consent-mapping`.
-
-No Secrets Manager access is needed: the runner receives the participant DB credentials in its
-user data. See [docs/PARTICIPANT_DB.md](../../docs/PARTICIPANT_DB.md#credentials).
-
-The Jenkins agent additionally needs `ec2:DescribeInstances`, `ssm:SendCommand`,
-`ssm:GetCommandInvocation`, `ssm:DescribeInstanceInformation`, and read/write on the stack
-bucket, on top of the usual Terraform/EC2/IAM permissions to create and destroy the runner.
+The role's minimum permissions, for the runners, the participant DB, and the Jenkins server that
+launches them, are listed with a ready-to-attach policy in
+[docs/JENKINS.md](../../docs/JENKINS.md#2-iam).
 
 ## Credentials Format
 

@@ -13,7 +13,7 @@ STATUS_URI="${2:?status uri}"
 LOG_URI="${3:?log uri}"
 TIMEOUT="${4:-3600}"
 REGION="${AWS_REGION:-us-east-1}"
-POLL=20
+POLL=5
 
 show_log() {
     echo "----- boot log tail ($LOG_URI) -----"
