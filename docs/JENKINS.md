@@ -63,6 +63,7 @@ they resolve to siblings inside the same folder.
 | `generate-global-all-concepts`                | `etl-runners/generate-global-all-concepts/Jenkinsfile`      |
 | `create-vcf-indexes`                          | `etl-runners/create-vcf-indexes/Jenkinsfile`                |
 | `merge-allconcepts`                           | `etl-runners/merge-allconcepts/Jenkinsfile`                 |
+| `generate-allconcepts-manifest`               | `etl-runners/generate-allconcepts-manifest/Jenkinsfile`     |
 | `all-concepts-data-generator`                 | `etl-runners/all-concepts-data-generator/Jenkinsfile`       |
 | `generate-identity-consent-mapping`           | `etl-runners/generate-identity-consent-mapping/Jenkinsfile` |
 
@@ -332,8 +333,8 @@ permissions it needs, derived from every AWS call the Jenkinsfiles, scripts, Ter
 
 | IAM console service | Actions | Resource | Why |
 |---|---|---|---|
-| S3 | `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetBucketVersioning` | `bdc-etl-data-d0d6191` | Listings and `head-bucket`; the merge job's version listing; the DB backup's (and generator pre-flight's) versioning check |
-| S3 | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `bdc-etl-data-d0d6191/*` | Images, dumps and restores, reports, logs, job inputs and outputs, stale-file removal, large multipart uploads |
+| S3 | `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetBucketVersioning` | `bdc-etl-data-d0d6191` | Listings and `head-bucket`; the merge and manifest jobs' version listings; their, the DB backup's (and generator pre-flight's) versioning check |
+| S3 | `s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `bdc-etl-data-d0d6191/*` | Images, dumps and restores, reports, logs, job inputs and outputs, stale-file removal, large multipart uploads. `GetObjectVersion`: the merge reads (and the merge and manifest head) specific object versions |
 | Managed policy | `AmazonSSMManagedInstanceCore` (attach it; it is not in the service list) | | Registers the instances with SSM, without which `SendCommand` has nothing to deliver to |
 | STS | `sts:AssumeRole` | the NHLBI exchange roles | `generate-identity-consent-mapping` only; those roles must also trust `bdc-etl-jenkins-role` |
 
@@ -522,6 +523,7 @@ an environment may run.
 | `all-concepts-data-generator`                   | `true`  | `ETL_JOB_ALL_CONCEPTS_DATA_GENERATOR_ENABLED`                   |
 | `create-vcf-indexes`                            | `true`  | `ETL_JOB_CREATE_VCF_INDEXES_ENABLED`                            |
 | `merge-allconcepts`                             | `true`  | `ETL_JOB_MERGE_ALLCONCEPTS_ENABLED`                             |
+| `generate-allconcepts-manifest`                 | `true`  | `ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED`                 |
 | `generate-identity-consent-mapping`             | `true`  | `ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED`             |
 | `participants-migration`                        | `true`  | `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED`                        |
 | `split-allconcepts`                             | `true`  | `ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED`                             |
@@ -604,6 +606,7 @@ etl-runners/
 ├─ generate-global-all-concepts/      PERMANENT
 ├─ create-vcf-indexes/                PERMANENT
 ├─ merge-allconcepts/                 PERMANENT (no DB)
+├─ generate-allconcepts-manifest/     PERMANENT (no DB), last stage of both orchestrators
 ├─ all-concepts-data-generator/       PERMANENT (per study, from the permanent orchestrator)
 └─ generate-identity-consent-mapping/ PERMANENT, standalone (no DB)
    each runner: Jenkinsfile  Makefile  preflight.sh  validate.sh  terraform/

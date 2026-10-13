@@ -21,6 +21,7 @@ Orchestrated by [`/Jenkinsfile`](../Jenkinsfile) (Jenkins job `hpds-etl-pipeline
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Generate Per-Study AllConcepts](#stage-7-generate-per-study-allconcepts)
 - [Stage 8: Merge AllConcepts](#stage-8-merge-allconcepts)
+- [Stage 9: AllConcepts Manifest](#stage-9-allconcepts-manifest)
 - [Post: Stop Participant DB](#post-stop-participant-db)
 - [Data Flow Summary](#data-flow-summary)
 - [Parameters](#parameters)
@@ -61,7 +62,12 @@ Build ▸ Tests ▸ Resolve studies
           └───────────┬───────────┘
                       ▼
           ┌───────────────────────┐
-          │  Merge AllConcepts    │  (consent folders needing a merge)
+          │  Merge AllConcepts    │  (consent folders of ready studies whose sources changed)
+          └───────────┬───────────┘
+                      ▼
+          ┌───────────────────────┐
+          │  AllConcepts manifest │  verifies every ready consent group's MERGED file, then
+          │                       │  writes {DATA_ROOT}/allConcepts_manifest.csv (versioned)
           └───────────────────────┘
 
 post { always }:  participant-db-stop  (pg_dump to S3; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
@@ -349,7 +355,8 @@ the migration's `split-allconcepts` writes to, and which other sources will writ
   **refuses an output bucket without versioning Enabled**.
 - **Stale groups are removed, others' files are not.** Only `{study_id}_allConcepts_c{code}.csv`
   — this job's own file name — is ever deleted; a delete on a versioned bucket is a recoverable
-  marker, and it is what makes the merge rebuild that folder (`DELETIONS`). Each removal is a
+  marker, and it changes the folder's source fingerprint, so the merge rebuilds it
+  (`SOURCES_CHANGED`). Each removal is a
   `STALE_OUTPUT_REMOVED` warning (build UNSTABLE).
 - The runner's `validate.sh` checks the report, that there is one file per consent group with
   rows, and that every listed file is really in S3.
@@ -371,39 +378,89 @@ and re-run it with `STUDY_ID`; its files are simply overwritten.
 
 ### Input
 
-`DATA_ROOT`: the `s3://` root (versioned bucket) of the per-study folders. Only
-`{study_id}/allConcepts/c{code}/` folders are scanned — never `{study_id}/legacy/allConcepts/` or
-the rest of the study folder — for `*_allConcepts_*` files from every source: Stage 7's
-generator, the migration's `split-allconcepts`, and further sources to come. The generator's
-output and the merge's input are one parameter, so they cannot drift apart.
+- `DATA_ROOT`: the `s3://` root of the per-study folders. The bucket **must have versioning
+  Enabled**; the job (and its pre-flight) refuses otherwise.
+- `MANAGED_INPUTS`: every study marked ready is checked. (`STUDY_IDS` on the runner job checks
+  just those studies instead, for manual runs; the orchestrators never pass it.)
+
+Only `{study_id}/allConcepts/c{code}/` folders are scanned, never `{study_id}/legacy/allConcepts/`
+or the rest of the study folder. A folder's **sources** are the files directly inside it whose
+name contains `_allConcepts_`, from every producer: Stage 7's generator, the migration's
+`split-allconcepts`, and further sources to come. Anything else (other names, nested folders, a
+MERGED file named for another folder) is ignored and listed in the report as `IGNORED_FILES`.
 
 ### Flow
 
 ```
-List the phs###### study folders under the input prefix (or take --study-ids)
+Require versioning on the bucket; read the ready studies from managed inputs
         │
         ▼
-List each study's allConcepts/ folder; group *_allConcepts_* files directly inside
-an allConcepts/c{code}/ folder by that folder (ignoring existing *_MERGED.csv)
+For each ready study: list the current version of every object under {study}/allConcepts/
         │
         ▼
-For each folder, decide whether {study}_c{code}_allConcepts_MERGED.csv needs rebuilding:
-  MISSING     no merged file yet
-  STALE       a source file is newer than the merged file
-  DELETIONS   a source file has a delete marker newer than the merged file
-  NONE        up to date ─▶ skipped
-        │
-        ▼
-Concatenate the folder's source files into the merged file
+For each consent folder, compare the version-id fingerprint of its current sources with the one
+recorded on {study}_c{code}_allConcepts_MERGED.csv:
+  MISSING              no MERGED file                              ─▶ merge
+  SOURCES_CHANGED      a source was added, overwritten or deleted  ─▶ re-merge (overwrite)
+  NO_FINGERPRINT       MERGED file predates fingerprints            ─▶ re-merge (once)
+  REMOVED_NO_SOURCES   MERGED file but no sources left              ─▶ delete it (warning)
+  UP_TO_DATE           fingerprints match                           ─▶ skip
 ```
+
+**How "changed since the merge" is decided.** On a versioned bucket every write gives a key a new
+version id. A MERGED file records, in its own S3 metadata, `source-fingerprint` (SHA-256 of its
+sources' sorted `name<TAB>versionId` lines), `source-count`, and `content-md5` (MD5 of its
+content). An added file, an overwrite (even with identical bytes) or a deletion changes the
+current sources' fingerprint, so the folder is re-merged. No timestamps or delete markers are
+involved, so a file written while a merge runs can't be missed.
+
+**Merging.** Sources are read at exactly the versions fingerprinted and concatenated in name
+order into a temp file. Each source is ended with a newline, so one missing its final newline
+can't run its last row into the next file's first row. The result is uploaded with its
+metadata, overwriting the MERGED key; S3 keeps the previous version.
 
 ### Output
 
-One `{study_id}_c{code}_allConcepts_MERGED.csv` per consent folder that needed merging, and a
-report with `consentFoldersDiscovered`, `foldersMerged`, `foldersSkipped`, and the reason per
-folder.
+An up-to-date `{study_id}_c{code}_allConcepts_MERGED.csv` in each consent folder of every ready
+study, and a report with `studiesChecked`, `consentFoldersDiscovered`, `foldersMerged`,
+`foldersSkipped`, `foldersRemoved`, `studiesWithoutFolders`, and the action per folder.
+Warnings (build UNSTABLE): a ready study with no consent folders, a folder with no source files,
+and a MERGED file deleted because its sources are gone.
 
 Runs only if Stage 7 succeeded (or was skipped because no study is unprocessed).
+
+---
+
+## Stage 9: AllConcepts Manifest
+
+**Job:** `generate-allconcepts-manifest`
+**Class:** [`GenerateAllConceptsManifestJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/GenerateAllConceptsManifestJob.java)
+**Runs:** once, last (skipped under `PREFLIGHT_ONLY`). Touches no database.
+
+Writes **`{DATA_ROOT}/allConcepts_manifest.csv`**, the file handed to production ingestion: one
+row per consent group of every study marked ready in `MANAGED_INPUTS`, sorted by study and consent.
+
+| Column | Value |
+|--------|-------|
+| `study` | study id |
+| `consent` | consent code (folder `c1` → `1`) |
+| `s3_uri` | the MERGED file |
+| `version_id` | the MERGED file's S3 version id; later merges overwrite the key, so this pins the exact data described |
+| `last_updated` | that version's S3 `LastModified` (ISO-8601 UTC) |
+| `md5` | MD5 of that version's content, recorded by the merge |
+
+**Checks before writing.** Every ready consent group must have a MERGED file whose recorded
+fingerprint equals that of the folder's current sources (it is the merge of exactly the ready
+files) and which carries its md5. A ready study must have at least one consent folder. Any
+failure (`MERGED_MISSING`, `MERGED_STALE`, `MERGED_NOT_FINGERPRINTED`, `MERGED_WITHOUT_SOURCES`,
+`MD5_MISSING`, `NO_CONSENT_FOLDERS`, `NO_READY_STUDIES`) means **no manifest is written**: the
+previous version stays current, and the job exits `2` listing every problem at once. A consent
+folder holding no allConcepts files at all is left out with a warning.
+
+**Versioning.** The manifest is overwritten in place, on a bucket that must have versioning
+Enabled (checked by the job and its pre-flight); every earlier manifest stays retrievable as an
+older version. The job fails if S3 returns no version id for the write. Metadata `row-count` and
+`run-id` are set on each version, and a copy is archived with the build's reports.
 
 ---
 
@@ -444,6 +501,12 @@ stop altogether and leaves the database up for debugging; run `participant-db-st
               │            ▼            │
               │     merge-allconcepts   │
               │     *_MERGED.csv        │
+              │            │            │
+              │            ▼            │
+              │  generate-allconcepts-  │
+              │  manifest               │
+              │  allConcepts_manifest   │
+              │  .csv                   │
               └────────────┼────────────┘
                            ▼
                      HPDS ingestion
@@ -477,6 +540,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `CONCEPT_MAPPING_FILE` | `mappings/mapping2.csv` | Concept mapping file, relative to `{DATA_ROOT}/{study_id}/` |
 | `SKIP_ANALYSIS` | `false` | Use the mapping's data types as-is instead of re-analysing |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
+| `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
 | `RESTART_DB_IF_RUNNING` | `false` | If a participant DB is already running: `false` reuses it, `true` dumps it (not promoted), destroys it, and starts fresh (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#when-a-database-is-already-running)) |

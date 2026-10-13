@@ -4,9 +4,8 @@ provider "aws" {
   allowed_account_ids = [var.aws_account_id]
 }
 
-# PERMANENT. Merges per-consent allConcepts files into a single MERGED file per
-# study/consent folder. Checks for missing, stale, or deletion-affected merged
-# files using S3 object versioning, then concatenates source files as needed.
+# PERMANENT. Keeps one MERGED file per consent folder of every ready study, re-merging a folder
+# whose sources changed since (detected from S3 version ids; the bucket must be versioned).
 module "etl_runner" {
   source = "../../../terraform-modules/etl-runner"
 
@@ -35,7 +34,8 @@ module "etl_runner" {
 
   job_params = merge(
     { input = var.input_uri },
-    var.study_ids != "" ? { study_ids = var.study_ids } : {}
+    var.study_ids != "" ? { study_ids = var.study_ids } : {},
+    var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {}
   )
 
   tags = merge({

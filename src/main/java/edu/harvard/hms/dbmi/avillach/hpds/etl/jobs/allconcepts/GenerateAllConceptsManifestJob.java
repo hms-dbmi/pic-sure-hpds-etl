@@ -1,0 +1,284 @@
+package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts;
+
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.AbstractJob;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobContext;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExpectations;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.Severity;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts.AllConceptsFolders.ConsentFolder;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+import software.amazon.awssdk.services.s3.S3Client;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * PERMANENT. Writes {@value #MANIFEST_NAME} at the data root: one row per consent group of every
+ * study marked ready in managed inputs, naming its MERGED allConcepts file for the production
+ * ingestion. Columns: {@code study, consent, s3_uri, version_id, last_updated, md5}.
+ *
+ * <p>Runs after {@link MergeAllConceptsJob} at the end of both pipelines. Before writing, every
+ * ready consent group must hold: a MERGED file exists; its recorded
+ * {@linkplain AllConceptsFolders#fingerprint source fingerprint} equals that of the folder's
+ * current sources (it is the merge of exactly the ready files); and it carries its MD5. A ready
+ * study with no consent folders also fails. Any failure writes <b>no</b> manifest, so ingestion
+ * never receives one describing stale or missing data; the report names every problem.
+ *
+ * <p>The manifest is overwritten in place on a bucket that must have versioning enabled, so every
+ * earlier manifest stays retrievable. {@code version_id} pins each row to the exact MERGED version
+ * described, since later merges overwrite the same key. A copy is also written to the reports dir.
+ */
+@Component
+@ConditionalOnProperty(name = "etl.jobs.generate-allconcepts-manifest.enabled", havingValue = "true")
+public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConceptsManifestJob.Output> {
+
+    static final String MANIFEST_NAME = "allConcepts_manifest.csv";
+    static final String HEADER = "study,consent,s3_uri,version_id,last_updated,md5";
+
+    private final IoResolver io;
+    private final AllConceptsFolders folders;
+    private final ManagedInputsService managedInputsService;
+
+    public GenerateAllConceptsManifestJob(IoResolver io, S3Client s3, ManagedInputsService managedInputsService) {
+        this.io = io;
+        this.folders = new AllConceptsFolders(s3);
+        this.managedInputsService = managedInputsService;
+    }
+
+    @Override
+    public String name() {
+        return "generate-allconcepts-manifest";
+    }
+
+    @Override
+    public JobType type() {
+        return JobType.PERMANENT;
+    }
+
+    @Override
+    public JobExpectations expectations() {
+        return JobExpectations.of(
+                List.of(ParamSpec.required("input",
+                        "Data root (s3://, versioned bucket) holding {study_id}/allConcepts/c{consent}/ folders; "
+                                + "the manifest is written here as " + MANIFEST_NAME,
+                        "s3://bucket/data/")),
+                List.of(MANIFEST_NAME + " at the data root, listing the MERGED file of every ready consent group; "
+                        + "not written if any of them is missing or stale"));
+    }
+
+    @Override
+    protected void validateInput(JobContext ctx, ValidationReport report) {
+        if (!io.isS3(ctx.require("input"))) {
+            report.error("S3_REQUIRED", "input must be an s3:// URI: the manifest must be versioned", "--input");
+        }
+    }
+
+    @Override
+    protected Output execute(JobContext ctx) {
+        String base = AllConceptsFolders.normalizeDir(ctx.require("input"));
+        folders.requireVersioning(AllConceptsFolders.parseS3Prefix(base)[0]);
+        String manifestUri = base + MANIFEST_NAME;
+
+        Set<String> studyIds = new LinkedHashSet<>();
+        managedInputsService.read().stream().filter(ManagedInputRow::isReady).map(ManagedInputRow::studyId)
+                .sorted().forEach(studyIds::add);
+
+        List<ManifestRow> rows = new ArrayList<>();
+        List<Problem> problems = new ArrayList<>();
+        if (studyIds.isEmpty()) {
+            problems.add(Problem.error("NO_READY_STUDIES", null, null,
+                    "no study is marked ready in managed inputs; refusing to publish an empty manifest"));
+        }
+        for (String studyId : studyIds) {
+            Map<String, ConsentFolder> studyFolders = folders.scanStudy(base, studyId);
+            if (studyFolders.isEmpty()) {
+                problems.add(Problem.error("NO_CONSENT_FOLDERS", studyId, null, "ready, but has no "
+                        + AllConceptsFolders.ALL_CONCEPTS_DIR + "/c{code}/ folders under " + base + studyId + "/"));
+            }
+            for (ConsentFolder folder : studyFolders.values()) {
+                verify(folder, rows, problems);
+            }
+        }
+
+        if (problems.stream().anyMatch(p -> p.severity() == Severity.ERROR)) {
+            log.error("Not writing {}: {} problem(s) found", manifestUri, problems.size());
+            return new Output(studyIds.size(), rows, problems, manifestUri, null);
+        }
+
+        String csv = toCsv(rows);
+        String versionId = write(manifestUri, csv, rows.size(), ctx);
+        writeReportCopy(ctx, csv);
+        log.info("Wrote {} ({} row(s), version {})", manifestUri, rows.size(), versionId);
+        return new Output(studyIds.size(), rows, problems, manifestUri, versionId);
+    }
+
+    /** Adds the folder's manifest row, or the reasons it can't have one. */
+    private void verify(ConsentFolder folder, List<ManifestRow> rows, List<Problem> problems) {
+        String studyId = folder.studyId();
+        String consentDir = folder.consentDir();
+        if (folder.sources().isEmpty() && folder.merged() == null) {
+            problems.add(Problem.warning("NO_SOURCES", studyId, consentDir, folder.label()
+                    + " holds no allConcepts files (only " + folder.ignored() + "); not in the manifest"));
+            return;
+        }
+        if (folder.merged() == null) {
+            problems.add(Problem.error("MERGED_MISSING", studyId, consentDir, folder.label() + " has "
+                    + folder.sources().size() + " source file(s) but no " + folder.mergedFileName()));
+            return;
+        }
+        if (folder.sources().isEmpty()) {
+            problems.add(Problem.error("MERGED_WITHOUT_SOURCES", studyId, consentDir, folder.label()
+                    + ": " + folder.mergedFileName() + " exists but every source file is gone"));
+            return;
+        }
+        Map<String, String> meta = folders.metadata(folder.bucket(), folder.mergedKey(), folder.merged().versionId());
+        String recorded = meta.get(AllConceptsFolders.META_FINGERPRINT);
+        String md5 = meta.get(AllConceptsFolders.META_MD5);
+        if (recorded == null) {
+            problems.add(Problem.error("MERGED_NOT_FINGERPRINTED", studyId, consentDir, folder.label() + ": "
+                    + folder.mergedFileName() + " does not record which sources it was built from; re-run the merge"));
+            return;
+        }
+        if (!recorded.equals(AllConceptsFolders.fingerprint(folder.sources()))) {
+            problems.add(Problem.error("MERGED_STALE", studyId, consentDir, folder.label() + ": "
+                    + folder.mergedFileName() + " was not built from the folder's current "
+                    + folder.sources().size() + " source file(s) (one was added, changed, or deleted since); "
+                    + "re-run the merge"));
+            return;
+        }
+        if (md5 == null || md5.isBlank()) {
+            problems.add(Problem.error("MD5_MISSING", studyId, consentDir, folder.label() + ": "
+                    + folder.mergedFileName() + " has no recorded md5; re-run the merge"));
+            return;
+        }
+        rows.add(new ManifestRow(studyId, consentCode(consentDir), folder.uri() + folder.mergedFileName(),
+                folder.merged().versionId(), folder.merged().lastModified().toString(), md5));
+    }
+
+    /** {@code c1} &rarr; {@code 1}: the consent code as the consents table stores it. */
+    static String consentCode(String consentDir) {
+        return consentDir.startsWith("c") ? consentDir.substring(1) : consentDir;
+    }
+
+    static String toCsv(List<ManifestRow> rows) {
+        StringBuilder csv = new StringBuilder(HEADER).append('\n');
+        for (ManifestRow r : rows) {
+            csv.append(Strings.csvQuote(r.study())).append(',')
+                    .append(Strings.csvQuote(r.consent())).append(',')
+                    .append(Strings.csvQuote(r.s3Uri())).append(',')
+                    .append(Strings.csvQuote(r.versionId())).append(',')
+                    .append(r.lastUpdated()).append(',')
+                    .append(r.md5()).append('\n');
+        }
+        return csv.toString();
+    }
+
+    private String write(String manifestUri, String csv, int rowCount, JobContext ctx) {
+        Path tmp = null;
+        try {
+            tmp = Files.createTempFile("allconcepts-manifest-", ".csv");
+            Files.writeString(tmp, csv);
+            String versionId = io.writeOutputFile(manifestUri, tmp,
+                    Map.of("row-count", String.valueOf(rowCount), "run-id", ctx.runId()));
+            if (versionId == null || versionId.isBlank() || "null".equals(versionId)) {
+                // requireVersioning passed, so S3 should have versioned the write; refuse to claim it did.
+                throw new InfrastructureException("S3 returned no version id for " + manifestUri
+                        + "; the manifest may not be versioned");
+            }
+            return versionId;
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to stage the manifest", e);
+        } finally {
+            if (tmp != null) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException e) {
+                    log.warn("Could not delete temp file {}: {}", tmp, e.getMessage());
+                }
+            }
+        }
+    }
+
+    private void writeReportCopy(JobContext ctx, String csv) {
+        try {
+            Files.createDirectories(ctx.reportsDir());
+            Files.writeString(ctx.reportsDir().resolve(MANIFEST_NAME), csv);
+        } catch (IOException e) {
+            // The versioned S3 manifest is the deliverable; the archived copy is a convenience.
+            log.warn("Could not copy the manifest into the reports dir: {}", e.getMessage());
+        }
+    }
+
+    @Override
+    protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
+        for (Problem p : output.problems()) {
+            Map<String, Object> context = new LinkedHashMap<>();
+            if (p.studyId() != null) {
+                context.put("studyId", p.studyId());
+            }
+            if (p.consentDir() != null) {
+                context.put("consent", p.consentDir());
+            }
+            report.add(new ValidationIssue(p.severity(), p.code(), p.message(), null, Map.copyOf(context)));
+        }
+        if (output.versionId() == null) {
+            report.error("MANIFEST_NOT_WRITTEN", output.manifestUri() + " was not written: fix the problems above "
+                    + "and re-run; the previous manifest version is unchanged");
+        } else {
+            report.info("MANIFEST_WRITTEN", output.manifestUri() + " (version " + output.versionId() + "): "
+                    + output.rows().size() + " consent group(s) from " + output.readyStudies() + " ready stud"
+                    + (output.readyStudies() == 1 ? "y" : "ies"));
+        }
+    }
+
+    @Override
+    protected void report(Output output, JobResult.Builder builder) {
+        builder.metric("readyStudies", (long) output.readyStudies())
+                .metric("manifestRows", (long) output.rows().size())
+                .metric("manifestUri", output.manifestUri())
+                .metric("manifestVersionId", output.versionId() == null ? "" : output.versionId())
+                .metric("manifestWritten", output.versionId() != null)
+                .metric("problems", (long) output.problems().stream()
+                        .filter(p -> p.severity() == Severity.ERROR).count());
+    }
+
+    /** One manifest line. */
+    public record ManifestRow(String study, String consent, String s3Uri, String versionId, String lastUpdated,
+                              String md5) {
+    }
+
+    /** Why a ready consent group can't be listed (ERROR blocks the manifest). */
+    public record Problem(Severity severity, String code, String studyId, String consentDir, String message) {
+        static Problem error(String code, String studyId, String consentDir, String message) {
+            return new Problem(Severity.ERROR, code, studyId, consentDir, message);
+        }
+
+        static Problem warning(String code, String studyId, String consentDir, String message) {
+            return new Problem(Severity.WARNING, code, studyId, consentDir, message);
+        }
+    }
+
+    /**
+     * @param versionId  the written manifest's version id; null when it was not written
+     */
+    public record Output(int readyStudies, List<ManifestRow> rows, List<Problem> problems, String manifestUri,
+                         String versionId) {
+    }
+}

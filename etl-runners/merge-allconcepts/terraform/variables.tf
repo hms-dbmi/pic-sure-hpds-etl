@@ -94,7 +94,13 @@ variable "input_uri" {
 variable "study_ids" {
   type        = string
   default     = ""
-  description = "--study-ids: comma-separated study ids to check. Blank discovers all."
+  description = "--study-ids: comma-separated study ids to merge instead of every ready study. Blank merges the ready ones."
+}
+
+variable "managed_inputs_uri" {
+  type        = string
+  default     = ""
+  description = "--managed-inputs: CSV whose ready studies are merged (local path or s3:// URI). When blank the job falls back to etl.managed-inputs.uri from its config."
 }
 
 variable "image_tar" {

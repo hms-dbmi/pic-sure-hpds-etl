@@ -96,4 +96,29 @@ class IoResolverS3IT extends AbstractIntegrationTest {
             io.setMultipartPartSizeBytes(512 * 1024 * 1024);
         }
     }
+
+    /** Metadata must survive both upload paths: it can only be set when an object is created. */
+    @Test
+    void writes_user_metadata_on_single_and_multipart_uploads() throws Exception {
+        java.nio.file.Path small = java.nio.file.Files.createTempFile("meta-", ".txt");
+        java.nio.file.Files.writeString(small, "small");
+        io.writeOutputFile("s3://" + BUCKET + "/meta/small.txt", small, java.util.Map.of("content-md5", "abc"));
+        assertThat(s3.headObject(b -> b.bucket(BUCKET).key("meta/small.txt")).metadata())
+                .containsEntry("content-md5", "abc");
+
+        io.setMultipartThresholdBytes(6L * 1024 * 1024);
+        io.setMultipartPartSizeBytes(5 * 1024 * 1024);
+        java.nio.file.Path big = java.nio.file.Files.createTempFile("meta-big-", ".bin");
+        try {
+            java.nio.file.Files.write(big, new byte[7 * 1024 * 1024]);
+            io.writeOutputFile("s3://" + BUCKET + "/meta/big.bin", big, java.util.Map.of("content-md5", "def"));
+            assertThat(s3.headObject(b -> b.bucket(BUCKET).key("meta/big.bin")).metadata())
+                    .containsEntry("content-md5", "def");
+        } finally {
+            io.setMultipartThresholdBytes(4L * 1024 * 1024 * 1024);
+            io.setMultipartPartSizeBytes(512 * 1024 * 1024);
+            java.nio.file.Files.deleteIfExists(big);
+            java.nio.file.Files.deleteIfExists(small);
+        }
+    }
 }

@@ -35,6 +35,7 @@ etl-runners/
 ├── generate-global-all-concepts/       PERMANENT (JobType.PERMANENT)
 ├── create-vcf-indexes/                 PERMANENT (JobType.PERMANENT)
 ├── merge-allconcepts/                  PERMANENT (JobType.PERMANENT), no DB
+├── generate-allconcepts-manifest/      PERMANENT (JobType.PERMANENT), no DB, last stage of both orchestrators
 ├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT), per study from /Jenkinsfile
 └── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone, no DB
 ```
@@ -156,7 +157,8 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `participants-migration`            | `TF_VAR_managed_inputs_uri`, `TF_VAR_data_folder_uri`, `TF_VAR_batch_size` |
 | `split-allconcepts`                 | `TF_VAR_study_id`, `TF_VAR_abbreviation`, `TF_VAR_input_uri`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri` |
 | `sstr-populate-rds-participants`    | `TF_VAR_study_id`, `TF_VAR_input_uri`, `TF_VAR_batch_size`                 |
-| `merge-allconcepts`                 | `TF_VAR_input_uri`, `TF_VAR_study_ids`                                     |
+| `merge-allconcepts`                 | `TF_VAR_input_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_study_ids`        |
+| `generate-allconcepts-manifest`     | `TF_VAR_input_uri`, `TF_VAR_managed_inputs_uri`                            |
 | `all-concepts-data-generator`       | `TF_VAR_study_id`, `TF_VAR_data_dir`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri`, `TF_VAR_skip_analysis` |
 | `generate-global-all-concepts`      | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_allow_empty`     |
 | `create-vcf-indexes`                | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_include_processed` |

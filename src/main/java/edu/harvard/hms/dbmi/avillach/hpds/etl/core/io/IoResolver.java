@@ -33,6 +33,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 /**
@@ -188,6 +189,27 @@ public class IoResolver {
         }
     }
 
+    /**
+     * Uploads a local file to S3 with user metadata, and returns the version id S3 assigned (null
+     * on an unversioned bucket). S3 only accepts metadata when an object is created, so callers
+     * that derive it from the content (a checksum) spool to a file first. S3 only.
+     */
+    public String writeOutputFile(String uri, Path file, Map<String, String> metadata) {
+        if (!isS3(uri)) {
+            throw new ConfigException("Object metadata needs an s3:// target, got: " + uri);
+        }
+        S3Uri s3Uri = S3Uri.parse(uri);
+        try {
+            String versionId = uploadFile(s3Uri.bucket(), s3Uri.key(), file, metadata);
+            log.info("Uploaded {} bytes to S3 {} (version {})", Files.size(file), uri, versionId);
+            return versionId;
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to write to S3: " + uri, e);
+        } catch (RuntimeException e) {
+            throw classifyS3WriteFailure(uri, e);
+        }
+    }
+
     // A single PutObject caps at 5 GiB; above the threshold we go multipart. 4 GiB leaves
     // comfortable margin under the cap. 512 MiB parts keep the part count tiny (a 34 GiB
     // consent file is 68 parts; S3 allows 10,000) while each part stays a modest request.
@@ -209,15 +231,19 @@ public class IoResolver {
      * reused buffer, so memory stays at one part regardless of file size.
      */
     private void uploadFile(String bucket, String key, Path file) throws IOException {
+        uploadFile(bucket, key, file, Map.of());
+    }
+
+    /** As {@link #uploadFile(String, String, Path)}, with user metadata; returns the new version id. */
+    private String uploadFile(String bucket, String key, Path file, Map<String, String> metadata) throws IOException {
         long size = Files.size(file);
         if (size < multipartThresholdBytes) {
-            s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
-                    RequestBody.fromFile(file));
-            return;
+            return versionIdOf(s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).metadata(metadata).build(),
+                    RequestBody.fromFile(file)));
         }
 
         String uploadId = s3.createMultipartUpload(
-                CreateMultipartUploadRequest.builder().bucket(bucket).key(key).build()).uploadId();
+                CreateMultipartUploadRequest.builder().bucket(bucket).key(key).metadata(metadata).build()).uploadId();
         log.info("Multipart upload {} started for s3://{}/{} ({} bytes, {} byte parts)",
                 uploadId, bucket, key, size, multipartPartSizeBytes);
         try {
@@ -252,11 +278,13 @@ public class IoResolver {
                     }
                 }
             }
-            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+            var completed = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket).key(key).uploadId(uploadId)
                     .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
                     .build());
+            String versionId = completed == null ? null : completed.versionId();
             log.info("Multipart upload {} completed: {} part(s)", uploadId, parts.size());
+            return versionId;
         } catch (IOException | RuntimeException e) {
             // Best effort: without cleanup the parts sit invisibly, billed, until a
             // lifecycle rule or manual abort removes them. Never mask the original failure.
@@ -270,6 +298,10 @@ public class IoResolver {
             }
             throw e;
         }
+    }
+
+    private static String versionIdOf(software.amazon.awssdk.services.s3.model.PutObjectResponse response) {
+        return response == null ? null : response.versionId();
     }
 
     /**

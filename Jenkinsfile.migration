@@ -74,6 +74,8 @@ pipeline {
                description: 'Jenkins job that runs the merge-allconcepts runner')
         string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: '',
                description: 'S3 prefix to scan for {study_id}/allConcepts/c{code}/ folders to merge. Blank defaults to DATA_ROOT.')
+        string(name: 'ALLCONCEPTS_MANIFEST_JOB', defaultValue: 'generate-allconcepts-manifest',
+               description: 'Jenkins job that writes the versioned allConcepts_manifest.csv at DATA_ROOT (last stage)')
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_STOP_JOB', defaultValue: 'participant-db-stop',
@@ -503,6 +505,7 @@ pipeline {
 
                     def mergeParams = [
                         string(name: 'INPUT', value: mergeInput),
+                        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ?: ''),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -529,6 +532,46 @@ pipeline {
                     } catch (err) {
                         echo "Could not copy artifacts for merge-allconcepts (${err.message}); " +
                              "they remain on ${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
+
+        stage('AllConcepts manifest') {
+            // Last stage: verifies every ready consent group's MERGED file and publishes the versioned
+            // {DATA_ROOT}/allConcepts_manifest.csv for production ingestion. Writes nothing (and fails
+            // the build) if any of them is missing or stale, so ingestion never gets a bad manifest.
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    def downstream = build(
+                        job: params.ALLCONCEPTS_MANIFEST_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                            string(name: 'INPUT', value: params.MERGE_ALLCONCEPTS_INPUT?.trim() ?: params.DATA_ROOT.trim()),
+                            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ?: ''),
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-manifest"),
+                            string(name: 'ENV',    value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS', value: true),
+                        ])
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.ALLCONCEPTS_MANIFEST_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/allconcepts-manifest',
+                            optional: true)
+                    } catch (err) {
+                        echo "Could not copy artifacts for allconcepts-manifest (${err.message}); " +
+                             "they remain on ${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number}."
+                    }
+
+                    if (downstream.result == 'UNSTABLE') {
+                        unstable("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} completed with warnings")
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} ended ${downstream.result}: " +
+                              'the manifest was NOT updated. Its report lists every missing or stale MERGED file.')
                     }
                 }
             }

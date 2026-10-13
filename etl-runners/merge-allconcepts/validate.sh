@@ -29,9 +29,14 @@ fi
 
 FOLDERS_MERGED=$(jq -r '.metrics.foldersMerged // 0' "$REPORT")
 FOLDERS_SKIPPED=$(jq -r '.metrics.foldersSkipped // 0' "$REPORT")
+FOLDERS_REMOVED=$(jq -r '.metrics.foldersRemoved // 0' "$REPORT")
 
+echo "Studies checked: $(jq -r '.metrics.studiesChecked // 0' "$REPORT")"
 echo "Folders merged: $FOLDERS_MERGED"
 echo "Folders skipped (up to date): $FOLDERS_SKIPPED"
+echo "Folders whose MERGED file was removed (no sources left): $FOLDERS_REMOVED"
+echo "Per-folder actions:"
+jq -r '(.metrics.actions // {}) | to_entries[] | "  \(.key): \(.value.action) (\(.value.sourceFileCount) source(s))"' "$REPORT"
 
 # Check for warnings in output validation
 WARNINGS=$(jq -r '.outputValidation.counts.warning // 0' "$REPORT")

@@ -127,7 +127,9 @@ etl/
    ├─ allconcepts/
    │  ├─ AllConceptsDataGeneratorJob                   permanent: per-study, per-consent allConcepts
    │  ├─ GenerateGlobalAllConceptsJob                  permanent: global_AllConcepts.csv
-   │  └─ MergeAllConceptsJob                           permanent: merge per-consent allConcepts files
+   │  ├─ MergeAllConceptsJob                           permanent: merge per-consent allConcepts files
+   │  ├─ GenerateAllConceptsManifestJob                permanent: verified allConcepts_manifest.csv
+   │  └─ AllConceptsFolders                            versioned consent-folder scan, fingerprints
    ├─ genomic/CreateVCFIndexesJob                      permanent: vcfIndex.tsv + SampleIds.csv
    ├─ harmonized/GenerateIdentityConsentMappingJob     permanent: DMC drop → identity/consent CSV
    └─ migration/

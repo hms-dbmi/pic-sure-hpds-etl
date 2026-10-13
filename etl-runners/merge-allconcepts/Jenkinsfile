@@ -1,18 +1,19 @@
 // =============================================================================
 // PERMANENT -- merge-allconcepts (JobType.PERMANENT)
 //
-// Scans {study_id}/allConcepts/c{consent}/ folders under the input prefix, detects stale or
-// missing merged files, and concatenates all per-consent allConcepts CSVs into
-// {study_id}_c{code}_allConcepts_MERGED.csv. Uses S3 object versioning to detect
-// deletions since the last merge.
+// For every study marked ready in managed inputs, keeps one {study_id}_c{code}_allConcepts_MERGED.csv
+// per {study_id}/allConcepts/c{consent}/ folder under the input prefix: merges a folder with no
+// MERGED file, re-merges one whose sources were added, overwritten or deleted since (detected from
+// the S3 version ids recorded on the MERGED file), and skips the rest. The bucket must be versioned.
 //
 // This job runs AFTER per-consent allConcepts files have been generated. It is
 // triggered by both the permanent and migration orchestrators as their final stage,
 // or can be run standalone.
 //
 // Inputs
-//   --input       S3 prefix containing {study_id}/allConcepts/c{consent}/ folders
-//   --study-ids   optional comma-separated filter
+//   --input            S3 prefix (versioned bucket) containing {study_id}/allConcepts/c{consent}/ folders
+//   --managed-inputs   managed inputs CSV; its ready studies are merged
+//   --study-ids        optional: these studies instead of the ready ones
 //
 // Outputs
 //   One MERGED CSV per consent folder that needed updating.
@@ -42,8 +43,10 @@ pipeline {
     parameters {
         string(name: 'INPUT', defaultValue: '',
                description: 'REQUIRED. --input: S3 prefix containing {study_id}/allConcepts/c{consent}/ folders with allConcepts files (the root of the per-study folders).')
+        string(name: 'MANAGED_INPUTS', defaultValue: '',
+               description: '--managed-inputs: CSV whose studies marked ready are merged (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
         string(name: 'STUDY_IDS', defaultValue: '',
-               description: 'Optional comma-separated study ids to check. Blank discovers all study folders under INPUT.')
+               description: 'Optional comma-separated study ids to merge instead of every ready study (manual runs only).')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
@@ -66,6 +69,7 @@ pipeline {
 
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_study_ids                 = "${params.STUDY_IDS.trim()}"
+        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -178,10 +182,10 @@ pipeline {
                     if (rc != 0) {
                         String meaning = [
                             1  : 'UNKNOWN (unclassified failure)',
-                            2  : 'VALIDATION_FAILED (input not an S3 URI or no folders found)',
+                            2  : 'VALIDATION_FAILED (input not an S3 URI)',
                             3  : 'DATA_ERROR',
                             4  : 'INFRASTRUCTURE_ERROR (S3/network)',
-                            5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
+                            5  : 'CONFIG_ERROR (missing or invalid parameter, or the bucket is not versioned)',
                             124: 'TIMEOUT (runner did not finish in time)',
                         ].get(rc, "unmapped code ${rc}")
                         env.FAILURE_MEANING = meaning

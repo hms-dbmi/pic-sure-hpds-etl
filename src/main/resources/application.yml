@@ -56,6 +56,11 @@ etl:
     merge-allconcepts:
       enabled: ${ETL_JOB_MERGE_ALLCONCEPTS_ENABLED:true}
 
+    # Runs last in both pipelines: verifies every ready consent group's MERGED file and writes the
+    # versioned allConcepts_manifest.csv handed to production ingestion.
+    generate-allconcepts-manifest:
+      enabled: ${ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED:true}
+
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:
       enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}

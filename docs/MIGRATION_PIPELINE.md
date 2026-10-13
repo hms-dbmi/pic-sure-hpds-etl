@@ -32,6 +32,7 @@ derived artifacts from newly migrated data.
 - [Stage 5: Generate Global AllConcepts](#stage-5-generate-global-allconcepts)
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Merge AllConcepts](#stage-7-merge-allconcepts)
+- [Stage 8: AllConcepts Manifest](#stage-8-allconcepts-manifest)
 - [Post: Stop Participant DB](#post-stop-participant-db)
 - [Data Flow Summary](#data-flow-summary)
 - [Parameters](#parameters)
@@ -73,7 +74,12 @@ Build ▸ Tests
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
-│  Merge AllConcepts       │  (consent folders under DATA_ROOT needing a merge)
+│  Merge AllConcepts       │  (consent folders of ready studies whose sources changed)
+└────────────┬────────────┘
+             ▼
+┌─────────────────────────┐
+│  AllConcepts manifest    │  verifies every ready consent group, then writes
+│                          │  allConcepts_manifest.csv at the merge input root (versioned)
 └─────────────────────────┘
 
 post { always }:  participant-db-stop  (pg_dump to S3; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
@@ -360,11 +366,26 @@ already processed, which would otherwise be zero work. Writes
 **Class:** [`MergeAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/MergeAllConceptsJob.java)
 **Runs:** once (skipped under `PREFLIGHT_ONLY`)
 
-Scans `MERGE_ALLCONCEPTS_INPUT` (blank = `DATA_ROOT`) and, for every
-`{study_id}/allConcepts/c{code}/` folder whose `{study_id}_c{code}_allConcepts_MERGED.csv` is missing,
-older than a source file, or older than a source deletion, concatenates the folder's
-allConcepts files into it. See
-[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-7-merge-allconcepts).
+For every study marked ready in `MANAGED_INPUTS`, keeps one
+`{study_id}_c{code}_allConcepts_MERGED.csv` per `{study_id}/allConcepts/c{code}/` folder under
+`MERGE_ALLCONCEPTS_INPUT` (blank = `DATA_ROOT`): merges a folder that has none, re-merges one whose
+`*_allConcepts_*` files were added, overwritten or deleted since (detected from S3 version ids, so
+the bucket must be versioned), and skips the rest. See
+[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-8-merge-allconcepts).
+
+---
+
+## Stage 8: AllConcepts Manifest
+
+**Job:** `generate-allconcepts-manifest`
+**Class:** [`GenerateAllConceptsManifestJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/GenerateAllConceptsManifestJob.java)
+**Runs:** once, last (skipped under `PREFLIGHT_ONLY`)
+
+Verifies that every ready consent group's MERGED file is the merge of exactly its current source
+files, then writes the versioned `allConcepts_manifest.csv` at the root of
+`MERGE_ALLCONCEPTS_INPUT` (blank = `DATA_ROOT`): `study, consent, s3_uri, version_id,
+last_updated, md5`. If any check fails, no manifest is written and the build fails. See
+[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-9-allconcepts-manifest).
 
 ---
 
@@ -408,6 +429,9 @@ Legacy allConcepts CSV ───────────────────
                                             │
                                             ▼
                                    merge-allconcepts ─▶ {study_id}_c{code}_allConcepts_MERGED.csv
+                                            │
+                                            ▼
+                                   generate-allconcepts-manifest ─▶ allConcepts_manifest.csv
 ```
 
 ---
@@ -430,7 +454,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `VCF_INDEXES_JOB` | `create-vcf-indexes` | VCF index runner job |
 | `VCF_INDEXES_OUTPUT` | `…/__migration__/vcf_indexes/` | Output for VCF indexes (must be `s3://`) |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
-| `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge; blank = `DATA_ROOT` |
+| `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
+| `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
 | `RESTART_DB_IF_RUNNING` | `false` | If a participant DB is already running: `false` reuses it, `true` dumps it (not promoted), destroys it, and starts fresh (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#when-a-database-is-already-running)) |
