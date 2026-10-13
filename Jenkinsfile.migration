@@ -53,7 +53,7 @@ pipeline {
                description: 'participants-migration --managed-inputs: study list CSV with "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
         string(name: 'DATA_ROOT',
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
-               description: 'Root of the per-study folders, one per study id. Must be an s3:// URI. Inputs: {root}/{study_id}/legacy/allConcepts/ (pre-split allConcepts), {root}/{study_id}/legacy/data/ (patient mapping), {root}/{study_id}/rawData/ (SSTR), and the shared {root}/general/completed/GLOBAL_allConcepts_merged.csv. Outputs: {root}/{study_id}/allConcepts/c{code}/ (split + merged allConcepts) and {root}/{study_id}/mappings/<build-tag>/ (hpds id mapping and unmatched report).')
+               description: 'Root of the per-study folders, one per study id. Must be an s3:// URI. Inputs: {root}/{study_id}/legacy/allConcepts/ (pre-split allConcepts), {root}/{study_id}/legacy/data/ (patient mapping), {root}/{study_id}/rawData/ (SSTR, or the Subject/Sample MULTI fallback). Outputs: {root}/{study_id}/allConcepts/c{code}/ (split + merged allConcepts) and {root}/{study_id}/mappings/<build-tag>/ (hpds id mapping).')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every migration job')
         string(name: 'STUDY_FILTER', defaultValue: '',
@@ -314,14 +314,6 @@ pipeline {
                         env.MAP_DST = remoteMapping
                         sh 'aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
                         study.mappingUri = remoteMapping
-
-                        // Only written when some patient-mapping rows found no consent entry.
-                        def localUnmatched = "downstream-artifacts/participants-migration/${sid}_unmatched_mappings.csv"
-                        if (fileExists(localUnmatched)) {
-                            env.MAP_SRC = localUnmatched
-                            env.MAP_DST = "${mappingBase}/${sid}_unmatched_mappings.csv"
-                            sh 'aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
-                        }
                     }
 
                     def results = java.util.Collections.synchronizedList([])

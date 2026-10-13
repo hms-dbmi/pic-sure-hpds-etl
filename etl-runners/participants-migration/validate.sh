@@ -5,8 +5,12 @@
 #
 # A participants-migration run is expected to leave, in the reports directory:
 #   participants-migration-<runId>.json                       the JobResult
-#   sstr-populate-rds-participants-<runId>-<study>-sstr.json   one per sstr-routed study
+#   sstr-populate-rds-participants-<runId>-<study>-sstr.json   one per study with an SSTR
+#   multi-populate-rds-participants-<runId>-<study>-multi.json one per study that fell back to MULTI
 #   <studyId>_hpds_id_mapping.csv                              one per SUCCEEDED study
+#   participants_migration_sources.csv                         one row per ready study: source used
+#   participants_migration_file_issues.csv                     problems found in the source files
+#   participants_migration_file_report.md                      the two above, human-readable
 #   container-status.json                                      what was actually invoked
 #
 # Checking the mapping CSVs matters more than checking the exit code: the job deliberately
@@ -71,6 +75,33 @@ if [[ "$BAD" != "0" ]]; then
   jq -r '(.outputValidation.issues // [])[] | select(.code == "STUDY_FAILED") | "         " + .message' "$REPORT"
 fi
 
+# --- participant sources -------------------------------------------------
+# SSTR always wins; MULTI is the fallback. A study with neither already counted as failed above.
+echo ""
+echo "  Participant sources:"
+note "sstr:  $(jq -r '(.metrics.sstrStudyIds  // []) | length' "$REPORT") study/studies"
+note "multi: $(jq -r '(.metrics.multiStudyIds // []) | length' "$REPORT") study/studies"
+FELL_BACK=$(jq -r '(.metrics.sstrFallbackStudyIds // []) | join(",")' "$REPORT")
+NO_SOURCE=$(jq -r '(.metrics.noParticipantSourceStudyIds // []) | join(", ")' "$REPORT")
+soft "no study had a malformed SSTR" test -z "$FELL_BACK"
+[[ -n "$FELL_BACK" ]] && note "malformed SSTR: $FELL_BACK"
+soft "every study had an SSTR or a Subject.MULTI" test -z "$NO_SOURCE"
+[[ -n "$NO_SOURCE" ]] && note "no participant source: $NO_SOURCE"
+
+SOURCES="$REPORTS/participants_migration_sources.csv"
+ISSUES="$REPORTS/participants_migration_file_issues.csv"
+check "sources report present" test -f "$SOURCES"
+check "file issues report present" test -f "$ISSUES"
+if [[ -f "$SOURCES" ]]; then
+  check "one sources row per ready study" test "$(($(wc -l < "$SOURCES") - 1))" -eq "$READY"
+fi
+if [[ -f "$ISSUES" ]]; then
+  # Severity is the second column; the first (study id) never contains a comma.
+  issue_warn=$(tail -n +2 "$ISSUES" | cut -d, -f2 | grep -c '^WARNING$' || true)
+  issue_err=$(tail -n +2 "$ISSUES" | cut -d, -f2 | grep -c '^ERROR$' || true)
+  note "file issues: $issue_err error(s), $issue_warn warning(s) -- see participants_migration_file_report.md"
+fi
+
 # One STUDY_MIGRATED info issue is recorded per successful study; comparing the two is a
 # cheap cross-check that the metric and the issue list tell the same story.
 MIGRATED_ISSUES=$(jq -r '[(.outputValidation.issues // [])[] | select(.code == "STUDY_MIGRATED")] | length' "$REPORT")
@@ -120,12 +151,19 @@ while IFS= read -r f; do
   [[ -n "$f" ]] && SUBREPORTS+=("$f")
 done < <(find "$REPORTS" -maxdepth 1 -name "sstr-populate-rds-participants-$RUN_ID-*-sstr.json" | sort)
 if [[ ${#SUBREPORTS[@]} -eq 0 ]]; then
-  note "none -- every ready study used the direct-population path"
+  note "none -- no ready study had an SSTR"
 fi
 
 for sub in ${SUBREPORTS[@]+"${SUBREPORTS[@]}"}; do
   base=$(basename "$sub" -sstr.json)
   study="${base#sstr-populate-rds-participants-$RUN_ID-}"
+
+  # A malformed SSTR's failed sub-report is expected when the study fell back to MULTI; the
+  # MULTI sub-report below is the one that has to pass.
+  if [[ ",$FELL_BACK," == *",$study,"* ]]; then
+    note "$study: sstr sub-run failed ($(jq -r '.errorMessage // ""' "$sub")); fell back to MULTI"
+    continue
+  fi
 
   fold_generic "$study: sstr sub-report checks" "$sub"
 
@@ -149,6 +187,34 @@ for sub in ${SUBREPORTS[@]+"${SUBREPORTS[@]}"}; do
     soft "$study: mapping rows ($mapped) cover the $subjects sstr subject(s)" test "$mapped" -ge "$subjects"
     (( mapped < subjects )) && note "$((subjects - mapped)) fewer mapping row(s) than sstr subjects -- check the log for 'not found in sstr file' / 'no participant id found' warnings"
   fi
+done
+
+# --- MULTI sub-reports ---------------------------------------------------
+# Studies with no usable SSTR are loaded by MultiPopulateRdsParticipantsJob, invoked the same way.
+echo ""
+echo "  MULTI sub-runs:"
+MULTI_REPORTS=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && MULTI_REPORTS+=("$f")
+done < <(find "$REPORTS" -maxdepth 1 -name "multi-populate-rds-participants-$RUN_ID-*-multi.json" | sort)
+if [[ ${#MULTI_REPORTS[@]} -eq 0 ]]; then
+  note "none -- no ready study fell back to its MULTI files"
+fi
+
+for sub in ${MULTI_REPORTS[@]+"${MULTI_REPORTS[@]}"}; do
+  base=$(basename "$sub" -multi.json)
+  study="${base#multi-populate-rds-participants-$RUN_ID-}"
+
+  fold_generic "$study: multi sub-report checks" "$sub"
+
+  subjects=$(jq -r '.metrics.distinctParticipants // 0' "$sub")
+  consents=$(jq -r '.metrics.consentsWritten      // 0' "$sub")
+  dropped=$(jq -r '.metrics.notConsentedSubjects  // 0' "$sub")
+  check "$study: consentsWritten == distinctParticipants ($consents == $subjects)" \
+    test "$consents" -eq "$subjects"
+  check "$study: loaded at least one consented subject" test "$subjects" -gt 0
+  [[ "$dropped" != "0" ]] && note "$study: $dropped consent-0 subject(s) dropped"
+  [[ "$(jq -r '.metrics.sampleFileLoaded // false' "$sub")" != "true" ]] && note "$study: no samples loaded (no usable Sample.MULTI)"
 done
 
 summary

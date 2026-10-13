@@ -102,15 +102,15 @@ prefix itself):
 
 ```
 {DATA_ROOT}/
-├── general/completed/GLOBAL_allConcepts_merged.csv           shared legacy consent lookup
 └── {study_id}/
     ├── legacy/
     │   ├── allConcepts/{study_id}_allConcepts_new_search_with_data_analyzer.csv   split input
     │   └── data/{ABV}_PatientMapping.v2.csv                   participants-migration input
-    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (optional)
+    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (preferred source)
+    ├── rawData/{study_id}*Subject.MULTI.txt                   MULTI fallback (+ *Sample.MULTI.txt,
+    │                                                          *Subject.data_dict.xml, optional)
     ├── mappings/<build-tag>/
-    │   ├── {study_id}_hpds_id_mapping.csv                     participants-migration → split
-    │   └── {study_id}_unmatched_mappings.csv                  only when rows were unmatched
+    │   └── {study_id}_hpds_id_mapping.csv                     participants-migration → split
     └── allConcepts/c{code}/
         ├── {study_id}_allConcepts_c{code}.csv                 split / generator output
         └── {study_id}_c{code}_allConcepts_MERGED.csv          merge output
@@ -161,72 +161,109 @@ seed dump of the legacy RDS database must be placed.
 | File | Location | Description |
 |------|----------|-------------|
 | Managed inputs CSV | `--managed-inputs` | Study master list with readiness flags |
-| `GLOBAL_allConcepts_merged.csv` | `{DATA_FOLDER}/general/completed/` | Legacy file (headerless, all-quoted) with consent codes and abbreviations per legacy HPDS id |
-| `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{study_id}/legacy/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id) |
-| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR (optional; determines processing path). Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
+| `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{study_id}/legacy/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id). Required |
+| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
+| `{studyid}*Subject.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP subject table: the fallback source when there is no SSTR, or the SSTR is malformed. `#` preamble, then tab-delimited; `dbGaP_Subject_ID` plus a numeric consent column named `consent`, `consent_1217`, `consentcol` or `gencons` (any case) |
+| `{studyid}*Sample.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP sample table (optional, fallback only): `dbGaP_Subject_ID`, `dbGaP_Sample_ID`, usually `SAMPLE_ID` |
+| `{studyid}*Subject.data_dict.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes |
+
+All rawData names are matched case-insensitively. When several MULTI files or dictionaries match,
+the newest release (highest version numbers) is used and the others are reported; a dictionary
+sharing the Subject.MULTI's table accession (`pht######`) is preferred.
 
 ### Flow
 
 ```
 Read managed inputs ─▶ filter to ready studies
-Read GLOBAL_allConcepts_merged.csv ─▶ build consent lookup (legacy HPDS id → consent info)
         │
         ▼
 For each ready study:
         │
-        ├─── SSTR file exists? ──── Yes ──▶ SSTR path
-        │                                       │
-        │                                       ▼
-        │                           Delegate to SstrPopulateRdsParticipantsJob
-        │                           (runs as a sub-job via JobExecutor)
-        │                                       │
-        │                                       ▼
-        │                           Read {ABV}_PatientMapping.v2.csv
-        │                           Join its id against the SSTR's
-        │                           SUBJECT_ID / dbgap_subject_id
-        │                                       │
-        │                                       ▼
-        │                           Build mapping: legacy id → new hpds_id → dbGaP id
+        ├─── SSTR file? ── Yes ──▶ SstrPopulateRdsParticipantsJob (sub-job)
+        │                              │
+        │                              ├── succeeds ──────────────────────────▶ source = sstr
+        │                              ├── infrastructure error ─▶ abort the run
+        │                              └── data error ("malformed"; its transaction
+        │                                  rolls back) ─▶ fall through ▼
         │
-        └─── SSTR file exists? ──── No ───▶ Direct path
-                                                │
-                                                ▼
-                                    Read {ABV}_PatientMapping.v2.csv
-                                    Join against GLOBAL_allConcepts_merged.csv
-                                    for consent codes
-                                                │
-                                                ▼
-                                    Upsert participants (source = study_id)
-                                    Upsert consents
-                                    (all in one transaction per study)
-                                                │
-                                                ▼
-                                    Build mapping: legacy id → new hpds_id → source id
+        ├─── Subject.MULTI? ── Yes ──▶ MultiPopulateRdsParticipantsJob (sub-job)
+        │                              │
+        │                              ├── succeeds ──────────────────────────▶ source = multi
+        │                              ├── infrastructure error ─▶ abort the run
+        │                              └── data error ─▶ study FAILS (MULTI_LOAD_FAILED)
+        │
+        └─── neither ──▶ study FAILS (NO_PARTICIPANT_SOURCE)
         │
         ▼
-Write {studyid}_hpds_id_mapping.csv (and {studyid}_unmatched_mappings.csv, if any) to the reports directory
+Read {ABV}_PatientMapping.v2.csv; join its id against the source's dbGaP subject id
+or the study's own subject id (SSTR SUBJECT_ID / MULTI SUBJECT_ID or SUBJID)
+        │
+        ▼
+Write {studyid}_hpds_id_mapping.csv, then (once, for the run) the source and issue reports
 ```
+
+The MULTI sub-job writes the same rows the SSTR job would:
+
+- one `participants` row per subject with a usable consent, keyed by `dbGaP_Subject_ID` with
+  source `DBGap`. Consent `0` (not consented) subjects are dropped;
+- one `consents` row per participant: the numeric code, and as the abbreviation the text in the
+  trailing parentheses of its data-dictionary label (`General Research Use (GRU)` → `GRU`), the
+  full label if it has none, or blank when there is no dictionary or it doesn't decode that code;
+- from the Sample.MULTI, a `DBGap` sample per `dbGaP_Sample_ID` and a `submitted` sample per
+  `SAMPLE_ID`, for loaded subjects only. No Sample.MULTI, or an unreadable one, loads no samples.
+
+Like the SSTR job it purges the study's `consents` first, in the same transaction as the load.
+It is migration-only (`JobType.MIGRATION`); the permanent pipeline never reads MULTI files.
 
 Studies are processed independently. A data failure in one study does not stop the rest
 (an infrastructure failure aborts the run). The job exits with `VALIDATION_FAILED` if any
-study failed while others succeeded.
+study failed while others succeeded, and `SUCCESS_WITH_WARNINGS` if a study fell back from a
+malformed SSTR or its MULTI files had problems.
 
 ### Output
 
 - Populated participant database tables: `participants`, `consents`, `samples`
-- One `{studyid}_hpds_id_mapping.csv` per study with columns:
+- One `{studyid}_hpds_id_mapping.csv` per succeeded study with columns:
   - `old_hpds_id` -- the legacy integer HPDS id
   - `new_hpds_id` -- the new integer HPDS id (from `hpds_id_seq`)
-  - `common_dbgap_id` -- the dbGaP subject id (or the patient mapping id for non-SSTR studies)
+  - `common_dbgap_id` -- the dbGaP subject id
+- `participants_migration_sources.csv`: one row per ready study -- outcome, source used
+  (`sstr`/`multi`/`none`), the SSTR/MULTI/dictionary files found, whether the SSTR was used or
+  malformed, the consent column read, mapping and unresolved row counts, and the error if it failed
+- `participants_migration_file_issues.csv`: every problem found in those files, one row per
+  study and issue code, with severity, file, count and the first few examples
+- `participants_migration_file_report.md`: both of the above for a person to read, studies
+  grouped by source and outcome
+- Metrics `sstrStudyIds`, `multiStudyIds`, `sstrFallbackStudyIds`, `noParticipantSourceStudyIds`
 
-The orchestrator copies these (and any `{studyid}_unmatched_mappings.csv`) from the runner's
-artifacts and uploads them to `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot see the
-orchestrator's workspace.
+Issue codes in the file issues report:
 
-### Special Cases
+| Code | Severity | Meaning |
+|------|----------|---------|
+| `SSTR_MALFORMED` | warning | The SSTR sub-job failed on its data; the study fell back to MULTI |
+| `NO_PARTICIPANT_SOURCE` | error | No usable SSTR and no Subject.MULTI; the study failed |
+| `MULTI_LOAD_FAILED` | error | The MULTI sub-job failed (e.g. no consent column, no consented subject); the study failed |
+| `MULTIPLE_SSTR_CANDIDATES`, `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named |
+| `MULTIPLE_CONSENT_COLUMNS` | warning | Several known consent headers; the first of `consent`, `consent_1217`, `consentcol`, `gencons` was used |
+| `CONSENT_ZERO_DROPPED` | info | Consent-0 subjects, dropped by design |
+| `BLANK_CONSENT`, `NON_NUMERIC_CONSENT`, `BLANK_DBGAP_SUBJECT_ID`, `CONFLICTING_CONSENT` | warning | Subject rows skipped (or, for a conflict, the first consent kept) |
+| `NO_SUBJECT_ID_COLUMN` | info | No `SUBJECT_ID`/`SUBJID`; patient mapping ids can only match the dbGaP id |
+| `NO_SAMPLE_MULTI` | info | No Sample.MULTI; no samples loaded |
+| `SAMPLE_MULTI_UNREADABLE`, `NO_SAMPLE_ROWS` | warning | Sample.MULTI unusable or empty; no samples loaded |
+| `NO_SUBMITTED_SAMPLE_ID_COLUMN` | info | Only dbGaP sample ids loaded |
+| `BLANK_DBGAP_SAMPLE_ID`, `BLANK_SAMPLE_SUBJECT_ID` | warning | Sample rows with missing ids |
+| `SAMPLES_OF_UNCONSENTED_SUBJECTS` | info | Samples of consent-0 subjects, not loaded |
+| `SAMPLES_OF_UNKNOWN_SUBJECTS` | warning | Samples whose subject has no usable consent in the Subject.MULTI, not loaded |
+| `NO_DATA_DICT`, `DATA_DICT_UNREADABLE`, `CONSENT_VARIABLE_NOT_IN_DATA_DICT` | warning | Abbreviations left blank |
+| `CONSENT_CODE_NOT_DECODED` | warning | Codes the dictionary doesn't decode; their abbreviations are blank |
+| `CONSENT_LABEL_WITHOUT_ABBREVIATION` | warning | Labels with no trailing `(ABBREV)`; the full label was used |
+| `PATIENT_MAPPING_NOT_CONSENTED` | info | Patient mapping rows naming a consent-0 subject; not mapped |
+| `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped |
 
-- **`open_access-1000Genomes`**: handled on the direct path with sample rows written
-  (subject IDs are also sample IDs for this dataset)
+The orchestrator copies the mapping files from the runner's artifacts and uploads them to
+`{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot
+see the orchestrator's workspace. The source and issue reports stay with the runner's archived
+artifacts.
 
 ---
 
@@ -346,11 +383,11 @@ database up for debugging; run `participant-db-stop` with `PROMOTE_BACKUP=false`
 LEGACY SYSTEM                             PARTICIPANT DATABASE
 ─────────────                             ────────────────────
 
-GLOBAL_allConcepts_merged.csv ──┐
+{ABV}_PatientMapping.v2.csv ────┐
                                 │
-{ABV}_PatientMapping.v2.csv ────┤
                                 ├──▶ participants-migration ──▶ participants,
-sstr_{studyid}.{v}.txt ─────────┤                            │  consents, samples
+sstr_{studyid}.{v}.txt, or ────┤                            │  consents, samples
+*Subject/Sample.MULTI.txt       │                            │
                                 │                            │  (dumped to S3 at the end)
 Managed inputs CSV ─────────────┘                            │
                                                              │

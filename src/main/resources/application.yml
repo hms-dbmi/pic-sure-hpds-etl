@@ -62,10 +62,13 @@ etl:
 
     # TEMPORARY migration. Set these to false once the migration has run in every environment,
     # then delete the jobs. NOTE: participants-migration also requires
-    # sstr-populate-rds-participants to be enabled -- it injects that job to load the
-    # sstr-backed studies, and its condition lists both flags.
+    # sstr-populate-rds-participants and multi-populate-rds-participants to be enabled -- it
+    # injects them to load each study from its SSTR, or from its dbGaP MULTI files when the
+    # SSTR is missing or malformed, and its condition lists all three flags.
     participants-migration:
       enabled: ${ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED:true}
+    multi-populate-rds-participants:
+      enabled: ${ETL_JOB_MULTI_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
     split-allconcepts:
       enabled: ${ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED:true}
 

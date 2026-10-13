@@ -10,11 +10,12 @@
 //
 // What the job does
 //   Moves every ready study's participant identities off the legacy system into the
-//   participants / consents / samples RDS tables. Per study:
-//     - {study_id}/rawData/sstr_{study_id}.{v}.txt present: SstrPopulateRdsParticipantsJob loads RDS and this job only
-//       resolves legacy-hpds-id -> new-hpds-id pairs
-//     - otherwise: this job populates participants/consents itself, joining
-//       {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
+//   participants / consents / samples RDS tables. Per study, from exactly one source:
+//     - {study_id}/rawData/sstr_{study_id}.{v}.txt, always preferred: SstrPopulateRdsParticipantsJob
+//     - else, or if that SSTR is malformed: {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional
+//       *Sample.MULTI.txt and *Subject.data_dict.xml): MultiPopulateRdsParticipantsJob
+//     - neither: the study fails
+//   then resolves legacy-hpds-id -> new-hpds-id pairs from {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv.
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).
 //
 // Inputs
@@ -27,8 +28,12 @@
 // Outputs
 //   RDS rows in participants / consents / samples
 //   participants-migration-<runId>.json                       the JobResult
-//   sstr-populate-rds-participants-<runId>-<study>-sstr.json   per sstr-routed study
+//   sstr-populate-rds-participants-<runId>-<study>-sstr.json   per study with an SSTR
+//   multi-populate-rds-participants-<runId>-<study>-multi.json per study that fell back to MULTI
 //   <studyId>_hpds_id_mapping.csv                             per succeeded study
+//   participants_migration_sources.csv / _file_issues.csv / _file_report.md
+//                                                             which source each study used, and
+//                                                             every problem found in those files
 //   All archived on this build and left in S3 under the runner's report prefix.
 //
 // Exit codes (see ExitCode.java)
@@ -63,7 +68,7 @@ pipeline {
                description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
         string(name: 'DATA_FOLDER',
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
-               description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/sstr_{study_id}.{v}.txt (optional), {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv, and the shared {root}/general/completed/GLOBAL_allConcepts_merged.csv')
+               description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/ holding sstr_{study_id}.{v}.txt or, as a fallback, {study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt, *Subject.data_dict.xml); and {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: '--study-filter: comma-separated study ids to process; blank processes every ready study')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
@@ -71,7 +76,7 @@ pipeline {
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG. Appears in the report filename and the S3 report prefix.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
-               description: 'Runner instance type. Memory-bound: a study mapping file and GLOBAL_allConcepts_merged.csv are joined in memory.')
+               description: 'Runner instance type. Memory-bound: a study\'s patient mapping and its SSTR or MULTI subject ids are joined in memory.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,

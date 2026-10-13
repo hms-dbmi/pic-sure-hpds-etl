@@ -57,6 +57,36 @@ public class DelimitedReader {
         }
     }
 
+    /**
+     * Like {@link #stream}, for exports that open with a {@code #}-prefixed preamble (dbGaP
+     * phenotype tables): lines starting with {@code #} and blank lines are skipped, and quotes
+     * are literal characters rather than field delimiters, because those exports are never
+     * quoted and a stray {@code "} in a free-text column would otherwise swallow the rows after it.
+     * The returned stream is lazy and MUST be closed (use try-with-resources).
+     */
+    public Stream<Map<String, String>> streamSkippingComments(InputStream in, char separator) {
+        CsvSchema schema = CsvSchema.emptySchema()
+                .withHeader()
+                .withColumnSeparator(separator)
+                .withComments()
+                .withoutQuoteChar()
+                .withNullValue("");
+        try {
+            MappingIterator<Map<String, String>> it = csvMapper
+                    .readerFor(Map.class)
+                    .with(schema)
+                    .with(CsvParser.Feature.SKIP_EMPTY_LINES)
+                    .readValues(in);
+            return StreamSupport
+                    .stream(java.util.Spliterators.spliteratorUnknownSize(
+                            new NormalizingIterator(it), java.util.Spliterator.ORDERED), false)
+                    .onClose(() -> closeQuietly(it, in));
+        } catch (IOException e) {
+            closeQuietly(null, in);
+            throw new DataException("Failed to read delimited input", e);
+        }
+    }
+
     /** Convenience: read a delimited input fully into a list (small files/tests only). */
     public List<Map<String, String>> readAll(InputStream in, char separator) {
         try (Stream<Map<String, String>> s = stream(in, separator)) {

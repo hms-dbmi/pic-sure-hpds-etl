@@ -115,18 +115,19 @@ READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
 check "at least one study is marked ready" test "$READY_COUNT" -gt 0
 note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
 
-# --- shared GLOBAL_allConcepts_merged.csv --------------------------------
-# Required unconditionally: execute() reads it before looking at any study, so a missing
-# one aborts the entire run rather than just the studies that would have used it.
-ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
-check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed): $ALL_CONCEPTS" uri_exists "$ALL_CONCEPTS"
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt (optional)
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
+#         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
+# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+# not a failure: the job still migrates every other study and reports the ones it could not.
 echo ""
 echo "  Per-study inputs:"
 SSTR_STUDIES=0
-DIRECT_STUDIES=0
+MULTI_STUDIES=0
+NO_SOURCE_STUDIES=0
 
 while IFS=$'\t' read -r abv sid state; do
   [[ "$state" != "ready" ]] && continue
@@ -134,32 +135,42 @@ while IFS=$'\t' read -r abv sid state; do
   abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
   mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
 
-  # Find SSTR file by listing the rawData directory for a file matching sstr_*{studyId}*.txt
   raw_data_dir="$DATA_FOLDER/${sid}/rawData"
+  listing=$(uri_ls "$raw_data_dir" 2>/dev/null || true)
   # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
   # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
   # case-insensitively, preferring the canonical name -- mirrors the job's discovery.
-  sstr_file=$(uri_ls "$raw_data_dir" 2>/dev/null | grep -iF "$sid" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
+  sstr_file=$(grep -iF "$sid" <<<"$listing" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
               | awk '{ key = (tolower($0) ~ /^sstr_[^_]/) ? 0 : 1; print key "\t" $0 }' | sort | head -1 | cut -f2- || true)
+  # ParticipantsMigrationJob.isSubjectMultiFileFor / isSampleMultiFileFor / isSubjectDataDictFor.
+  # Only presence matters here; when several match, the job picks the newest and reports it.
+  subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
+  sample_multi=$(grep -iE "^${sid}.*sample\.multi\.txt$" <<<"$listing" | head -1 || true)
+  data_dict=$(grep -iE "^${sid}.*subject\.data_dict\.xml$" <<<"$listing" | head -1 || true)
 
   if [[ -n "$sstr_file" ]]; then
     SSTR_STUDIES=$((SSTR_STUDIES + 1))
     route="sstr"
     note "$sid ($abv): found SSTR file '$sstr_file'"
+    [[ -z "$subject_multi" ]] && note "$sid ($abv): no Subject.MULTI fallback -- the study fails if its SSTR is malformed"
+  elif [[ -n "$subject_multi" ]]; then
+    MULTI_STUDIES=$((MULTI_STUDIES + 1))
+    route="multi"
+    note "$sid ($abv): no SSTR; will load from '$subject_multi'"
+    [[ -z "$sample_multi" ]] && note "$sid ($abv): no Sample.MULTI file -- no samples will be loaded"
+    [[ -z "$data_dict" ]] && note "$sid ($abv): no Subject.data_dict.xml -- consent abbreviations will be blank"
   else
-    DIRECT_STUDIES=$((DIRECT_STUDIES + 1))
-    route="direct"
+    NO_SOURCE_STUDIES=$((NO_SOURCE_STUDIES + 1))
+    route="none"
+    warn "$sid ($abv): no SSTR and no Subject.MULTI in $raw_data_dir -- this study will fail"
   fi
 
-  # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-hpds-id pairs.
+  # Required on every route; it supplies the old-hpds-id -> new-hpds-id pairs.
   check "$sid ($abv, $route): $mapping" uri_exists "$mapping"
 done <<<"$STUDIES"
 
 echo ""
-note "$SSTR_STUDIES study/studies will load via the sstr sub-job, $DIRECT_STUDIES via direct population"
-if (( DIRECT_STUDIES > 0 )); then
-  note "the $DIRECT_STUDIES direct study/studies also need a GLOBAL_allConcepts_merged.csv row per legacy hpds id, "
-  note "formatted {studyid}.c{code} -- ids with no row are skipped with a log warning only"
-fi
+note "$SSTR_STUDIES study/studies will load from their SSTR, $MULTI_STUDIES from their MULTI files, "
+note "$NO_SOURCE_STUDIES have no participant source and will fail"
 
 summary
