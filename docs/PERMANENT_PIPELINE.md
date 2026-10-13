@@ -437,28 +437,35 @@ Runs only if Stage 7 succeeded (or was skipped because no study is unprocessed).
 **Class:** [`GenerateAllConceptsManifestJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/GenerateAllConceptsManifestJob.java)
 **Runs:** once, last (skipped under `PREFLIGHT_ONLY`). Touches no database.
 
-Writes **`{DATA_ROOT}/allConcepts_manifest.csv`**, the file handed to production ingestion: one
-row per consent group of every study marked ready in `MANAGED_INPUTS`, sorted by study and consent.
+Writes **`{DATA_ROOT}/allConcepts_manifest.csv`**, the file handed to production ingestion:
+
+1. Always first, a `GLOBAL` row for the current version of `global_AllConcepts.csv` from
+   Stage 5 (`ALL_CONCEPTS_OUTPUT`). Its `consent` is blank.
+2. Then one row per consent group of every study marked ready in `MANAGED_INPUTS`, sorted by
+   study, then consent in code order (`c2` before `c10`). Managed inputs name only studies; a
+   study's consent groups are the `c{code}/` folders it actually has.
 
 | Column | Value |
 |--------|-------|
-| `study` | study id |
-| `consent` | consent code (folder `c1` → `1`) |
-| `s3_uri` | the MERGED file |
-| `version_id` | the MERGED file's S3 version id; later merges overwrite the key, so this pins the exact data described |
+| `study` | study id, or `GLOBAL` |
+| `consent` | consent code (folder `c1` → `1`); blank on the `GLOBAL` row |
+| `s3_uri` | the MERGED file, or `global_AllConcepts.csv` |
+| `version_id` | the file's S3 version id; later runs overwrite the key, so this pins the exact data described |
 | `last_updated` | that version's S3 `LastModified` (ISO-8601 UTC) |
-| `md5` | MD5 of that version's content, recorded by the merge |
+| `md5` | MD5 of that version's content: recorded by the merge for a MERGED file; computed by reading that exact version for the global file |
 
 **Checks before writing.** Every ready consent group must have a MERGED file whose recorded
 fingerprint equals that of the folder's current sources (it is the merge of exactly the ready
 files) and which carries its md5. A ready study must have at least one consent folder. Any
 failure (`MERGED_MISSING`, `MERGED_STALE`, `MERGED_NOT_FINGERPRINTED`, `MERGED_WITHOUT_SOURCES`,
-`MD5_MISSING`, `NO_CONSENT_FOLDERS`, `NO_READY_STUDIES`) means **no manifest is written**: the
+`MD5_MISSING`, `NO_CONSENT_FOLDERS`, `NO_READY_STUDIES`), or a global file that is missing,
+empty or unversioned (`GLOBAL_MISSING`, `GLOBAL_EMPTY`, `GLOBAL_NOT_VERSIONED`), means **no
+manifest is written**: the
 previous version stays current, and the job exits `2` listing every problem at once. A consent
 folder holding no allConcepts files at all is left out with a warning.
 
 **Versioning.** The manifest is overwritten in place, on a bucket that must have versioning
-Enabled (checked by the job and its pre-flight); every earlier manifest stays retrievable as an
+Enabled, as must the global file's bucket (both checked by the job and its pre-flight); every earlier manifest stays retrievable as an
 older version. The job fails if S3 returns no version id for the write. Metadata `row-count` and
 `run-id` are set on each version, and a copy is archived with the build's reports.
 

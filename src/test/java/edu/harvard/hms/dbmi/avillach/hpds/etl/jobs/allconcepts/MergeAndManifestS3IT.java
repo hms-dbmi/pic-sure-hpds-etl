@@ -70,6 +70,7 @@ class MergeAndManifestS3IT extends AbstractIntegrationTest {
             s3.createBucket(CreateBucketRequest.builder().bucket(UNVERSIONED).build());
         }
         prefix = "run-" + UUID.randomUUID() + "/";
+        put("global_allconcepts/global_AllConcepts.csv", "global\n");
         managedInputs("A,phs000001,Yes\nB,phs000002,No\n");
     }
 
@@ -102,7 +103,8 @@ class MergeAndManifestS3IT extends AbstractIntegrationTest {
     }
 
     private JobResult runManifest() {
-        return executor.run(manifest, Map.of("input", root()), "it-manifest");
+        return executor.run(manifest, Map.of("input", root(), "global-allconcepts", root() + "global_allconcepts/"),
+                "it-manifest");
     }
 
     private static final String C1 = "phs000001/allConcepts/c1/";
@@ -122,8 +124,11 @@ class MergeAndManifestS3IT extends AbstractIntegrationTest {
         JobResult result = runManifest();
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        HeadObjectResponse global = head("global_allconcepts/global_AllConcepts.csv");
         assertThat(get("allConcepts_manifest.csv")).isEqualTo(
                 "study,consent,s3_uri,version_id,last_updated,md5\n"
+                        + "GLOBAL,," + root() + "global_allconcepts/global_AllConcepts.csv," + global.versionId() + ","
+                        + global.lastModified() + "," + md5("global\n") + "\n"
                         + "phs000001,1," + root() + MERGED + "," + merged.versionId() + ","
                         + merged.lastModified() + "," + md5("a1\nb1\n") + "\n");
         assertThat(result.getMetrics()).containsEntry("manifestVersionId", head("allConcepts_manifest.csv").versionId());
@@ -168,7 +173,22 @@ class MergeAndManifestS3IT extends AbstractIntegrationTest {
         String root = "s3://" + UNVERSIONED + "/" + prefix;
 
         assertThat(executor.run(merge, Map.of("input", root), "it-merge").getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
-        assertThat(executor.run(manifest, Map.of("input", root), "it-manifest").getExitCode())
-                .isEqualTo(ExitCode.CONFIG_ERROR);
+        assertThat(executor.run(manifest, Map.of("input", root, "global-allconcepts", root + "global/"), "it-manifest")
+                .getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
+    }
+
+    /** The global file may live in another bucket; that bucket must be versioned too. */
+    @Test
+    void the_manifest_refuses_a_global_file_in_an_unversioned_bucket() {
+        put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        runMerge();
+        s3.putObject(PutObjectRequest.builder().bucket(UNVERSIONED).key(prefix + "global_AllConcepts.csv").build(),
+                RequestBody.fromString("global\n"));
+
+        JobResult result = executor.run(manifest, Map.of("input", root(),
+                "global-allconcepts", "s3://" + UNVERSIONED + "/" + prefix), "it-manifest");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
+        assertThat(result.getErrorMessage()).contains(UNVERSIONED);
     }
 }

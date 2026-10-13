@@ -382,9 +382,10 @@ the bucket must be versioned), and skips the rest. See
 **Runs:** once, last (skipped under `PREFLIGHT_ONLY`)
 
 Verifies that every ready consent group's MERGED file is the merge of exactly its current source
-files, then writes the versioned `allConcepts_manifest.csv` at the root of
-`MERGE_ALLCONCEPTS_INPUT` (blank = `DATA_ROOT`): `study, consent, s3_uri, version_id,
-last_updated, md5`. If any check fails, no manifest is written and the build fails. See
+files, and that `global_AllConcepts.csv` under `ALL_CONCEPTS_OUTPUT` exists. Then it writes the
+versioned `allConcepts_manifest.csv` at the root of `MERGE_ALLCONCEPTS_INPUT` (blank =
+`DATA_ROOT`): `study, consent, s3_uri, version_id, last_updated, md5`, with a `GLOBAL` row (blank
+consent) for the global file first. If any check fails, no manifest is written and the build fails. See
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-9-allconcepts-manifest).
 
 ---

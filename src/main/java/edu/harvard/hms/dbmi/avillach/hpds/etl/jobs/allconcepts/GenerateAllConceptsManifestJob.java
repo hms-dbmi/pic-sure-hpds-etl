@@ -30,15 +30,18 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * PERMANENT. Writes {@value #MANIFEST_NAME} at the data root: one row per consent group of every
- * study marked ready in managed inputs, naming its MERGED allConcepts file for the production
- * ingestion. Columns: {@code study, consent, s3_uri, version_id, last_updated, md5}.
+ * PERMANENT. Writes {@value #MANIFEST_NAME} at the data root for the production ingestion: first a
+ * {@value #GLOBAL_STUDY} row (blank consent) naming the current version of
+ * {@code global_AllConcepts.csv} ({@code --global-allconcepts}), then one row per consent group of
+ * every study marked ready in managed inputs, naming its MERGED allConcepts file. Columns:
+ * {@code study, consent, s3_uri, version_id, last_updated, md5}. The global file's md5 is computed
+ * by reading that exact version; a MERGED file's is the one its merge recorded.
  *
  * <p>Runs after {@link MergeAllConceptsJob} at the end of both pipelines. Before writing, every
  * ready consent group must hold: a MERGED file exists; its recorded
  * {@linkplain AllConceptsFolders#fingerprint source fingerprint} equals that of the folder's
  * current sources (it is the merge of exactly the ready files); and it carries its MD5. A ready
- * study with no consent folders also fails. Any failure writes <b>no</b> manifest, so ingestion
+ * study with no consent folders, or a missing or empty global AllConcepts file, also fails. Any failure writes <b>no</b> manifest, so ingestion
  * never receives one describing stale or missing data; the report names every problem.
  *
  * <p>The manifest is overwritten in place on a bucket that must have versioning enabled, so every
@@ -51,6 +54,8 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
 
     static final String MANIFEST_NAME = "allConcepts_manifest.csv";
     static final String HEADER = "study,consent,s3_uri,version_id,last_updated,md5";
+    /** The {@code study} value of the global AllConcepts row; its {@code consent} is blank. */
+    static final String GLOBAL_STUDY = "GLOBAL";
 
     private final IoResolver io;
     private final AllConceptsFolders folders;
@@ -76,9 +81,13 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
     public JobExpectations expectations() {
         return JobExpectations.of(
                 List.of(ParamSpec.required("input",
-                        "Data root (s3://, versioned bucket) holding {study_id}/allConcepts/c{consent}/ folders; "
-                                + "the manifest is written here as " + MANIFEST_NAME,
-                        "s3://bucket/data/")),
+                                "Data root (s3://, versioned bucket) holding {study_id}/allConcepts/c{consent}/ folders; "
+                                        + "the manifest is written here as " + MANIFEST_NAME,
+                                "s3://bucket/data/"),
+                        ParamSpec.required("global-allconcepts",
+                                "The global AllConcepts output (s3://, versioned bucket): the file, or the folder holding "
+                                        + GenerateGlobalAllConceptsJob.OUTPUT_FILENAME + " (generate-global-all-concepts --output)",
+                                "s3://bucket/global_allconcepts/")),
                 List.of(MANIFEST_NAME + " at the data root, listing the MERGED file of every ready consent group; "
                         + "not written if any of them is missing or stale"));
     }
@@ -88,6 +97,15 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
         if (!io.isS3(ctx.require("input"))) {
             report.error("S3_REQUIRED", "input must be an s3:// URI: the manifest must be versioned", "--input");
         }
+        if (!io.isS3(ctx.require("global-allconcepts"))) {
+            report.error("S3_REQUIRED", "global-allconcepts must be an s3:// URI: its version is pinned in the manifest",
+                    "--global-allconcepts");
+        }
+    }
+
+    /** The global file's URI: {@code --global-allconcepts} as given, or with the job's file name if a folder. */
+    static String globalUri(String param) {
+        return param.endsWith("/") ? param + GenerateGlobalAllConceptsJob.OUTPUT_FILENAME : param;
     }
 
     @Override
@@ -95,6 +113,9 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
         String base = AllConceptsFolders.normalizeDir(ctx.require("input"));
         folders.requireVersioning(AllConceptsFolders.parseS3Prefix(base)[0]);
         String manifestUri = base + MANIFEST_NAME;
+        String globalUri = globalUri(ctx.require("global-allconcepts"));
+        String[] global = AllConceptsFolders.parseS3Prefix(globalUri);
+        folders.requireVersioning(global[0]);
 
         Set<String> studyIds = new LinkedHashSet<>();
         managedInputsService.read().stream().filter(ManagedInputRow::isReady).map(ManagedInputRow::studyId)
@@ -102,6 +123,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
 
         List<ManifestRow> rows = new ArrayList<>();
         List<Problem> problems = new ArrayList<>();
+        verifyGlobal(globalUri, global[0], global[1], rows, problems);
         if (studyIds.isEmpty()) {
             problems.add(Problem.error("NO_READY_STUDIES", null, null,
                     "no study is marked ready in managed inputs; refusing to publish an empty manifest"));
@@ -118,6 +140,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
         }
 
         if (problems.stream().anyMatch(p -> p.severity() == Severity.ERROR)) {
+            // Errors include a missing or empty global file: the manifest always lists it.
             log.error("Not writing {}: {} problem(s) found", manifestUri, problems.size());
             return new Output(studyIds.size(), rows, problems, manifestUri, null);
         }
@@ -127,6 +150,27 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
         writeReportCopy(ctx, csv);
         log.info("Wrote {} ({} row(s), version {})", manifestUri, rows.size(), versionId);
         return new Output(studyIds.size(), rows, problems, manifestUri, versionId);
+    }
+
+    /** Adds the {@value #GLOBAL_STUDY} row for the global file's current version, or why it can't. */
+    private void verifyGlobal(String uri, String bucket, String key, List<ManifestRow> rows, List<Problem> problems) {
+        AllConceptsFolders.FileVersion current = folders.currentVersion(bucket, key);
+        if (current == null) {
+            problems.add(Problem.error("GLOBAL_MISSING", null, null, uri + " does not exist; run "
+                    + "generate-global-all-concepts first"));
+            return;
+        }
+        if (current.versionId() == null || current.versionId().isBlank() || "null".equals(current.versionId())) {
+            problems.add(Problem.error("GLOBAL_NOT_VERSIONED", null, null, uri + " has no version id (written "
+                    + "before versioning was enabled); re-run generate-global-all-concepts"));
+            return;
+        }
+        if (current.size() != null && current.size() == 0) {
+            problems.add(Problem.error("GLOBAL_EMPTY", null, null, uri + " is empty"));
+            return;
+        }
+        String md5 = folders.md5(bucket, key, current.versionId());
+        rows.add(new ManifestRow(GLOBAL_STUDY, "", uri, current.versionId(), current.lastModified().toString(), md5));
     }
 
     /** Adds the folder's manifest row, or the reasons it can't have one. */
@@ -243,8 +287,8 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
                     + "and re-run; the previous manifest version is unchanged");
         } else {
             report.info("MANIFEST_WRITTEN", output.manifestUri() + " (version " + output.versionId() + "): "
-                    + output.rows().size() + " consent group(s) from " + output.readyStudies() + " ready stud"
-                    + (output.readyStudies() == 1 ? "y" : "ies"));
+                    + "the global AllConcepts file and " + (output.rows().size() - 1) + " consent group(s) from "
+                    + output.readyStudies() + " ready stud" + (output.readyStudies() == 1 ? "y" : "ies"));
         }
     }
 
@@ -252,6 +296,8 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
     protected void report(Output output, JobResult.Builder builder) {
         builder.metric("readyStudies", (long) output.readyStudies())
                 .metric("manifestRows", (long) output.rows().size())
+                .metric("globalAllConcepts", output.rows().stream().filter(r -> GLOBAL_STUDY.equals(r.study()))
+                        .map(r -> r.s3Uri() + " (version " + r.versionId() + ")").findFirst().orElse(""))
                 .metric("manifestUri", output.manifestUri())
                 .metric("manifestVersionId", output.versionId() == null ? "" : output.versionId())
                 .metric("manifestWritten", output.versionId() != null)

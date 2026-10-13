@@ -4,9 +4,9 @@ provider "aws" {
   allowed_account_ids = [var.aws_account_id]
 }
 
-# PERMANENT. Verifies the MERGED allConcepts file of every ready study's consent groups and
-# writes the versioned {input}/allConcepts_manifest.csv handed to production ingestion. Writes
-# nothing if any ready consent group's MERGED file is missing or stale.
+# PERMANENT. Verifies the MERGED allConcepts file of every ready study's consent groups and the
+# global AllConcepts file, and writes the versioned {input}/allConcepts_manifest.csv handed to
+# production ingestion. Writes nothing if any of them is missing or stale.
 module "etl_runner" {
   source = "../../../terraform-modules/etl-runner"
 
@@ -33,7 +33,7 @@ module "etl_runner" {
   # Touches no database: uses_participant_db stays false.
 
   job_params = merge(
-    { input = var.input_uri },
+    { input = var.input_uri, global_allconcepts = var.global_allconcepts_uri },
     var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {}
   )
 

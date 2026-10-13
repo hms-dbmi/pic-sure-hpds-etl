@@ -59,12 +59,16 @@ if [[ -f "$MANIFEST" ]]; then
   check "header is study,consent,s3_uri,version_id,last_updated,md5" \
     test "$(head -1 "$MANIFEST")" = "study,consent,s3_uri,version_id,last_updated,md5"
   check "row count matches the report ($ROWS)" test "$(($(wc -l < "$MANIFEST") - 1))" -eq "$ROWS"
-  check "at least one consent group listed" test "$ROWS" -gt 0
+  # The global AllConcepts row is always first; the rest are consent groups.
+  check "first row is the GLOBAL AllConcepts file" test "$(sed -n 2p "$MANIFEST" | cut -d, -f1)" = "GLOBAL"
+  check "exactly one GLOBAL row" test "$(tail -n +2 "$MANIFEST" | cut -d, -f1 | grep -c '^GLOBAL$' || true)" -eq 1
+  check "at least one consent group listed" test "$ROWS" -gt 1
   # Values are unquoted unless they contain a comma; ids, URIs and hashes never do.
   # length() rather than a {32} interval: older mawk builds don't support intervals.
   bad_md5=$(tail -n +2 "$MANIFEST" | awk -F, 'length($6) != 32 || $6 !~ /^[0-9a-f]+$/' | grep -c . || true)
   check "every md5 is 32 hex characters" test "$bad_md5" -eq 0
-  blank=$(tail -n +2 "$MANIFEST" | awk -F, '$1=="" || $2=="" || $3=="" || $4=="" || $5==""' | grep -c . || true)
+  # consent is blank only on the GLOBAL row.
+  blank=$(tail -n +2 "$MANIFEST" | awk -F, '$1=="" || ($2=="" && $1!="GLOBAL") || $3=="" || $4=="" || $5==""' | grep -c . || true)
   check "no blank fields" test "$blank" -eq 0
   dupes=$(tail -n +2 "$MANIFEST" | cut -d, -f1,2 | sort | uniq -d | grep -c . || true)
   check "one row per study/consent" test "$dupes" -eq 0

@@ -91,6 +91,11 @@ variable "input_uri" {
   description = "--input: data root (s3://, versioned bucket) holding {study_id}/allConcepts/c{consent}/ folders; allConcepts_manifest.csv is written here"
 }
 
+variable "global_allconcepts_uri" {
+  type        = string
+  description = "--global-allconcepts: the global AllConcepts output (s3://, versioned bucket): global_AllConcepts.csv or its folder. Listed first in the manifest."
+}
+
 variable "managed_inputs_uri" {
   type        = string
   default     = ""

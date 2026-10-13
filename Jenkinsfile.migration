@@ -538,7 +538,8 @@ pipeline {
         }
 
         stage('AllConcepts manifest') {
-            // Last stage: verifies every ready consent group's MERGED file and publishes the versioned
+            // Last stage: verifies the global AllConcepts file (ALL_CONCEPTS_OUTPUT) and every ready
+            // consent group's MERGED file, and publishes the versioned
             // {DATA_ROOT}/allConcepts_manifest.csv for production ingestion. Writes nothing (and fails
             // the build) if any of them is missing or stale, so ingestion never gets a bad manifest.
             when { expression { !params.PREFLIGHT_ONLY } }
@@ -550,6 +551,7 @@ pipeline {
                         propagate: false,
                         parameters: [
                             string(name: 'INPUT', value: params.MERGE_ALLCONCEPTS_INPUT?.trim() ?: params.DATA_ROOT.trim()),
+                            string(name: 'GLOBAL_ALLCONCEPTS', value: params.ALL_CONCEPTS_OUTPUT.trim()),
                             string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ?: ''),
                             string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-manifest"),
                             string(name: 'ENV',    value: params.ENV),

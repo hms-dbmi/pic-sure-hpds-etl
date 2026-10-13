@@ -5,12 +5,16 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureExcep
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
 import software.amazon.awssdk.services.s3.model.GetBucketVersioningRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectVersionsResponse;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectVersion;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -141,6 +145,38 @@ public class AllConceptsFolders {
         } catch (RuntimeException e) {
             throw new InfrastructureException("Failed to read metadata of s3://" + bucket + "/" + key
                     + " (version " + versionId + ")", e);
+        }
+    }
+
+    /**
+     * The current version of an object, or null if it is absent or deleted.
+     */
+    public FileVersion currentVersion(String bucket, String key) {
+        try {
+            HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
+            String name = key.substring(key.lastIndexOf('/') + 1);
+            return new FileVersion(name, key, head.versionId(), head.lastModified(), head.contentLength());
+        } catch (NoSuchKeyException e) {
+            return null;
+        } catch (RuntimeException e) {
+            throw new InfrastructureException("Failed to read s3://" + bucket + "/" + key, e);
+        }
+    }
+
+    /** MD5 (hex) of one object version's content, streamed. */
+    public String md5(String bucket, String key, String versionId) {
+        try (InputStream in = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(key).versionId(versionId).build())) {
+            MessageDigest md5 = MessageDigest.getInstance("MD5");
+            byte[] buffer = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buffer)) > 0) {
+                md5.update(buffer, 0, n);
+            }
+            return HexFormat.of().formatHex(md5.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 unavailable", e);
+        } catch (IOException | RuntimeException e) {
+            throw new InfrastructureException("Failed to read s3://" + bucket + "/" + key + " (version " + versionId + ")", e);
         }
     }
 

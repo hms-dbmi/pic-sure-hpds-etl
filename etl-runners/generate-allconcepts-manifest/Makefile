@@ -3,6 +3,7 @@
 # Job parameters arrive as TF_VAR_* environment variables:
 #   TF_VAR_run_id               required
 #   TF_VAR_input_uri            required  data root (versioned s3://) with {study_id}/allConcepts/c{consent}/
+#   TF_VAR_global_allconcepts_uri required  global_AllConcepts.csv (or its folder); listed first
 #   TF_VAR_managed_inputs_uri   optional  managed inputs CSV; its ready studies are listed
 #
 # Generate locally:

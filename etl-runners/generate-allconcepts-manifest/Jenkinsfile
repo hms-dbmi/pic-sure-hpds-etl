@@ -1,18 +1,21 @@
 // =============================================================================
 // PERMANENT -- generate-allconcepts-manifest (JobType.PERMANENT)
 //
-// Writes {INPUT}/allConcepts_manifest.csv: one row per consent group of every study marked ready
-// in managed inputs, naming its MERGED allConcepts file for production ingestion
-// (study, consent, s3_uri, version_id, last_updated, md5).
+// Writes {INPUT}/allConcepts_manifest.csv for production ingestion
+// (study, consent, s3_uri, version_id, last_updated, md5): first a GLOBAL row (blank consent) for
+// the current version of global_AllConcepts.csv, then one row per consent group of every study
+// marked ready in managed inputs, naming its MERGED allConcepts file.
 //
 // Runs last in both orchestrators, after generate-allconcepts-manifest. Before writing it verifies that every
 // ready consent group has a MERGED file built from exactly its current source files (the S3 version
-// ids the merge recorded) and carrying its md5. If any does not, NO manifest is written, the
+// ids the merge recorded) and carrying its md5, and that the global file exists and is non-empty
+// (its md5 is computed from that exact version). If any check fails, NO manifest is written, the
 // previous version stays current, and the build fails listing every problem. The bucket must be
 // versioned: each run's manifest is a new version of the same key.
 //
 // Inputs
-//   --input            data root (s3://, versioned bucket)
+//   --input                data root (s3://, versioned bucket)
+//   --global-allconcepts   generate-global-all-concepts' --output (s3://, versioned bucket)
 //   --managed-inputs   managed inputs CSV; its ready studies are listed
 //
 // Outputs
@@ -43,6 +46,8 @@ pipeline {
     parameters {
         string(name: 'INPUT', defaultValue: '',
                description: 'REQUIRED. --input: data root (s3://, versioned bucket) holding {study_id}/allConcepts/c{consent}/ folders. allConcepts_manifest.csv is written here.')
+        string(name: 'GLOBAL_ALLCONCEPTS', defaultValue: '',
+               description: 'REQUIRED. --global-allconcepts: the global AllConcepts output (s3://, versioned bucket), global_AllConcepts.csv or its folder (generate-global-all-concepts OUTPUT). Always the manifest\'s first row.')
         string(name: 'MANAGED_INPUTS', defaultValue: '',
                description: '--managed-inputs: CSV whose studies marked ready are listed (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
         string(name: 'RUN_ID', defaultValue: '',
@@ -67,6 +72,7 @@ pipeline {
 
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
+        TF_VAR_global_allconcepts_uri    = "${params.GLOBAL_ALLCONCEPTS.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -79,6 +85,9 @@ pipeline {
                 script {
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// data root the manifest is written to.')
+                    }
+                    if (!params.GLOBAL_ALLCONCEPTS?.trim()) {
+                        error('GLOBAL_ALLCONCEPTS is required: the global AllConcepts output the manifest always lists.')
                     }
 
                     def base = (params.RUN_ID?.trim())
@@ -179,7 +188,7 @@ pipeline {
                     if (rc != 0) {
                         String meaning = [
                             1  : 'UNKNOWN (unclassified failure)',
-                            2  : 'VALIDATION_FAILED (manifest NOT written: a ready consent group is missing or stale; see the report)',
+                            2  : 'VALIDATION_FAILED (manifest NOT written: the global file or a ready consent group is missing or stale; see the report)',
                             3  : 'DATA_ERROR',
                             4  : 'INFRASTRUCTURE_ERROR (S3/network)',
                             5  : 'CONFIG_ERROR (missing or invalid parameter, or the bucket is not versioned)',

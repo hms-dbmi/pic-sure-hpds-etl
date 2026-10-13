@@ -38,6 +38,8 @@ class GenerateAllConceptsManifestJobTest {
 
     private static final String MANIFEST = "root/allConcepts_manifest.csv";
     private static final String P2_C1 = "root/phs000002/allConcepts/c1/";
+    private static final String GLOBAL = "global/global_AllConcepts.csv";
+    private static final String GLOBAL_DIR = "s3://bucket/global/";
 
     @TempDir
     Path tempDir;
@@ -50,6 +52,7 @@ class GenerateAllConceptsManifestJobTest {
     @BeforeEach
     void setUp() {
         s3 = new FakeVersionedS3();
+        s3.put(GLOBAL, "global rows\n");
         reportsDir = tempDir.resolve("reports");
         EtlProperties properties = new EtlProperties();
         properties.getReports().setDir(reportsDir.toString());
@@ -63,7 +66,8 @@ class GenerateAllConceptsManifestJobTest {
 
     private JobResult manifest() {
         return executor.run(new GenerateAllConceptsManifestJob(new IoResolver(s3.client), s3.client,
-                managedInputsService(tempDir, managedInputs)), Map.of("input", ROOT), "unit-manifest");
+                managedInputsService(tempDir, managedInputs)),
+                Map.of("input", ROOT, "global-allconcepts", GLOBAL_DIR), "unit-manifest");
     }
 
     /** Two ready studies (three consent groups) and one not-ready study, all merged. */
@@ -102,12 +106,14 @@ class GenerateAllConceptsManifestJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics())
                 .containsEntry("readyStudies", 2L)
-                .containsEntry("manifestRows", 3L)
+                .containsEntry("manifestRows", 4L)
                 .containsEntry("manifestWritten", true)
                 .containsEntry("manifestUri", ROOT + "allConcepts_manifest.csv")
                 .containsEntry("manifestVersionId", s3.versionId(MANIFEST));
         assertThat(s3.content(MANIFEST)).isEqualTo(String.join("\n",
                 "study,consent,s3_uri,version_id,last_updated,md5",
+                "GLOBAL,,s3://bucket/" + GLOBAL + "," + s3.versionId(GLOBAL) + "," + s3.lastModified(GLOBAL) + ","
+                        + md5("global rows\n"),
                 "phs000001,1,s3://bucket/" + MERGED_C1 + "," + s3.versionId(MERGED_C1) + ","
                         + s3.lastModified(MERGED_C1) + "," + md5("a\n"),
                 "phs000001,2,s3://bucket/" + MERGED_C2 + "," + s3.versionId(MERGED_C2) + ","
@@ -135,8 +141,8 @@ class GenerateAllConceptsManifestJobTest {
 
         JobResult result = manifest();
 
-        assertThat(result.getMetrics()).containsEntry("manifestRows", 3L);
-        List<String> rows = s3.content(MANIFEST).lines().skip(1).toList();
+        assertThat(result.getMetrics()).containsEntry("manifestRows", 4L);
+        List<String> rows = s3.content(MANIFEST).lines().skip(2).toList();
         assertThat(rows).extracting(r -> r.split(",")[1]).containsExactly("1", "2", "10");
         assertThat(rows.get(0)).contains(MERGED_C1).endsWith(md5("one\n"));
         assertThat(rows.get(1)).contains(MERGED_C2).endsWith(md5("two\n"));
@@ -154,7 +160,7 @@ class GenerateAllConceptsManifestJobTest {
         JobResult result = manifest();
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(result.getMetrics()).containsEntry("manifestRows", 4L);
+        assertThat(result.getMetrics()).containsEntry("manifestRows", 5L);
         assertThat(s3.content(MANIFEST)).contains("phs000001,3,");
     }
 
@@ -183,7 +189,7 @@ class GenerateAllConceptsManifestJobTest {
         assertThat(second.isSuccess()).isTrue();
         assertThat(s3.versionId(MANIFEST)).isNotEqualTo(first);
         assertThat(s3.versionCount(MANIFEST)).isEqualTo(2);
-        assertThat(s3.metadata(MANIFEST)).containsEntry("row-count", "3").containsEntry("run-id", "unit-manifest");
+        assertThat(s3.metadata(MANIFEST)).containsEntry("row-count", "4").containsEntry("run-id", "unit-manifest");
     }
 
     @Test
@@ -194,7 +200,7 @@ class GenerateAllConceptsManifestJobTest {
         JobResult result = manifest();
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(result.getMetrics()).containsEntry("manifestRows", 3L);
+        assertThat(result.getMetrics()).containsEntry("manifestRows", 4L);
         assertThat(codes(result)).contains("NO_SOURCES");
     }
 
@@ -332,10 +338,79 @@ class GenerateAllConceptsManifestJobTest {
     @Test
     void fails_input_validation_when_input_is_not_s3() {
         JobResult result = executor.run(new GenerateAllConceptsManifestJob(new IoResolver(s3.client), s3.client,
-                managedInputsService(tempDir, managedInputs)), Map.of("input", "/local"), "unit");
+                managedInputsService(tempDir, managedInputs)),
+                Map.of("input", "/local", "global-allconcepts", "/local/global/"), "unit");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
-        assertThat(result.getInputValidation().getIssues()).anyMatch(i -> i.code().equals("S3_REQUIRED"));
+        assertThat(result.getInputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("S3_REQUIRED")).hasSize(2);
+    }
+
+    // ---- global AllConcepts ----------------------------------------------------------
+
+    @Test
+    void lists_the_current_global_version_first_with_the_md5_of_that_version() throws Exception {
+        mergedData();
+        String oldVersion = s3.versionId(GLOBAL);
+        s3.put(GLOBAL, "newer global rows\n");
+
+        JobResult result = manifest();
+
+        String globalRow = s3.content(MANIFEST).lines().skip(1).findFirst().orElseThrow();
+        assertThat(globalRow).isEqualTo("GLOBAL,,s3://bucket/" + GLOBAL + "," + s3.versionId(GLOBAL) + ","
+                + s3.lastModified(GLOBAL) + "," + md5("newer global rows\n"));
+        assertThat(globalRow).doesNotContain(oldVersion);
+        assertThat(result.getMetrics().get("globalAllConcepts").toString()).contains(s3.versionId(GLOBAL));
+    }
+
+    @Test
+    void accepts_the_global_file_s_full_uri_as_well_as_its_folder() {
+        mergedData();
+
+        JobResult result = executor.run(new GenerateAllConceptsManifestJob(new IoResolver(s3.client), s3.client,
+                        managedInputsService(tempDir, managedInputs)),
+                Map.of("input", ROOT, "global-allconcepts", "s3://bucket/" + GLOBAL), "unit-manifest");
+
+        assertThat(result.isSuccess()).isTrue();
+        assertThat(s3.content(MANIFEST)).contains("GLOBAL,,s3://bucket/" + GLOBAL + ",");
+    }
+
+    @Test
+    void refuses_when_the_global_file_is_missing() {
+        mergedData();
+        s3.delete(GLOBAL);
+
+        JobResult result = manifest();
+
+        assertNotWritten(result, null);
+        assertThat(codes(result)).contains("GLOBAL_MISSING");
+    }
+
+    @Test
+    void refuses_when_the_global_file_is_empty() {
+        mergedData();
+        s3.put(GLOBAL, "");
+
+        JobResult result = manifest();
+
+        assertNotWritten(result, null);
+        assertThat(codes(result)).contains("GLOBAL_EMPTY");
+    }
+
+    /** The global file's problems are reported alongside the consent groups', not instead of them. */
+    @Test
+    void reports_global_and_consent_group_problems_together() {
+        mergedData();
+        s3.delete(GLOBAL);
+        s3.put(C1 + "phs000001_allConcepts_c1_extra.csv", "late\n");
+
+        assertThat(codes(manifest())).contains("GLOBAL_MISSING", "MERGED_STALE");
+    }
+
+    @Test
+    void global_uri_appends_the_file_name_to_a_folder() {
+        assertThat(GenerateAllConceptsManifestJob.globalUri("s3://b/g/")).isEqualTo("s3://b/g/global_AllConcepts.csv");
+        assertThat(GenerateAllConceptsManifestJob.globalUri("s3://b/g/x.csv")).isEqualTo("s3://b/g/x.csv");
     }
 
     @Test
