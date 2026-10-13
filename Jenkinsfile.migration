@@ -26,7 +26,9 @@
 //
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
 // SKIP_TESTS=true: they rebuild the JAR in their own workspace but do not re-run suites this
-// pipeline already ran on the same commit.
+// pipeline already ran on the same commit. The per-study split builds rebuild nothing: this
+// pipeline builds their runner image once and passes it as PREBUILT_IMAGE_TAR, and runs at most
+// SPLIT_CONCURRENCY of them at a time.
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -86,6 +88,8 @@ pipeline {
                description: 'What a new or replaced participant database is loaded from: blank = the latest clean backup, "none" = a fresh schema, a file under backups/, or an s3:// URI. Ignored when the database is up and OVERWRITE_DB is false.')
         choice(name: 'IF_LAST_RUN_FAILED', choices: ['restore-clean', 'continue'],
                description: 'If the previous pipeline run failed, its writes are still in the live database: restore-clean (default) replaces it from the latest clean backup before this run; continue builds on it.')
+        string(name: 'SPLIT_CONCURRENCY', defaultValue: '5',
+               description: 'Most split-allconcepts builds (and so EC2 runners) running at once. Every study still runs; the rest wait for a free slot.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
@@ -294,98 +298,145 @@ pipeline {
 
                     echo "Split AllConcepts: ${studies.size()} study/studies to process"
 
-                    // Upload each study's mapping CSV to S3 before fanning out. The copied
+                    // One runner image for every split build. Each split build would otherwise
+                    // compile the JAR and build, save and upload its own copy of the same image on
+                    // this host -- hundreds of times over with hundreds of ready studies.
+                    if (!params.PREFLIGHT_ONLY) {
+                        env.RUNNER_IMAGE_TAR = "hpds-etl-runner-${env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')}.tar.gz"
+                        sh "make -C etl-runners/split-allconcepts package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
+                    }
+
+                    // Upload every study's mapping CSV to S3 before fanning out. The copied
                     // artifact is a file in THIS workspace; the split job runs in a container
                     // (WORKDIR /app, only /reports mounted) on its own EC2 instance, so a
                     // workspace path can never resolve there; it travels via the data bucket
                     // instead. (Not the runner reports prefix: the -r2 infra-retry suffix makes
-                    // that path non-deterministic.) Each study's files go under its own folder,
-                    // {root}/{study_id}/mappings/<build-tag>/. Sequential on purpose: the env-var
-                    // handoff into sh is not safe under `parallel`.
+                    // that path non-deterministic.) Each study's file goes under its own folder,
+                    // {root}/{study_id}/mappings/<build-tag>/. The files are staged as that tree
+                    // locally and uploaded in one `aws s3 cp --recursive`: hundreds of studies
+                    // would otherwise mean hundreds of separate aws processes.
                     def mappingTag  = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
                     for (study in studies) {
-                        def sid = study.studyId
-                        def mappingBase = "${dataRoot}/${sid}/mappings/${mappingTag}"
-                        def remoteMapping = "${mappingBase}/${sid}_hpds_id_mapping.csv"
-                        if (params.PREFLIGHT_ONLY) {
-                            // Nothing has produced a mapping yet; pass the would-be URI so the
-                            // split runner's soft preflight check warns instead of failing.
-                            study.mappingUri = remoteMapping
-                            continue
+                        study.mappingUri = "${dataRoot}/${study.studyId}/mappings/${mappingTag}/${study.studyId}_hpds_id_mapping.csv"
+                    }
+                    if (!params.PREFLIGHT_ONLY) {
+                        // In pre-flight nothing has produced a mapping yet; each split job gets the
+                        // would-be URI and its soft preflight check warns instead of failing.
+                        def missing = studies.findAll {
+                            !fileExists("downstream-artifacts/participants-migration/${it.studyId}_hpds_id_mapping.csv")
                         }
-                        def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
-                        if (!fileExists(localMapping)) {
-                            error("${sid}: mapping CSV not found at ${localMapping}. " +
-                                  "The participants-migration copyArtifacts step may have failed.")
+                        if (missing) {
+                            error("Mapping CSV not found under downstream-artifacts/participants-migration/ for: " +
+                                  "${missing*.studyId.join(', ')}. The participants-migration copyArtifacts step may have failed.")
                         }
-                        env.MAP_SRC = localMapping
-                        env.MAP_DST = remoteMapping
-                        sh 'aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
-                        study.mappingUri = remoteMapping
+                        writeFile file: 'split-mappings.list', text: studies*.studyId.join('\n') + '\n'
+                        env.MAPPING_TAG  = mappingTag
+                        env.MAPPING_ROOT = dataRoot
+                        sh '''
+                            set -eu
+                            rm -rf split-mappings
+                            while read -r sid; do
+                              [ -n "$sid" ] || continue
+                              mkdir -p "split-mappings/$sid/mappings/$MAPPING_TAG"
+                              cp "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv" \
+                                 "split-mappings/$sid/mappings/$MAPPING_TAG/"
+                            done < split-mappings.list
+                            aws s3 cp split-mappings "$MAPPING_ROOT/" --recursive --no-progress --only-show-errors
+                            echo "Uploaded $(find split-mappings -type f | wc -l | tr -d ' ') mapping CSV(s)"
+                        '''
                     }
 
-                    def results = java.util.Collections.synchronizedList([])
+                    // A fixed pool of workers, each taking the next study until none are left, so
+                    // at most SPLIT_CONCURRENCY split builds (and EC2 runners) exist at once however
+                    // many studies are ready. Taking a study is safe without a lock: pipeline Groovy
+                    // runs every parallel branch on one thread and only switches between them at a
+                    // step, and there is no step between reading the cursor and advancing it.
+                    int concurrency = 0
+                    try {
+                        concurrency = params.SPLIT_CONCURRENCY.trim() as int
+                    } catch (ignored) { }
+                    if (concurrency < 1) {
+                        error("SPLIT_CONCURRENCY must be a positive whole number, got '${params.SPLIT_CONCURRENCY}'.")
+                    }
+                    int workers = Math.min(concurrency, studies.size())
+                    echo "Running ${studies.size()} split build(s), at most ${workers} at a time" +
+                         (env.RUNNER_IMAGE_TAR ? ", all on runner image ${env.RUNNER_IMAGE_TAR}" : '')
+
+                    def results = []
+                    def cursor = [index: 0, stop: false]
                     def branches = [:]
 
-                    for (study in studies) {
-                        def s = study
-                        branches[s.studyId] = {
-                            def sid = s.studyId
-                            def abv = s.abv
-
-                            def inputUri = "${dataRoot}/${sid}/legacy/allConcepts/${sid}_allConcepts_new_search_with_data_analyzer.csv"
-
-                            def mappingUri = s.mappingUri
-
-                            echo "--- ${sid} (${abv}) ---"
-                            echo "  input:   ${inputUri}"
-                            echo "  mapping: ${mappingUri}"
-
-                            def outcome
-                            try {
-                                def downstream = build(
-                                    job: params.SPLIT_ALLCONCEPTS_JOB,
-                                    wait: true,
-                                    propagate: false,
-                                    parameters: [
-                                        string(name: 'STUDY_ID',     value: sid),
-                                        string(name: 'ABBREVIATION', value: abv),
-                                        string(name: 'INPUT',        value: inputUri),
-                                        string(name: 'MAPPING',      value: mappingUri),
-                                        string(name: 'OUTPUT',       value: dataRoot),
-                                        string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
-                                        string(name: 'ENV',          value: params.ENV),
-                                        booleanParam(name: 'SKIP_TESTS', value: true),
-                                        booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
-                                    ])
-
-                                outcome = [studyId: sid, result: downstream.result,
-                                           build: downstream.number, url: downstream.absoluteUrl]
-
-                                try {
-                                    copyArtifacts(
-                                        projectName: params.SPLIT_ALLCONCEPTS_JOB,
-                                        selector: specific("${downstream.number}"),
-                                        target: "downstream-artifacts/split-allconcepts/${sid}",
-                                        optional: true)
-                                } catch (err) {
-                                    echo "Could not copy artifacts for ${sid} (${err.message})"
+                    for (int w = 1; w <= workers; w++) {
+                        branches["worker-${w}"] = {
+                            while (true) {
+                                if (cursor.stop || cursor.index >= studies.size()) {
+                                    break
                                 }
-                            } catch (err) {
-                                outcome = [studyId: sid, result: 'NOT_BUILT',
-                                           build: null, url: null, error: err.message]
-                                echo "${sid}: could not run — ${err.message}"
-                            }
+                                def s = studies[cursor.index]
+                                cursor.index = cursor.index + 1
 
-                            results << outcome
-                            echo "${sid}: ${outcome.result}"
+                                def sid = s.studyId
+                                def abv = s.abv
+                                def inputUri = "${dataRoot}/${sid}/legacy/allConcepts/${sid}_allConcepts_new_search_with_data_analyzer.csv"
+                                def mappingUri = s.mappingUri
+
+                                echo "--- ${sid} (${abv}) ---\n  input:   ${inputUri}\n  mapping: ${mappingUri}"
+
+                                def outcome
+                                try {
+                                    def downstream = build(
+                                        job: params.SPLIT_ALLCONCEPTS_JOB,
+                                        wait: true,
+                                        propagate: false,
+                                        parameters: [
+                                            string(name: 'STUDY_ID',     value: sid),
+                                            string(name: 'ABBREVIATION', value: abv),
+                                            string(name: 'INPUT',        value: inputUri),
+                                            string(name: 'MAPPING',      value: mappingUri),
+                                            string(name: 'OUTPUT',       value: dataRoot),
+                                            string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
+                                            string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
+                                            string(name: 'ENV',          value: params.ENV),
+                                            booleanParam(name: 'SKIP_TESTS', value: true),
+                                            booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
+                                        ])
+
+                                    outcome = [studyId: sid, result: downstream.result,
+                                               build: downstream.number, url: downstream.absoluteUrl]
+
+                                    try {
+                                        copyArtifacts(
+                                            projectName: params.SPLIT_ALLCONCEPTS_JOB,
+                                            selector: specific("${downstream.number}"),
+                                            target: "downstream-artifacts/split-allconcepts/${sid}",
+                                            optional: true)
+                                    } catch (err) {
+                                        echo "Could not copy artifacts for ${sid} (${err.message})"
+                                    }
+                                } catch (err) {
+                                    outcome = [studyId: sid, result: 'NOT_BUILT',
+                                               build: null, url: null, error: err.message]
+                                    echo "${sid}: could not run — ${err.message}"
+                                }
+
+                                results << outcome
+                                echo "${sid}: ${outcome.result}"
+                                if (!params.CONTINUE_ON_STUDY_FAILURE && !(outcome.result in ['SUCCESS', 'UNSTABLE'])) {
+                                    // Builds already running finish; no new study is started.
+                                    cursor.stop = true
+                                }
+                            }
                         }
                     }
 
-                    if (!params.CONTINUE_ON_STUDY_FAILURE) {
-                        branches.failFast = true
-                    }
                     parallel branches
+
+                    // Studies never started because CONTINUE_ON_STUDY_FAILURE stopped the run.
+                    def started = results*.studyId as Set
+                    studies.findAll { !(it.studyId in started) }.each {
+                        results << [studyId: it.studyId, result: 'NOT_BUILT', build: null, url: null,
+                                    error: 'not started: an earlier study failed and CONTINUE_ON_STUDY_FAILURE is off']
+                    }
 
                     // --- summary --------------------------------------------------
                     def ok       = results.findAll { it.result == 'SUCCESS' }
@@ -590,6 +641,7 @@ pipeline {
         always {
             script {
                 backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
+                removeRunnerImage()
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
@@ -633,6 +685,20 @@ def backupParticipantDb(String backupJob, String envName) {
              "live participant database but in no verified backup. Re-run ${backupJob} " +
              "(PROMOTE_BACKUP=${promote}) before the next pipeline run."
     }
+}
+
+// Deletes the shared split runner image: the tarball in S3, the local one, and the image in this
+// host's podman storage. Every split build that used it has finished by now.
+def removeRunnerImage() {
+    if (!env.RUNNER_IMAGE_TAR) {
+        return
+    }
+    sh(returnStatus: true, script: '''
+        bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+        aws s3 rm "s3://$bucket/etl-runner/container/$RUNNER_IMAGE_TAR" --region "$AWS_REGION" || true
+        rm -f "etl-runners/split-allconcepts/$RUNNER_IMAGE_TAR"
+        docker rmi "${RUNNER_IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+    ''')
 }
 
 @NonCPS

@@ -59,7 +59,7 @@ Build ▸ Tests
              │  uploaded by the orchestrator to {DATA_ROOT}/{study_id}/mappings/<build-tag>/
              ▼
 ┌─────────────────────────┐
-│  Split AllConcepts       │  (one runner per study, in parallel)
+│  Split AllConcepts       │  (one runner per study, SPLIT_CONCURRENCY at a time)
 │  split-allconcepts       │
 └────────────┬────────────┘
              │  produces {study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv per consent
@@ -270,8 +270,8 @@ Issue codes in the file issues report:
 | `PATIENT_MAPPING_NOT_CONSENTED` | info | Patient mapping rows naming a consent-0 subject; not mapped |
 | `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped |
 
-The orchestrator copies the mapping files from the runner's artifacts and uploads them to
-`{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot
+The orchestrator copies the mapping files from the runner's artifacts and uploads them, in one
+recursive copy, to `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot
 see the orchestrator's workspace. The source and issue reports stay with the runner's archived
 artifacts.
 
@@ -281,8 +281,16 @@ artifacts.
 
 **Job:** `split-allconcepts`
 **Class:** [`SplitAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/SplitAllConceptsJob.java)
-**Runs:** once per ready study, **in parallel** (one runner each; the job only reads the
-database)
+**Runs:** once per ready study, **in parallel**, at most `SPLIT_CONCURRENCY` (default 5) at a
+time (one runner each; the job only reads the database). A fixed pool of that many workers takes
+the next study as each finishes, so 600 ready studies still mean at most 5 split builds and 5 EC2
+runners at once.
+
+**Runner image:** the orchestrator builds the runner image once, at the start of this stage, and
+passes it to every split build as `PREBUILT_IMAGE_TAR`; those builds skip their own JAR build and
+image packaging. Without this, each study would compile the JAR and build, save and upload the same
+image on the Jenkins host. The orchestrator deletes the image (S3 tarball, local tarball, and the
+host's podman image) in `post { always }`. Run standalone, `split-allconcepts` still builds its own.
 
 ### Input
 
@@ -328,7 +336,8 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
 
 - Rows with unmapped HPDS ids are logged as warnings and skipped
 - `CONTINUE_ON_STUDY_FAILURE` (default `true`) lets the remaining studies finish when one
-  fails; off, the parallel branches fail fast
+  fails; off, no new study is started after a failure (builds already running finish), and the
+  studies never started are reported as `NOT_BUILT`
 - `DATA_ROOT`, `ALL_CONCEPTS_OUTPUT`, and `VCF_INDEXES_OUTPUT` must
   be `s3://` URIs — checked before any split is scheduled
 
@@ -463,6 +472,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
 | `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
 | `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |
+| `SPLIT_CONCURRENCY` | `5` | Most split builds (and EC2 runners) at once; the other studies wait for a free slot |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep splitting remaining studies when one fails |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
 | `PREFLIGHT_ONLY` | `false` | Validate inputs and stop without provisioning (see [Pre-flight Only](#pre-flight-only)) |
