@@ -33,7 +33,7 @@ pipeline {
     options {
         timestamps()
         // Lets the migration orchestrator (Jenkinsfile.migration) copy this job's reports.
-        copyArtifactPermission('hpds-etl/*')
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
         timeout(time: 2, unit: 'HOURS')
