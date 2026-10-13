@@ -112,6 +112,18 @@ class DbgapMultiFileReaderTest {
     }
 
     @Test
+    void records_the_own_subject_ids_of_consent_zero_subjects() {
+        String path = file("s.txt", "dbGaP_Subject_ID\tSUBJECT_ID\tCONSENT\n1001\tS1\t1\n1002\tS2\t0\n"
+                + "1003\tS3\t0\n1003\tS3\t1\n");
+
+        SubjectTable table = reader.readSubjects(path);
+
+        // 1003 is consented on a later row, so only S2 counts as not consented.
+        assertThat(table.notConsented()).containsExactly("1002");
+        assertThat(table.notConsentedSubjectIds()).containsExactly("S2");
+    }
+
+    @Test
     void normalizes_leading_zeros_in_consent_codes() {
         String path = file("s.txt", "dbGaP_Subject_ID\tCONSENT\n1001\t01\n");
 

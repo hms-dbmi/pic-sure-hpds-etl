@@ -182,15 +182,15 @@ For each ready study:
         ├─── SSTR file? ── Yes ──▶ SstrPopulateRdsParticipantsJob (sub-job)
         │                              │
         │                              ├── succeeds ──────────────────────────▶ source = sstr
-        │                              ├── infrastructure error ─▶ abort the run
-        │                              └── data error ("malformed"; its transaction
-        │                                  rolls back) ─▶ fall through ▼
+        │                              ├── data, validation or config error ("malformed";
+        │                              │   its transaction rolls back) ─▶ fall through ▼
+        │                              └── any other error (infrastructure, unknown) ─▶ abort the run
         │
         ├─── Subject.MULTI? ── Yes ──▶ MultiPopulateRdsParticipantsJob (sub-job)
         │                              │
         │                              ├── succeeds ──────────────────────────▶ source = multi
-        │                              ├── infrastructure error ─▶ abort the run
-        │                              └── data error ─▶ study FAILS (MULTI_LOAD_FAILED)
+        │                              ├── data, validation or config error ─▶ study FAILS (MULTI_LOAD_FAILED)
+        │                              └── any other error (infrastructure, unknown) ─▶ abort the run
         │
         └─── neither ──▶ study FAILS (NO_PARTICIPANT_SOURCE)
         │
@@ -215,8 +215,10 @@ The MULTI sub-job writes the same rows the SSTR job would:
 Like the SSTR job it purges the study's `consents` first, in the same transaction as the load.
 It is migration-only (`JobType.MIGRATION`); the permanent pipeline never reads MULTI files.
 
-Studies are processed independently. A data failure in one study does not stop the rest
-(an infrastructure failure aborts the run). The job exits with `VALIDATION_FAILED` if any
+Studies are processed independently. A data failure in one study does not stop the rest. A
+sub-job failure that is not about the study's data aborts the run: an infrastructure error with
+exit 4 (retried), anything unclassified (e.g. a database that can't open a transaction) with exit 1.
+The MULTI job requires a `phs######` study id, as the SSTR job does. The job exits with `VALIDATION_FAILED` if any
 study failed while others succeeded, and `SUCCESS_WITH_WARNINGS` if a study fell back from a
 malformed SSTR or its MULTI files had problems.
 

@@ -120,6 +120,17 @@ class MultiPopulateRdsParticipantsJobTest {
     }
 
     @Test
+    void fails_input_validation_and_does_not_purge_on_a_bad_study_id() {
+        JobResult result = executor.run(newJob(), Map.of("study-id", "phs000007.v33",
+                "subject-input", JobTestSupport.tempFile("s.txt", ParticipantsMigrationJobTest.SUBJECT_MULTI)),
+                "unit-bad-study");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getInputValidation().getIssues()).anyMatch(i -> i.code().equals("BAD_STUDY_ID"));
+        verify(store.consents, never()).deleteByStudyId(anyString());
+    }
+
+    @Test
     void fails_with_data_error_and_does_not_purge_when_no_subject_is_consented() {
         JobResult result = run("dbGaP_Subject_ID\tCONSENT\n1001\t0\n1002\t\n", null, null);
 

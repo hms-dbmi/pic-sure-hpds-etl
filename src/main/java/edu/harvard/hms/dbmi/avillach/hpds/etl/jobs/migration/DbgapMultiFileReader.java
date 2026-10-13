@@ -81,6 +81,7 @@ public class DbgapMultiFileReader {
         String file = fileName(path);
         Map<String, Subject> consented = new LinkedHashMap<>();
         Set<String> notConsented = new LinkedHashSet<>();
+        Map<String, String> notConsentedSubjectIds = new LinkedHashMap<>();
         IssueTally tally = new IssueTally(file);
         String dbgapCol = null;
         String consentCol = null;
@@ -135,6 +136,10 @@ public class DbgapMultiFileReader {
                 if (NOT_CONSENTED_CODE.equals(code)) {
                     tally.count("CONSENT_ZERO_DROPPED", dbgapId);
                     notConsented.add(dbgapId);
+                    String subjectId = subjectIdCol == null ? null : Strings.trimToNull(row.get(subjectIdCol));
+                    if (subjectId != null) {
+                        notConsentedSubjectIds.putIfAbsent(dbgapId, subjectId);
+                    }
                     continue;
                 }
                 Subject existing = consented.get(dbgapId);
@@ -154,7 +159,9 @@ public class DbgapMultiFileReader {
         }
         // A subject consented on any row is loaded; only subjects never consented count as dropped.
         notConsented.removeAll(consented.keySet());
-        return new SubjectTable(file, consentCol, subjectIdCol, consented, notConsented, rowsRead, tally.issues());
+        notConsentedSubjectIds.keySet().retainAll(notConsented);
+        return new SubjectTable(file, consentCol, subjectIdCol, consented, notConsented,
+                new LinkedHashSet<>(notConsentedSubjectIds.values()), rowsRead, tally.issues());
     }
 
     /**
@@ -356,9 +363,11 @@ public class DbgapMultiFileReader {
      * @param subjectIdColumn  the study's own subject id header, or null if the file has none
      * @param consented        dbGaP subject id &rarr; subject, for every subject with a usable consent
      * @param notConsented     dbGaP subject ids seen only with consent 0
+     * @param notConsentedSubjectIds  the study's own subject ids of those subjects, where the file has them
      */
     public record SubjectTable(String file, String consentColumn, String subjectIdColumn,
                                Map<String, Subject> consented, Set<String> notConsented,
+                               Set<String> notConsentedSubjectIds,
                                long rowsRead, List<ValidationIssue> issues) {
     }
 

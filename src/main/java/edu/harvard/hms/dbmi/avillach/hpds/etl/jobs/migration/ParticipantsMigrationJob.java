@@ -1,6 +1,7 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.migration;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.EtlException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.DelimitedReader;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver;
@@ -94,8 +95,10 @@ import java.util.stream.Stream;
  * <p>Studies are processed independently: a data problem in one study (bad row, unmatched
  * id, no usable source) is recorded as a failure for that study only and does not stop the
  * rest of the run -- surfaced as an output-validation error so the run's exit code still
- * reflects that something needs attention. An infrastructure failure (RDS/S3 unreachable)
- * aborts the whole run instead, since retrying per-study would not help.
+ * reflects that something needs attention. A failure that is not about the study's data aborts
+ * the whole run instead, since retrying per-study would not help: an infrastructure failure
+ * (RDS/S3 unreachable) with its retryable exit code, and an unclassified sub-job failure with
+ * UNKNOWN (see {@link #abortUnlessDataFailure}).
  *
  * <p>Enabled by {@code etl.jobs.participants-migration.enabled=true}, and also requires
  * {@code etl.jobs.sstr-populate-rds-participants.enabled=true} and
@@ -225,7 +228,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 try {
                     StudyFiles files = discoverStudyFiles(baseUri, row, stagingDir, trace);
                     results.add(processStudy(row, files, batchSize, ctx, trace));
-                } catch (InfrastructureException e) {
+                } catch (InfrastructureException | RunAbortedException e) {
                     throw e;
                 } catch (Exception e) {
                     log.error("Study '{}' failed during migration", row.studyId(), e);
@@ -340,9 +343,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 ctx.runId() + "-" + studyId + "-sstr");
         if (!result.isSuccess()) {
             String message = describeFailure(result);
-            if (result.getExitCode() == ExitCode.INFRASTRUCTURE_ERROR) {
-                throw new InfrastructureException("sstr job failed for study " + studyId + ": " + message);
-            }
+            abortUnlessDataFailure(result, "sstr", studyId, message);
             log.warn("Study '{}': SSTR '{}' is malformed ({}); falling back to the MULTI files",
                     studyId, trace.sstrFile, message);
             trace.sstrStatus = "malformed";
@@ -396,9 +397,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         if (!result.isSuccess()) {
             String message = describeFailure(result);
-            if (result.getExitCode() == ExitCode.INFRASTRUCTURE_ERROR) {
-                throw new InfrastructureException("multi job failed for study " + studyId + ": " + message);
-            }
+            abortUnlessDataFailure(result, "multi", studyId, message);
             trace.multiStatus = "failed";
             trace.issue(Severity.ERROR, "MULTI_LOAD_FAILED", files.subjectMulti(),
                     "multi sub-job failed (" + result.getExitCode() + "): " + message, List.of());
@@ -416,8 +415,39 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 subjectIdToDbgapId.put(s.subjectId(), s.dbgapSubjectId());
             }
         });
+        // Patient mapping ids may be either id, so a consent-0 subject is recognized by both.
+        Set<String> notConsentedIds = new LinkedHashSet<>(subjects.notConsented());
+        notConsentedIds.addAll(subjects.notConsentedSubjectIds());
         return new SubjectIdentities(files.subjectMulti(), new LinkedHashSet<>(subjects.consented().keySet()),
-                subjectIdToDbgapId, subjects.notConsented());
+                subjectIdToDbgapId, notConsentedIds);
+    }
+
+    /** Sub-job exit codes that mean "this study's files are bad": the only ones handled per study. */
+    private static final Set<ExitCode> DATA_FAILURES =
+            Set.of(ExitCode.DATA_ERROR, ExitCode.VALIDATION_FAILED, ExitCode.CONFIG_ERROR);
+
+    /**
+     * Aborts the whole run unless the sub-job failed on its data. An infrastructure failure keeps
+     * its retryable exit code. Anything else (UNKNOWN) is not evidence of a bad file either -- a
+     * database that can't open a transaction surfaces as UNKNOWN -- so it aborts rather than
+     * labelling every study's SSTR malformed and its MULTI load failed.
+     */
+    private static void abortUnlessDataFailure(JobResult result, String subJob, String studyId, String message) {
+        String abort = subJob + " job failed for study " + studyId + " (" + result.getExitCode() + "): " + message;
+        if (result.getExitCode() == ExitCode.INFRASTRUCTURE_ERROR) {
+            throw new InfrastructureException(abort);
+        }
+        if (!DATA_FAILURES.contains(result.getExitCode())) {
+            throw new RunAbortedException(result.getExitCode(), abort + "; aborting the run, since this is not a "
+                    + "problem with the study's files");
+        }
+    }
+
+    /** A sub-job failure that is not about one study's data; carries the sub-job's exit code. */
+    private static final class RunAbortedException extends EtlException {
+        RunAbortedException(ExitCode exitCode, String message) {
+            super(exitCode, message);
+        }
     }
 
     private Path stage(StudyFiles files, String fileName) {
@@ -476,13 +506,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         List<String> unresolved = new ArrayList<>();
         List<String> notConsented = new ArrayList<>();
         for (PatientMappingRow pm : patientMappings) {
-            if (identities.notConsentedDbgapIds().contains(pm.id())) {
+            String dbgapId = identities.dbgapIds().contains(pm.id())
+                    ? pm.id() : identities.subjectIdToDbgapId().get(pm.id());
+            if (dbgapId == null && identities.notConsentedIds().contains(pm.id())) {
                 notConsented.add(pm.oldHpdsId());
                 unresolved.add(pm.oldHpdsId());
                 continue;
             }
-            String dbgapId = identities.dbgapIds().contains(pm.id())
-                    ? pm.id() : identities.subjectIdToDbgapId().get(pm.id());
             if (dbgapId == null) {
                 log.warn("Study '{}': patient mapping id '{}' (old hpds id {}) not found in {}; skipping",
                         studyId, pm.id(), pm.oldHpdsId(), identities.file());
@@ -942,10 +972,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * @param file                  the source file the ids came from, for messages
      * @param dbgapIds              dbGaP subject ids the source loaded
      * @param subjectIdToDbgapId    the study's own subject id &rarr; dbGaP id
-     * @param notConsentedDbgapIds  dbGaP ids present in the source but dropped for consent 0
+     * @param notConsentedIds       dbGaP ids and the study's own subject ids of subjects dropped for consent 0
      */
     private record SubjectIdentities(String file, Set<String> dbgapIds, Map<String, String> subjectIdToDbgapId,
-                                     Set<String> notConsentedDbgapIds) {
+                                     Set<String> notConsentedIds) {
     }
 
     private record MappingResult(List<MappingRow> mappingRows, List<String> unresolvedHpdsIds) {

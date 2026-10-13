@@ -34,6 +34,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * MIGRATION. The fallback for a study with no SSTR, or a malformed one: loads the dbGaP
@@ -66,6 +67,8 @@ import java.util.Set;
 public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRdsParticipantsJob.Output> {
 
     private static final int DEFAULT_BATCH_SIZE = 1000;
+    /** Same rule as {@link SstrPopulateRdsParticipantsJob}: this job purges consents by study id. */
+    private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
 
     private final DbgapMultiFileReader reader;
     private final ParticipantRepository participants;
@@ -104,7 +107,8 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
                                 "dbGaP Subject.MULTI.txt: '#' preamble, then a tab-delimited table with "
                                         + "dbGaP_Subject_ID and a consent column (local path or s3:// URI)",
                                 "/data/phs000007.v33.pht000182.v14.p14.Framingham_Subject.MULTI.txt"),
-                        ParamSpec.required("study-id", "Study id these subjects belong to", "phs000007"),
+                        ParamSpec.required("study-id",
+                                "dbGaP study id these subjects belong to, format phs###### (6 digits)", "phs000007"),
                         ParamSpec.optional("sample-input",
                                 "dbGaP Sample.MULTI.txt with dbGaP_Subject_ID and dbGaP_Sample_ID; omit to load no samples",
                                 "/data/phs000007.v33.pht001415.v1.p14.Framingham_Sample.MULTI.txt"),
@@ -118,6 +122,12 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
+        ctx.get("study-id").ifPresent(studyId -> {
+            if (!STUDY_ID_PATTERN.matcher(studyId).matches()) {
+                report.error("BAD_STUDY_ID",
+                        "study-id must match phs###### (6 digits), got: " + studyId, "--study-id");
+            }
+        });
         ctx.get("batch-size").ifPresent(bs -> {
             try {
                 if (Integer.parseInt(bs) <= 0) {

@@ -16,6 +16,9 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -27,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
@@ -73,12 +77,14 @@ class ParticipantsMigrationJobTest {
     static final String SSTR_NAME = "sstr_phs000007.v33.txt";
 
     private InMemoryParticipantStore store;
+    private PlatformTransactionManager txManager;
     private Path reportsDir;
     private JobExecutor executor;
 
     @BeforeEach
     void setUp() throws IOException {
         store = new InMemoryParticipantStore();
+        txManager = InMemoryParticipantStore.noOpTransactionManager();
         reportsDir = Files.createTempDirectory("migration-reports");
         EtlProperties properties = new EtlProperties();
         properties.getReports().setDir(reportsDir.toString());
@@ -96,9 +102,9 @@ class ParticipantsMigrationJobTest {
         DelimitedReader reader = new DelimitedReader();
         return new ParticipantsMigrationJob(io, reader, managedInputsService(managedInputsUri), store.participants,
                 new SstrPopulateRdsParticipantsJob(io, reader, store.participants, store.consents, store.samples,
-                        InMemoryParticipantStore.noOpTransactionManager()),
+                        txManager),
                 new MultiPopulateRdsParticipantsJob(io, reader, store.participants, store.consents, store.samples,
-                        InMemoryParticipantStore.noOpTransactionManager()),
+                        txManager),
                 executor);
     }
 
@@ -188,6 +194,20 @@ class ParticipantsMigrationJobTest {
         return values;
     }
 
+    /** The {@code participants_migration_file_issues.csv} row for a study and code, as column &rarr; value. */
+    private Map<String, String> issueRow(String studyId, String code) {
+        List<String> lines = report(ParticipantsMigrationJob.ISSUES_REPORT).lines().toList();
+        String[] header = lines.get(0).split(",", -1);
+        List<String> values = lines.stream().skip(1).map(ParticipantsMigrationJobTest::parseCsvLine)
+                .filter(v -> v.get(0).equals(studyId) && v.get(2).equals(code)).findFirst()
+                .orElseThrow(() -> new AssertionError("no " + code + " issue for " + studyId + " in " + lines));
+        Map<String, String> out = new LinkedHashMap<>();
+        for (int i = 0; i < header.length; i++) {
+            out.put(header[i], values.get(i));
+        }
+        return out;
+    }
+
     private List<String> issueCodes(String studyId) {
         return report(ParticipantsMigrationJob.ISSUES_REPORT).lines().skip(1)
                 .filter(l -> l.startsWith(studyId + ","))
@@ -254,6 +274,72 @@ class ParticipantsMigrationJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(result.getErrorMessage()).contains("sstr job failed");
         assertThat(store.participantIds).isEmpty();
+    }
+
+    /**
+     * A database that can't open a transaction fails the sub-job as UNKNOWN, not INFRASTRUCTURE_ERROR.
+     * That is not a malformed SSTR: the run must stop instead of falling back to MULTI and then
+     * recording every study as failed for the wrong reason.
+     */
+    @Test
+    void a_non_data_failure_in_the_sstr_job_aborts_the_run_instead_of_falling_back() {
+        when(txManager.getTransaction(any(TransactionDefinition.class)))
+                .thenThrow(new CannotCreateTransactionException("Could not open JDBC Connection"));
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("phs000001/rawData/sstr_phs000001.v1.txt", SSTR);
+        files.put("phs000001/rawData/phs000001.v1.pht1.p1.A_Subject.MULTI.txt", SUBJECT_MULTI);
+        files.put("phs000001/legacy/data/A_PatientMapping.v2.csv", "1001,A,9001\n");
+        files.put("phs000002/rawData/sstr_phs000002.v1.txt", SSTR);
+        files.put("phs000002/legacy/data/B_PatientMapping.v2.csv", "1001,B,9001\n");
+
+        JobResult result = run(files, "A,phs000001,Yes", "B,phs000002,Yes");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.UNKNOWN);
+        assertThat(result.getErrorMessage())
+                .contains("sstr job failed for study phs000001 (UNKNOWN)")
+                .contains("Could not open JDBC Connection")
+                .contains("aborting the run");
+        // Stopped at the first study: no MULTI attempt, no second study.
+        assertThat(reportsDir.resolve("multi-populate-rds-participants-unit-phs000001-multi.json")).doesNotExist();
+        assertThat(reportsDir.resolve("sstr-populate-rds-participants-unit-phs000002-sstr.json")).doesNotExist();
+    }
+
+    @Test
+    void a_non_data_failure_in_the_multi_job_aborts_the_run() {
+        when(txManager.getTransaction(any(TransactionDefinition.class)))
+                .thenThrow(new CannotCreateTransactionException("Could not open JDBC Connection"));
+
+        JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI), "1001,FHS,9001\n");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.UNKNOWN);
+        assertThat(result.getErrorMessage()).contains("multi job failed for study " + STUDY + " (UNKNOWN)")
+                .contains("aborting the run");
+    }
+
+    /**
+     * The SSTR job rejects a non-phs###### id; that must not let the MULTI job purge and rewrite
+     * consents under the id the SSTR route refused.
+     */
+    @Test
+    void a_study_id_both_sub_jobs_reject_fails_without_touching_consents() {
+        String badId = "phs000007.v33";
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put(badId + "/rawData/sstr_" + badId + ".txt", SSTR);
+        files.put(badId + "/rawData/" + badId + ".pht000182.v14.p14.FHS_Subject.MULTI.txt", SUBJECT_MULTI);
+        files.put(badId + "/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n");
+
+        JobResult result = run(files, "FHS," + badId + ",Yes");
+
+        assertThat(result.getMetrics()).containsEntry("failedStudies", 1L);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("STUDY_FAILED"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.message()).contains("study-id must match phs######");
+                    assertThat(i.context()).containsEntry("reason", "MULTI_LOAD_FAILED");
+                });
+        assertThat(store.purgedStudies).isEmpty();
+        assertThat(store.consentRows).isEmpty();
     }
 
     // ---- source selection ----------------------------------------------------
@@ -509,21 +595,25 @@ class ParticipantsMigrationJobTest {
 
     @Test
     void patient_mapping_rows_for_consent_zero_subjects_are_reported_not_mapped() {
+        // 1003 by its dbGaP id, S3 (also subject 1003) by the study's own SUBJECT_ID.
         JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI),
-                "1001,FHS,9001\n1003,FHS,9003\nNOPE,FHS,9999\n");
+                "1001,FHS,9001\n1003,FHS,9003\nS3,FHS,9033\nNOPE,FHS,9999\n");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 2L);
+        assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 3L);
         assertThat(result.getOutputValidation().getIssues())
                 .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
                 .singleElement()
                 .satisfies(i -> {
                     assertThat(i.message()).contains("could not be resolved via the multi file");
                     assertThat(i.context()).containsEntry("path", "multi")
-                            .containsEntry("firstOldHpdsIds", List.of("9003", "9999"));
+                            .containsEntry("firstOldHpdsIds", List.of("9003", "9033", "9999"));
                 });
-        assertThat(issueCodes(STUDY)).contains("PATIENT_MAPPING_NOT_CONSENTED", "PATIENT_MAPPING_UNRESOLVED");
-        assertThat(sourcesRow(STUDY)).containsEntry("unresolved_mapping_rows", "2");
+        assertThat(issueRow(STUDY, "PATIENT_MAPPING_NOT_CONSENTED"))
+                .containsEntry("severity", "INFO").containsEntry("count", "2").containsEntry("examples", "9003 9033");
+        assertThat(issueRow(STUDY, "PATIENT_MAPPING_UNRESOLVED"))
+                .containsEntry("severity", "WARNING").containsEntry("count", "1").containsEntry("examples", "9999");
+        assertThat(sourcesRow(STUDY)).containsEntry("unresolved_mapping_rows", "3");
     }
 
     @Test
