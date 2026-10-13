@@ -137,11 +137,38 @@
                 </configuration>
             </plugin>
 
+            <!-- Sets ${org.mockito:mockito-core:jar} to the Mockito jar's path, for the -javaagent below. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Mockito is loaded as an agent rather than self-attaching: self-attach launches a
+                 second JVM inside the test fork, and on the Jenkins agent that JVM can fail with
+                 "unable to create native thread", which kills the fork. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
+            </plugin>
+
             <!-- Runs integration tests (*IT) on `mvn verify`. These require Docker
                  (Testcontainers). Unit tests (*Test) run on `mvn test` via surefire. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
                 <executions>
                     <execution>
                         <goals>
