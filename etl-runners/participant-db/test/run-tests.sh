@@ -116,7 +116,8 @@ start_keeps_a_clean_running_db_and_refreshes_its_host() {
     refute removed
     check [ "$(jq -r .host "$CREDS")" == 10.0.0.5 ]
     check [ "$(jq -r .password "$CREDS")" == abc123 ]
-    check [ "$(stat -f %Lp "$CREDS" 2>/dev/null || stat -c %a "$CREDS")" == 600 ]
+    # ls, not stat: GNU `stat -f` is filesystem status, so a BSD/GNU stat fallback mixes outputs.
+    check [ "$(ls -l "$CREDS" | cut -c1-10)" == "-rw-------" ]
 }
 
 start_reissues_a_password_when_the_saved_one_is_stale() {
