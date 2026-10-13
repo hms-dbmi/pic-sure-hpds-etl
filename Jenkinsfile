@@ -15,7 +15,10 @@
 // docs/PARTICIPANT_DB.md.
 //
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
-// SKIP_TESTS=true so the same commit's suites are not re-run per study.
+// SKIP_TESTS=true so the same commit's suites are not re-run per study. The per-study jobs (SSTR
+// load and allConcepts generation) rebuild nothing: 'Package runner image' builds their runner
+// image once and passes it as PREBUILT_IMAGE_TAR. With PARALLEL_STUDY_LOADS, at most
+// STUDY_CONCURRENCY of them run at a time.
 //
 // Per-study allConcepts: each unprocessed study's decoded data is turned into per-consent
 // allConcepts files under {DATA_ROOT}/{study_id}/allConcepts/ (overwritten in place; the bucket is
@@ -63,7 +66,9 @@ pipeline {
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep loading the remaining studies when one fails, then fail the build with a summary. Safe: each study is loaded in its own transaction, scoped to its own study_id.')
         booleanParam(name: 'PARALLEL_STUDY_LOADS', defaultValue: false,
-               description: 'Load studies concurrently, one runner each. Correct (see Concurrency in docs/JENKINS.md) but off by default: studies sharing subjects serialize on those rows anyway, and sequential keeps the participant DB load predictable and the log readable.')
+               description: 'Run the per-study stages (SSTR load, per-study allConcepts) concurrently, one runner each, at most STUDY_CONCURRENCY at a time. Correct (see Concurrency in docs/JENKINS.md) but off by default: studies sharing subjects serialize on those rows anyway, and sequential keeps the participant DB load predictable and the log readable.')
+        string(name: 'STUDY_CONCURRENCY', defaultValue: '5',
+               description: 'With PARALLEL_STUDY_LOADS: most per-study builds (and EC2 runners) at once. Every study still runs; the rest wait for a free slot. Ignored when sequential.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate every study\'s inputs and stop, without provisioning anything (the participant DB included)')
         string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
@@ -145,6 +150,7 @@ pipeline {
                             error("${p} must be an s3:// URI, got '${params[p]}'.")
                         }
                     }
+                    studyConcurrency()   // fails now on a bad value, not after the DB is up
 
                     // Read managed inputs: the same CSV the ETL jobs use internally.
                     // Columns: "Study Abbreviated Name", "Study Identifier",
@@ -310,6 +316,20 @@ pipeline {
             }
         }
 
+        // One runner image for every per-study build. Each would otherwise compile the JAR and
+        // build, save and upload its own copy of the same image on this host -- hundreds of times
+        // over in a large sweep.
+        stage('Package runner image') {
+            when { expression { !params.PREFLIGHT_ONLY && !UNPROCESSED_STUDIES.isEmpty() } }
+            steps {
+                script {
+                    // Set first, so a partial upload is still cleaned up in post.
+                    env.RUNNER_IMAGE_TAR = "hpds-etl-runner-${env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')}.tar.gz"
+                    sh "make -C etl-runners/sstr-populate-rds-participants package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
+                }
+            }
+        }
+
         // ---------------------------------------------------------------------
         // Permanent job stages. One per PERMANENT job, in the order they must run.
         // ---------------------------------------------------------------------
@@ -333,6 +353,7 @@ pipeline {
                                     string(name: 'INPUT',    value: s.input),
                                     string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
                                     string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
+                                    string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
                                     string(name: 'ENV',  value: params.ENV),
                                     booleanParam(name: 'SKIP_TESTS', value: true),
                                     booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
@@ -362,24 +383,7 @@ pipeline {
                         return outcome.result in ['SUCCESS', 'UNSTABLE']
                     }
 
-                    if (params.PARALLEL_STUDY_LOADS) {
-                        def branches = [:]
-                        for (study in UNPROCESSED_STUDIES) {
-                            def s = study
-                            branches[s.studyId] = { loadStudy(s) }
-                        }
-                        if (!params.CONTINUE_ON_STUDY_FAILURE) {
-                            branches.failFast = true
-                        }
-                        parallel branches
-                    } else {
-                        for (int i = 0; i < UNPROCESSED_STUDIES.size(); i++) {
-                            if (!loadStudy(UNPROCESSED_STUDIES[i]) && !params.CONTINUE_ON_STUDY_FAILURE) {
-                                echo 'CONTINUE_ON_STUDY_FAILURE is off: not loading the remaining studies.'
-                                break
-                            }
-                        }
-                    }
+                    runPerStudy(UNPROCESSED_STUDIES, loadStudy)
 
                     // --- summary --------------------------------------------------
                     def ok       = results.findAll { it.result == 'SUCCESS' }
@@ -508,6 +512,7 @@ pipeline {
                                     string(name: 'OUTPUT',   value: params.DATA_ROOT.trim()),
                                     booleanParam(name: 'SKIP_ANALYSIS', value: params.SKIP_ANALYSIS),
                                     string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-${s.studyId}"),
+                                    string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
                                     string(name: 'ENV',    value: params.ENV),
                                     booleanParam(name: 'SKIP_TESTS', value: true),
                                     booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
@@ -537,24 +542,7 @@ pipeline {
                         return outcome.result in ['SUCCESS', 'UNSTABLE']
                     }
 
-                    if (params.PARALLEL_STUDY_LOADS) {
-                        def branches = [:]
-                        for (study in UNPROCESSED_STUDIES) {
-                            def s = study
-                            branches[s.studyId] = { generateStudy(s) }
-                        }
-                        if (!params.CONTINUE_ON_STUDY_FAILURE) {
-                            branches.failFast = true
-                        }
-                        parallel branches
-                    } else {
-                        for (int i = 0; i < UNPROCESSED_STUDIES.size(); i++) {
-                            if (!generateStudy(UNPROCESSED_STUDIES[i]) && !params.CONTINUE_ON_STUDY_FAILURE) {
-                                echo 'CONTINUE_ON_STUDY_FAILURE is off: not generating the remaining studies.'
-                                break
-                            }
-                        }
-                    }
+                    runPerStudy(UNPROCESSED_STUDIES, generateStudy)
 
                     // --- summary --------------------------------------------------
                     def ok       = results.findAll { it.result == 'SUCCESS' }
@@ -672,6 +660,7 @@ pipeline {
         always {
             script {
                 backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
+                removeRunnerImage()
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
@@ -715,6 +704,66 @@ def backupParticipantDb(String backupJob, String envName) {
              "live participant database but in no verified backup. Re-run ${backupJob} " +
              "(PROMOTE_BACKUP=${promote}) before the next pipeline run."
     }
+}
+
+// The configured STUDY_CONCURRENCY, or 1 when per-study stages run sequentially.
+def studyConcurrency() {
+    if (!params.PARALLEL_STUDY_LOADS) {
+        return 1
+    }
+    int n = 0
+    try {
+        n = params.STUDY_CONCURRENCY.trim() as int
+    } catch (ignored) { }
+    if (n < 1) {
+        error("STUDY_CONCURRENCY must be a positive whole number, got '${params.STUDY_CONCURRENCY}'.")
+    }
+    return n
+}
+
+// Runs body(study) for every study, at most studyConcurrency() at a time. body returns true when
+// the study succeeded. A fixed pool of workers each takes the next study until none are left.
+// Taking one is safe without a lock: pipeline Groovy runs every parallel branch on one thread and
+// only switches between them at a step, and there is no step between reading the cursor and
+// advancing it. With CONTINUE_ON_STUDY_FAILURE off, a failure stops new studies from starting;
+// builds already running finish, and the caller's summary counts the rest as not attempted.
+def runPerStudy(List studies, Closure body) {
+    int workers = Math.min(studyConcurrency(), studies.size())
+    def cursor = [index: 0, stop: false]
+    def worker = {
+        while (!cursor.stop && cursor.index < studies.size()) {
+            def s = studies[cursor.index]
+            cursor.index = cursor.index + 1
+            if (!body(s) && !params.CONTINUE_ON_STUDY_FAILURE) {
+                echo "CONTINUE_ON_STUDY_FAILURE is off: ${s.studyId} failed, so no further studies are started."
+                cursor.stop = true
+            }
+        }
+    }
+    if (workers <= 1) {
+        worker()
+        return
+    }
+    echo "Running ${studies.size()} study build(s), at most ${workers} at a time"
+    def branches = [:]
+    for (int w = 1; w <= workers; w++) {
+        branches["worker-${w}"] = { worker() }
+    }
+    parallel branches
+}
+
+// Deletes the shared runner image: the tarball in S3, the local one, and the image in this host's
+// podman storage. Every per-study build that used it has finished by now.
+def removeRunnerImage() {
+    if (!env.RUNNER_IMAGE_TAR) {
+        return
+    }
+    sh(returnStatus: true, script: '''
+        bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+        aws s3 rm "s3://$bucket/etl-runner/container/$RUNNER_IMAGE_TAR" --region "$AWS_REGION" || true
+        rm -f "etl-runners/sstr-populate-rds-participants/$RUNNER_IMAGE_TAR"
+        docker rmi "${RUNNER_IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+    ''')
 }
 
 @NonCPS

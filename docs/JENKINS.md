@@ -103,9 +103,10 @@ gate and stopped in `post { always }`.
 ```
 
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
-invoked with `SKIP_TESTS=true` so the same commit's suites are not re-run per study. The
-migration's split stage goes further: the orchestrator builds the runner image once and passes it
-as `PREBUILT_IMAGE_TAR`, so the per-study split builds build nothing on the Jenkins host.
+invoked with `SKIP_TESTS=true` so the same commit's suites are not re-run per study. Per-study
+jobs go further: each orchestrator builds the runner image once and passes it as
+`PREBUILT_IMAGE_TAR`, so the per-study builds (split, SSTR load, allConcepts generation) build
+nothing on the Jenkins host.
 
 The orchestrator stops only a database it started itself (`DB_STARTED`), so a failed start —
 for example because another pipeline's database is already up — never tears down someone else's.
@@ -550,7 +551,8 @@ and either one's end-of-run backup could capture the other's half-finished work.
 [PARTICIPANT_DB.md](PARTICIPANT_DB.md).
 
 Study loads are **sequential by default** (`PARALLEL_STUDY_LOADS`, default `false`, on the
-permanent orchestrator). Parallel loads are correct but rarely worth it. Study scoping alone does
+permanent orchestrator); in parallel, at most `STUDY_CONCURRENCY` (default 5) per-study builds run
+at once, however many studies are ready. Parallel loads are correct but rarely worth it. Study scoping alone does
 not make them safe: every SSTR load writes `participants` with `source = "DBGap"`, so two studies
 containing the same `dbgap_subject_id` compete for that subject's HPDS id.
 

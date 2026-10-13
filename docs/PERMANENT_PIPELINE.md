@@ -119,6 +119,13 @@ Builds the fat JAR and runs the test suites. This is the gate: nothing is provis
 loaded until the suites pass. Downstream jobs skip tests (`SKIP_TESTS=true`) to avoid
 re-running the same commit's suites per study.
 
+The per-study jobs (`sstr-populate-rds-participants` and `all-concepts-data-generator`) build
+nothing on the Jenkins host: after the participant DB is up, a `Package runner image` stage builds
+the runner image once and passes it to every per-study build as `PREBUILT_IMAGE_TAR`, which makes
+them skip their own JAR build and image packaging. The orchestrator deletes the image (S3 tarball,
+local tarball, and the host's podman image) in `post { always }`. Run standalone, those jobs still
+build their own.
+
 ---
 
 ## Stage 2: Resolve Studies
@@ -185,8 +192,9 @@ Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md
 **Job:** `sstr-populate-rds-participants`
 **Class:** [`SstrPopulateRdsParticipantsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/participants/SstrPopulateRdsParticipantsJob.java)
 **Runs:** once per unprocessed study — **sequentially** by default; `PARALLEL_STUDY_LOADS=true`
-loads them concurrently (correct, see Concurrency in [`JENKINS.md`](JENKINS.md)).
-With `CONTINUE_ON_STUDY_FAILURE=false`, a sequential sweep stops at the first failed study.
+loads them concurrently, at most `STUDY_CONCURRENCY` (default 5) at a time (correct, see
+Concurrency in [`JENKINS.md`](JENKINS.md)). With `CONTINUE_ON_STUDY_FAILURE=false`, no new study
+starts after the first failure (in parallel mode, builds already running finish).
 
 ### Input
 
@@ -322,8 +330,9 @@ Per-consent-group VCF index and sample ID files for genomic studies.
 
 **Job:** `all-concepts-data-generator`
 **Class:** [`AllConceptsDataGeneratorJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/AllConceptsDataGeneratorJob.java)
-**Runs:** once per unprocessed study — sequentially by default, concurrently with
-`PARALLEL_STUDY_LOADS=true`. Receives `PREFLIGHT_ONLY` and `SKIP_ANALYSIS`.
+**Runs:** once per unprocessed study — sequentially by default, concurrently (at most
+`STUDY_CONCURRENCY` at a time) with `PARALLEL_STUDY_LOADS=true`. Receives `PREFLIGHT_ONLY` and
+`SKIP_ANALYSIS`.
 
 ### Input
 
@@ -535,7 +544,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `SSTR_JOB` | `sstr-populate-rds-participants` | SSTR runner job |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep loading remaining studies when one fails |
-| `PARALLEL_STUDY_LOADS` | `false` | Load studies concurrently instead of one at a time |
+| `PARALLEL_STUDY_LOADS` | `false` | Run the per-study stages concurrently instead of one study at a time |
+| `STUDY_CONCURRENCY` | `5` | With `PARALLEL_STUDY_LOADS`: most per-study builds (and EC2 runners) at once; the rest wait for a free slot |
 | `PREFLIGHT_ONLY` | `false` | Validate inputs and stop without provisioning (see [Pre-flight Only](#pre-flight-only)) |
 | `ALL_CONCEPTS_JOB` | `generate-global-all-concepts` | Global AllConcepts runner job |
 | `ALL_CONCEPTS_OUTPUT` | `…/global_allconcepts/` | Output location for global AllConcepts (must be `s3://`) |
