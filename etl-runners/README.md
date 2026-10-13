@@ -40,9 +40,10 @@ etl-runners/
 └── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone, no DB
 ```
 
-`participant-db/` is not a runner: it has `Jenkinsfile.start` / `Jenkinsfile.stop` (Jenkins jobs
-`participant-db-start` / `participant-db-stop`), one Terraform state per environment rather than
-per run, and no JAR. See [`docs/PARTICIPANT_DB.md`](../docs/PARTICIPANT_DB.md).
+`participant-db/` is not a runner: it has `Jenkinsfile.start` / `Jenkinsfile.backup` (Jenkins jobs
+`participant-db-start` / `participant-db-backup`), which manage a long-lived PostgreSQL 16
+container on the Jenkins host through its podman socket. No Terraform, no JAR. See
+[`docs/PARTICIPANT_DB.md`](../docs/PARTICIPANT_DB.md).
 
 ## Shared Components
 
@@ -218,14 +219,15 @@ block so `make` picks it up automatically; the orchestrators pass it to every jo
    | `vpc_security_group_ids` | Runner security group(s); the only sources allowed to reach the DB   |
    | `ami_owner_id` / `ami_name_pattern` | AMI: the SRCE RHEL9 golden image (bootstraps assume podman and RHEL9 module streams) |
 
-   Also check the bucket in each `terraform/*.backend.tfvars` and the backup bucket/prefix in
-   `participant-db/terraform/participant-db.tfvars` (dumps go under `<prefix>/<env>/backups/`).
+   Also check the bucket in each `terraform/*.backend.tfvars`, the backup bucket/prefix in
+   `participant-db/participant-db.conf` (dumps go under `<prefix>/<env>/backups/`), and set
+   `participant_db_host` (the Jenkins host's private address) in the new environment file.
 
 3. Add the new name to the `choices` list of the `ENV` parameter in every Jenkinsfile:
 
    - `Jenkinsfile` and `Jenkinsfile.migration` (orchestrators)
    - `etl-runners/*/Jenkinsfile` (all eight runners)
-   - `etl-runners/participant-db/Jenkinsfile.start` and `Jenkinsfile.stop`
+   - `etl-runners/participant-db/Jenkinsfile.start` and `Jenkinsfile.backup`
 
    ```groovy
    choice(name: 'ENV', choices: ['development', '<name>'],

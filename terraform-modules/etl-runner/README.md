@@ -145,8 +145,8 @@ launches them, are listed with a ready-to-attach policy in
 ## Credentials Format
 
 `db_credentials_json` must be JSON with either a ready-made JDBC URL or discrete fields.
-`participant-db-start` saves the second form (plus an `instanceId`, ignored here) once Postgres
-has restored and is accepting connections:
+`participant-db-start` saves the second form (plus `engine`, `schema` and `container`, ignored
+here) once Postgres is up and accepting connections:
 
 ```json
 { "engine": "postgres", "host": "10.0.1.23", "port": 5432, "dbname": "etl_db",
@@ -166,8 +166,8 @@ has restored and is accepting connections:
 - **Exit codes** are the contract: `0` success, `2` validation, `3` data, `4` infrastructure
   (retryable), `5` config, `1` unknown. Bootstrap failures before the container starts report
   `4`; missing or unusable credentials (phase `credentials`) report `5`.
-- **Database not running.** The credentials file exists on the Jenkins server only between
-  `participant-db-start` and `participant-db-stop`. With `uses_participant_db = true` and empty
+- **Database not running.** The credentials file exists on the Jenkins server once
+  `participant-db-start` has run. With `uses_participant_db = true` and empty
   `db_credentials_json`, the bootstrap logs that the participant database is probably not running
   and exits `5`. The Jenkinsfiles of DB-backed runners check this on the agent first
   (`etl-runners/common/require-db.sh`), so the usual symptom is a fast, clear failure before

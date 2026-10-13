@@ -111,14 +111,14 @@ class GenerateAllConceptsManifestJobTest {
                 .containsEntry("manifestUri", ROOT + "allConcepts_manifest.csv")
                 .containsEntry("manifestVersionId", s3.versionId(MANIFEST));
         assertThat(s3.content(MANIFEST)).isEqualTo(String.join("\n",
-                "study,consent,s3_uri,version_id,last_updated,md5",
-                "GLOBAL,,s3://bucket/" + GLOBAL + "," + s3.versionId(GLOBAL) + "," + s3.lastModified(GLOBAL) + ","
+                "partition,s3_uri,version_id,last_updated,md5",
+                "global,s3://bucket/" + GLOBAL + "," + s3.versionId(GLOBAL) + "," + s3.lastModified(GLOBAL) + ","
                         + md5("global rows\n"),
-                "phs000001,1,s3://bucket/" + MERGED_C1 + "," + s3.versionId(MERGED_C1) + ","
+                "phs000001.c1,s3://bucket/" + MERGED_C1 + "," + s3.versionId(MERGED_C1) + ","
                         + s3.lastModified(MERGED_C1) + "," + md5("a\n"),
-                "phs000001,2,s3://bucket/" + MERGED_C2 + "," + s3.versionId(MERGED_C2) + ","
+                "phs000001.c2,s3://bucket/" + MERGED_C2 + "," + s3.versionId(MERGED_C2) + ","
                         + s3.lastModified(MERGED_C2) + "," + md5("b\n"),
-                "phs000002,1,s3://bucket/" + P2_C1 + "phs000002_c1_allConcepts_MERGED.csv,"
+                "phs000002.c1,s3://bucket/" + P2_C1 + "phs000002_c1_allConcepts_MERGED.csv,"
                         + s3.versionId(P2_C1 + "phs000002_c1_allConcepts_MERGED.csv") + ","
                         + s3.lastModified(P2_C1 + "phs000002_c1_allConcepts_MERGED.csv") + "," + md5("c\n"),
                 ""));
@@ -143,7 +143,8 @@ class GenerateAllConceptsManifestJobTest {
 
         assertThat(result.getMetrics()).containsEntry("manifestRows", 4L);
         List<String> rows = s3.content(MANIFEST).lines().skip(2).toList();
-        assertThat(rows).extracting(r -> r.split(",")[1]).containsExactly("1", "2", "10");
+        assertThat(rows).extracting(r -> r.split(",")[0])
+                .containsExactly("phs000001.c1", "phs000001.c2", "phs000001.c10");
         assertThat(rows.get(0)).contains(MERGED_C1).endsWith(md5("one\n"));
         assertThat(rows.get(1)).contains(MERGED_C2).endsWith(md5("two\n"));
         assertThat(rows.get(2)).contains(c10 + "phs000001_c10_allConcepts_MERGED.csv").endsWith(md5("ten\n"));
@@ -161,7 +162,7 @@ class GenerateAllConceptsManifestJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics()).containsEntry("manifestRows", 5L);
-        assertThat(s3.content(MANIFEST)).contains("phs000001,3,");
+        assertThat(s3.content(MANIFEST)).contains("phs000001.c3,");
     }
 
     @Test
@@ -357,7 +358,7 @@ class GenerateAllConceptsManifestJobTest {
         JobResult result = manifest();
 
         String globalRow = s3.content(MANIFEST).lines().skip(1).findFirst().orElseThrow();
-        assertThat(globalRow).isEqualTo("GLOBAL,,s3://bucket/" + GLOBAL + "," + s3.versionId(GLOBAL) + ","
+        assertThat(globalRow).isEqualTo("global,s3://bucket/" + GLOBAL + "," + s3.versionId(GLOBAL) + ","
                 + s3.lastModified(GLOBAL) + "," + md5("newer global rows\n"));
         assertThat(globalRow).doesNotContain(oldVersion);
         assertThat(result.getMetrics().get("globalAllConcepts").toString()).contains(s3.versionId(GLOBAL));
@@ -372,7 +373,7 @@ class GenerateAllConceptsManifestJobTest {
                 Map.of("input", ROOT, "global-allconcepts", "s3://bucket/" + GLOBAL), "unit-manifest");
 
         assertThat(result.isSuccess()).isTrue();
-        assertThat(s3.content(MANIFEST)).contains("GLOBAL,,s3://bucket/" + GLOBAL + ",");
+        assertThat(s3.content(MANIFEST)).contains("global,s3://bucket/" + GLOBAL + ",");
     }
 
     @Test
@@ -414,8 +415,8 @@ class GenerateAllConceptsManifestJobTest {
     }
 
     @Test
-    void consent_code_drops_the_folder_prefix() {
-        assertThat(GenerateAllConceptsManifestJob.consentCode("c1")).isEqualTo("1");
-        assertThat(GenerateAllConceptsManifestJob.consentCode("c12")).isEqualTo("12");
+    void partition_is_the_study_id_and_consent_folder() {
+        assertThat(GenerateAllConceptsManifestJob.partition("phs000001", "c1")).isEqualTo("phs000001.c1");
+        assertThat(GenerateAllConceptsManifestJob.partition("phs000001", "c12")).isEqualTo("phs000001.c12");
     }
 }

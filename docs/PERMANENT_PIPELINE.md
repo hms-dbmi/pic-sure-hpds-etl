@@ -70,7 +70,7 @@ Build ▸ Tests ▸ Resolve studies
           │                       │  writes {DATA_ROOT}/allConcepts_manifest.csv (versioned)
           └───────────────────────┘
 
-post { always }:  participant-db-stop  (pg_dump to S3; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+post { always }:  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
 ```
 
 Each stage runs only if the previous stage succeeded. The participant database exists only
@@ -170,12 +170,13 @@ every such study — before the database is started or any runner is provisioned
 
 **Job:** `participant-db-start` ([`etl-runners/participant-db/Jenkinsfile.start`](../etl-runners/participant-db/Jenkinsfile.start))
 
-Brings up the Postgres server, restoring `backups/participant_db.tar` (or a fresh
-schema when there is none), and saves its connection details to a `600`-mode file on the
-Jenkins server, which the DB-backed runners' Terraform applies pass to them. If a database is already running in the environment, it is reused as-is
-(`RESTART_DB_IF_RUNNING=false`, the default) or dumped and replaced from the restore point
-(`true`). This build stops whichever database it started or reused; it never stops one when its
-start failed. Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+Makes sure the participant database, a long-lived PostgreSQL 16 container on the Jenkins host, is
+up, and saves its connection details to a `600`-mode file on the Jenkins server, which the
+DB-backed runners' Terraform applies pass to them. A clean running database is kept;
+`OVERWRITE_DB` replaces it from `DB_RESTORE_FROM` (blank = the latest clean backup), and after a
+failed run `IF_LAST_RUN_FAILED` decides between restoring the clean backup (default) and
+continuing on that run's data. A database that isn't up is created from the latest clean backup.
+Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -439,16 +440,15 @@ Runs only if Stage 7 succeeded (or was skipped because no study is unprocessed).
 
 Writes **`{DATA_ROOT}/allConcepts_manifest.csv`**, the file handed to production ingestion:
 
-1. Always first, a `GLOBAL` row for the current version of `global_AllConcepts.csv` from
-   Stage 5 (`ALL_CONCEPTS_OUTPUT`). Its `consent` is blank.
+1. Always first, a row with partition `global` for the current version of
+   `global_AllConcepts.csv` from Stage 5 (`ALL_CONCEPTS_OUTPUT`).
 2. Then one row per consent group of every study marked ready in `MANAGED_INPUTS`, sorted by
    study, then consent in code order (`c2` before `c10`). Managed inputs name only studies; a
    study's consent groups are the `c{code}/` folders it actually has.
 
 | Column | Value |
 |--------|-------|
-| `study` | study id, or `GLOBAL` |
-| `consent` | consent code (folder `c1` → `1`); blank on the `GLOBAL` row |
+| `partition` | `{study_id}.{consent}` from the study and its consent folder (`phs000001` / `c1` → `phs000001.c1`), or `global` |
 | `s3_uri` | the MERGED file, or `global_AllConcepts.csv` |
 | `version_id` | the file's S3 version id; later runs overwrite the key, so this pins the exact data described |
 | `last_updated` | that version's S3 `LastModified` (ISO-8601 UTC) |
@@ -471,18 +471,17 @@ older version. The job fails if S3 returns no version id for the write. Metadata
 
 ---
 
-## Post: Stop Participant DB
+## Post: Back Up Participant DB
 
-**Job:** `participant-db-stop` ([`etl-runners/participant-db/Jenkinsfile.stop`](../etl-runners/participant-db/Jenkinsfile.stop))
+**Job:** `participant-db-backup` ([`etl-runners/participant-db/Jenkinsfile.backup`](../etl-runners/participant-db/Jenkinsfile.backup))
 
-Runs in `post { always }` whenever this build started the database. It `pg_dump`s the
-database to S3, verifies the upload, destroys the server, and deletes its saved credentials. The dump becomes
-the next run's restore point (`participant_db.tar`) only if the build result so far is SUCCESS or
-UNSTABLE; a failed or aborted run is still dumped, but `participant_db.tar` stays on the last good dump.
-If the stop fails, the build fails and the database is left running with its writes intact —
-re-run `participant-db-stop`. With `KEEP_DB_ON_FAILURE` (the default), a FAILED build skips the
-stop altogether and leaves the database up for debugging; run `participant-db-stop` with
-`PROMOTE_BACKUP=false` when done. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+Runs in `post { always }` whenever this build's start succeeded. It `pg_dump`s the database to
+S3 and verifies the upload; the database stays up. The dump becomes the latest clean backup
+(`participant_db.tar`) only if the build result so far is SUCCESS or UNSTABLE; a failed or
+aborted run is dumped to `participant_db_not_promoted.tar` instead and the live database is
+marked as holding a failed run, which the next start handles per `IF_LAST_RUN_FAILED`. If the
+backup fails, the build fails: re-run `participant-db-backup`. See
+[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -549,9 +548,10 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
-| `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
-| `RESTART_DB_IF_RUNNING` | `false` | If a participant DB is already running: `false` reuses it, `true` dumps it (not promoted), destroys it, and starts fresh (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#when-a-database-is-already-running)) |
-| `KEEP_DB_ON_FAILURE` | `true` | On a FAILED build, skip the stop and leave the database running for debugging (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#debugging-a-failed-run)) |
+| `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
+| `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
+| `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
+| `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |
 | `ENV` | `development` | Selects `etl-runners/environments/<ENV>.tfvars` |
 
 Job-name parameters resolve relative to the `hpds-etl` Jenkins folder.

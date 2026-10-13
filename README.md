@@ -50,9 +50,10 @@ Two Jenkins pipelines, kept separate because their lifecycles are opposites. See
 | [`Jenkinsfile`](Jenkinsfile)                     | permanent ingestion (`JobType.PERMANENT` jobs) | ongoing                                       |
 | [`Jenkinsfile.migration`](Jenkinsfile.migration) | legacy migration (plus the permanent jobs that rebuild its derived artifacts) | deleted once the migration has run everywhere |
 
-Both start the participant database (`participant-db-start`) before their first DB-backed stage
-and dump and stop it (`participant-db-stop`) at the end; the dump becomes the next run's restore
-point only when the run succeeded.
+Both make sure the participant database is up (`participant-db-start`) before their first
+DB-backed stage and back it up (`participant-db-backup`) at the end; the dump becomes the latest
+clean backup only when the run succeeded. The database is a long-lived PostgreSQL 16 container on
+the Jenkins host; see [`docs/PARTICIPANT_DB.md`](docs/PARTICIPANT_DB.md).
 
 Each orchestrator stage triggers that job's own pipeline under [`etl-runners/`](etl-runners/),
 which provisions a self-terminating EC2 runner with Terraform, runs the JAR in a container,

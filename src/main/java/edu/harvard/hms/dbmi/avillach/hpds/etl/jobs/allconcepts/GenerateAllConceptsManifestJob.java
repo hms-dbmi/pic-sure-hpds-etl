@@ -31,11 +31,12 @@ import java.util.Set;
 
 /**
  * PERMANENT. Writes {@value #MANIFEST_NAME} at the data root for the production ingestion: first a
- * {@value #GLOBAL_STUDY} row (blank consent) naming the current version of
- * {@code global_AllConcepts.csv} ({@code --global-allconcepts}), then one row per consent group of
- * every study marked ready in managed inputs, naming its MERGED allConcepts file. Columns:
- * {@code study, consent, s3_uri, version_id, last_updated, md5}. The global file's md5 is computed
- * by reading that exact version; a MERGED file's is the one its merge recorded.
+ * {@value #GLOBAL_PARTITION} row naming the current version of {@code global_AllConcepts.csv}
+ * ({@code --global-allconcepts}), then one row per consent group of every study marked ready in
+ * managed inputs, naming its MERGED allConcepts file, with partition {@code {study_id}.{consent}}
+ * (folder {@code c1} of {@code phs000001} &rarr; {@code phs000001.c1}). Columns:
+ * {@code partition, s3_uri, version_id, last_updated, md5}. The global file's md5 is computed by
+ * reading that exact version; a MERGED file's is the one its merge recorded.
  *
  * <p>Runs after {@link MergeAllConceptsJob} at the end of both pipelines. Before writing, every
  * ready consent group must hold: a MERGED file exists; its recorded
@@ -53,9 +54,9 @@ import java.util.Set;
 public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConceptsManifestJob.Output> {
 
     static final String MANIFEST_NAME = "allConcepts_manifest.csv";
-    static final String HEADER = "study,consent,s3_uri,version_id,last_updated,md5";
-    /** The {@code study} value of the global AllConcepts row; its {@code consent} is blank. */
-    static final String GLOBAL_STUDY = "GLOBAL";
+    static final String HEADER = "partition,s3_uri,version_id,last_updated,md5";
+    /** The {@code partition} of the global AllConcepts row. */
+    static final String GLOBAL_PARTITION = "global";
 
     private final IoResolver io;
     private final AllConceptsFolders folders;
@@ -152,7 +153,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
         return new Output(studyIds.size(), rows, problems, manifestUri, versionId);
     }
 
-    /** Adds the {@value #GLOBAL_STUDY} row for the global file's current version, or why it can't. */
+    /** Adds the {@value #GLOBAL_PARTITION} row for the global file's current version, or why it can't. */
     private void verifyGlobal(String uri, String bucket, String key, List<ManifestRow> rows, List<Problem> problems) {
         AllConceptsFolders.FileVersion current = folders.currentVersion(bucket, key);
         if (current == null) {
@@ -170,7 +171,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
             return;
         }
         String md5 = folders.md5(bucket, key, current.versionId());
-        rows.add(new ManifestRow(GLOBAL_STUDY, "", uri, current.versionId(), current.lastModified().toString(), md5));
+        rows.add(new ManifestRow(GLOBAL_PARTITION, uri, current.versionId(), current.lastModified().toString(), md5));
     }
 
     /** Adds the folder's manifest row, or the reasons it can't have one. */
@@ -212,20 +213,19 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
                     + folder.mergedFileName() + " has no recorded md5; re-run the merge"));
             return;
         }
-        rows.add(new ManifestRow(studyId, consentCode(consentDir), folder.uri() + folder.mergedFileName(),
+        rows.add(new ManifestRow(partition(studyId, consentDir), folder.uri() + folder.mergedFileName(),
                 folder.merged().versionId(), folder.merged().lastModified().toString(), md5));
     }
 
-    /** {@code c1} &rarr; {@code 1}: the consent code as the consents table stores it. */
-    static String consentCode(String consentDir) {
-        return consentDir.startsWith("c") ? consentDir.substring(1) : consentDir;
+    /** {@code phs000001}, folder {@code c1} &rarr; {@code phs000001.c1}, the {studyId}.c{code} consent form. */
+    static String partition(String studyId, String consentDir) {
+        return studyId + "." + consentDir;
     }
 
     static String toCsv(List<ManifestRow> rows) {
         StringBuilder csv = new StringBuilder(HEADER).append('\n');
         for (ManifestRow r : rows) {
-            csv.append(Strings.csvQuote(r.study())).append(',')
-                    .append(Strings.csvQuote(r.consent())).append(',')
+            csv.append(Strings.csvQuote(r.partition())).append(',')
                     .append(Strings.csvQuote(r.s3Uri())).append(',')
                     .append(Strings.csvQuote(r.versionId())).append(',')
                     .append(r.lastUpdated()).append(',')
@@ -296,7 +296,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
     protected void report(Output output, JobResult.Builder builder) {
         builder.metric("readyStudies", (long) output.readyStudies())
                 .metric("manifestRows", (long) output.rows().size())
-                .metric("globalAllConcepts", output.rows().stream().filter(r -> GLOBAL_STUDY.equals(r.study()))
+                .metric("globalAllConcepts", output.rows().stream().filter(r -> GLOBAL_PARTITION.equals(r.partition()))
                         .map(r -> r.s3Uri() + " (version " + r.versionId() + ")").findFirst().orElse(""))
                 .metric("manifestUri", output.manifestUri())
                 .metric("manifestVersionId", output.versionId() == null ? "" : output.versionId())
@@ -306,7 +306,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
     }
 
     /** One manifest line. */
-    public record ManifestRow(String study, String consent, String s3Uri, String versionId, String lastUpdated,
+    public record ManifestRow(String partition, String s3Uri, String versionId, String lastUpdated,
                               String md5) {
     }
 

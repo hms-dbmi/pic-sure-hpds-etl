@@ -82,7 +82,7 @@ Build ▸ Tests
 │                          │  allConcepts_manifest.csv at the merge input root (versioned)
 └─────────────────────────┘
 
-post { always }:  participant-db-stop  (pg_dump to S3; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+post { always }:  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
 ```
 
 Stage ordering is strict: each stage runs only if the previous stage succeeded (UNSTABLE
@@ -149,10 +149,12 @@ jobs skip tests.
 
 ## Stage 2: Start Participant DB
 
-**Job:** `participant-db-start`. Restores `backups/participant_db.tar` (or a fresh schema
-from `schema.sql`) and saves its connection details on the Jenkins server for the runners. A database already running in the
-environment is reused, or with `RESTART_DB_IF_RUNNING=true` dumped and replaced. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial
-seed dump of the legacy RDS database must be placed.
+**Job:** `participant-db-start`. Makes sure the long-lived database container on the Jenkins host
+is up, and saves its connection details on the Jenkins server for the runners. A clean running
+database is kept. `OVERWRITE_DB` replaces it from `DB_RESTORE_FROM` (blank = the latest clean
+backup), and after a failed run `IF_LAST_RUN_FAILED` decides between restoring the clean backup
+and continuing. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial seed
+dump of the legacy RDS database must be placed.
 
 ---
 
@@ -384,19 +386,18 @@ the bucket must be versioned), and skips the rest. See
 Verifies that every ready consent group's MERGED file is the merge of exactly its current source
 files, and that `global_AllConcepts.csv` under `ALL_CONCEPTS_OUTPUT` exists. Then it writes the
 versioned `allConcepts_manifest.csv` at the root of `MERGE_ALLCONCEPTS_INPUT` (blank =
-`DATA_ROOT`): `study, consent, s3_uri, version_id, last_updated, md5`, with a `GLOBAL` row (blank
-consent) for the global file first. If any check fails, no manifest is written and the build fails. See
+`DATA_ROOT`): `partition, s3_uri, version_id, last_updated, md5`, with a `global` row for the
+global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consent group. If any check fails, no manifest is written and the build fails. See
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-9-allconcepts-manifest).
 
 ---
 
-## Post: Stop Participant DB
+## Post: Back Up Participant DB
 
-**Job:** `participant-db-stop`, in `post { always }` whenever this build started the database.
-Dumps it to S3 and destroys it; the dump becomes `participant_db.tar` only if the build is SUCCESS or
-UNSTABLE. A failed stop fails the build and leaves the database running. With
-`KEEP_DB_ON_FAILURE` (the default), a FAILED build skips the stop altogether and leaves the
-database up for debugging; run `participant-db-stop` with `PROMOTE_BACKUP=false` when done. See
+**Job:** `participant-db-backup`, in `post { always }` whenever this build's start succeeded.
+Dumps the database to S3 and leaves it running. The dump becomes `participant_db.tar` only if the
+build is SUCCESS or UNSTABLE; otherwise it goes to `participant_db_not_promoted.tar`, and the next
+start acts on `IF_LAST_RUN_FAILED`. A failed backup fails the build. See
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
@@ -458,9 +459,10 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
-| `DB_STOP_JOB` | `participant-db-stop` | Job that dumps and stops it |
-| `RESTART_DB_IF_RUNNING` | `false` | If a participant DB is already running: `false` reuses it, `true` dumps it (not promoted), destroys it, and starts fresh (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#when-a-database-is-already-running)) |
-| `KEEP_DB_ON_FAILURE` | `true` | On a FAILED build, skip the stop and leave the database running for debugging (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#debugging-a-failed-run)) |
+| `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
+| `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
+| `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
+| `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep splitting remaining studies when one fails |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
 | `PREFLIGHT_ONLY` | `false` | Validate inputs and stop without provisioning (see [Pre-flight Only](#pre-flight-only)) |

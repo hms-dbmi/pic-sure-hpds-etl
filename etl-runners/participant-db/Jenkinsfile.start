@@ -1,28 +1,25 @@
 // =============================================================================
 // SHARED -- participant-db-start
 //
-// Brings up the participant database (participants / consents / samples) for a pipeline run:
-// a Postgres server on an EC2 instance that restores the most recent promoted pg_dump from S3
-// (or creates a fresh schema when there is none), then copies its connection details to a
-// 600-mode file on this Jenkins server (etl-runners/common/db-credentials-path.sh), which the
-// DB-backed runner jobs read. Paired with participant-db-stop, which dumps the database back to
-// S3, destroys everything this job created, and deletes that file.
+// Makes sure the participant database (participants / consents / samples) is up, then saves its
+// connection details to a 600-mode file on this Jenkins server (etl-runners/common/
+// db-credentials-path.sh), which the DB-backed runner jobs read.
 //
-// Both orchestrators (/Jenkinsfile, /Jenkinsfile.migration) call this first and the stop job
-// last. Run it by hand only to use a DB-backed runner standalone -- and run participant-db-stop
-// when finished, or the instance (and its unsaved writes) is left running.
+// The database is a long-lived PostgreSQL 16 container on the Jenkins host (started through the
+// host's podman socket), with its data in a named volume. It is NOT torn down between runs;
+// participant-db-backup dumps it to S3 at the end of every pipeline run. See start.sh and
+// docs/PARTICIPANT_DB.md for the full rules. In short:
 //
-// One database per environment: the Terraform state is fixed per environment. If it already
-// holds an instance (a failed build kept it for debugging, a manual run, or another pipeline),
-// RESTART_IF_RUNNING decides what happens:
-//   false (default)  reuse it: check it is running, reuse the credentials saved on this server
-//                    (re-fetching them from the instance if the file is gone), provision nothing
-//   true             dump it to participant_db_not_promoted.tar (its writes are kept, the
-//                    restore point is untouched), destroy it, and start fresh from the restore
-//                    point. If that dump fails, nothing is destroyed and the job fails.
+//   up and clean                  kept as-is
+//   OVERWRITE=true                saved to participant_db_pre_overwrite.tar, then replaced with
+//                                 RESTORE_FROM (blank = the latest clean backup), whether or not
+//                                 it was up
+//   last run failed               IF_LAST_RUN_FAILED=restore-clean (default): replaced from the
+//                                 clean backup, saved first. =continue: kept with that run's data
+//   not PostgreSQL 16             saved, recreated on 16, and restored from that save
+//   not up                        created from RESTORE_FROM, else the latest clean backup
 //
-// Dump:    s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backups/participant_db.tar
-//          (versioned; earlier dumps are its older versions). See docs/PARTICIPANT_DB.md.
+// Dumps: s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backups/
 // =============================================================================
 
 pipeline {
@@ -32,21 +29,17 @@ pipeline {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '50'))
         disableConcurrentBuilds()
-        // A restart backs up the running database (up to BACKUP_TIMEOUT_SECONDS) before the start.
+        // A replace dumps the live database first, then restores; both scale with its size.
         timeout(time: 4, unit: 'HOURS')
     }
 
     parameters {
+        booleanParam(name: 'OVERWRITE', defaultValue: false,
+               description: 'Replace the database with RESTORE_FROM (blank = the latest clean backup, participant_db.tar), whether or not one is already up. A running database is first saved to participant_db_pre_overwrite.tar.')
         string(name: 'RESTORE_FROM', defaultValue: '',
-               description: 'Blank restores backups/participant_db.tar (a fresh schema if there is none). "none" forces a fresh schema. Otherwise a file name under backups/ (e.g. participant_db_not_promoted.tar), or a full s3:// URI to a tarred pg_dump --format=d dump (e.g. the initial seed).')
-        string(name: 'INSTANCE_TYPE', defaultValue: 'm5.xlarge',
-               description: 'DB instance type. Several runners may load concurrently; size for that.')
-        string(name: 'READY_TIMEOUT_SECONDS', defaultValue: '3600',
-               description: 'How long to wait for install + restore before giving up')
-        booleanParam(name: 'RESTART_IF_RUNNING', defaultValue: false,
-               description: 'If a database is already running: false reuses it as-is. True dumps it to participant_db_not_promoted.tar, destroys it, and starts a new one from RESTORE_FROM.')
-        string(name: 'BACKUP_TIMEOUT_SECONDS', defaultValue: '7200',
-               description: 'RESTART_IF_RUNNING only: how long the dump of the running database may take')
+               description: 'What a new or replaced database is loaded from. Blank: the latest clean backup. "none": a fresh empty schema. Otherwise a file under backups/ (participant_db_not_promoted.tar, participant_db_pre_overwrite.tar, ...) or a full s3:// URI to a tarred pg_dump --format=d dump. Ignored when the database is up and OVERWRITE is false.')
+        choice(name: 'IF_LAST_RUN_FAILED', choices: ['restore-clean', 'continue'],
+               description: 'When the last pipeline run failed (its writes are still in the live database): restore-clean replaces it from the latest clean backup (the failed state is already saved as participant_db_not_promoted.tar); continue keeps working on it.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER; orchestrators pass their BUILD_TAG.')
         choice(name: 'ENV', choices: ['development'],
@@ -56,129 +49,37 @@ pipeline {
     environment {
         ENV        = "${params.ENV ?: 'development'}"
         AWS_REGION = 'us-east-1'
-        DB_DIR     = 'etl-runners/participant-db'
-        STATE_KEY  = "tf_backend/etl-runners/hpds-etl/participant-db/${params.ENV ?: 'development'}/terraform.tfstate"
-
-        TF_VAR_restore_from  = "${params.RESTORE_FROM.trim()}"
-        TF_VAR_instance_type = "${params.INSTANCE_TYPE.trim()}"
     }
 
     stages {
-
-        stage('Init') {
+        stage('Start') {
             steps {
                 script {
-                    def base = params.RUN_ID?.trim() ?: "participant-db-${env.BUILD_NUMBER}"
-                    env.TF_VAR_run_id = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
-                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}"
-                    echo "env:          ${env.ENV}"
-                    echo "run id:       ${env.TF_VAR_run_id}"
-                    echo "restore from: ${params.RESTORE_FROM?.trim() ?: '<backups/participant_db.tar>'}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}" + (params.OVERWRITE ? ' (overwrite)' : '')
                 }
-                sh "make -C ${DB_DIR} init STATE_KEY=${STATE_KEY}"
-                script {
-                    def instanceId = sh(returnStdout: true, script: """
-                        cd ${DB_DIR}
-                        TF=\$(make -s tf-path)
-                        if \$TF -chdir=terraform state list 2>/dev/null | grep -qx 'aws_instance.db'; then
-                            \$TF -chdir=terraform output -raw instance_id
-                        fi
-                    """).trim()
-                    if (instanceId && !params.RESTART_IF_RUNNING) {
-                        env.REUSE_DB = 'true'
-                        env.DB_INSTANCE_ID = instanceId
-                        currentBuild.displayName += ' (reused)'
-                        echo "A participant database is already running in '${env.ENV}' (${instanceId}): reusing it. " +
-                             'RESTORE_FROM and INSTANCE_TYPE are ignored. Set RESTART_IF_RUNNING=true to replace it ' +
-                             'with a fresh one from the restore point.'
-                        def state = sh(returnStdout: true, script:
-                            "aws ec2 describe-instances --instance-ids ${instanceId} --region ${AWS_REGION} " +
-                            "--query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || true").trim()
-                        if (state != 'running') {
-                            error("The participant database instance ${instanceId} is '${state ?: 'unknown'}', not running. " +
-                                  'If it is stopped, start it (aws ec2 start-instances) and re-run this job; otherwise run ' +
-                                  'participant-db-stop to clean it up.')
-                        }
-                    } else if (instanceId) {
-                        env.RESTART_DB = 'true'
-                        currentBuild.displayName += ' (restarted)'
-                        echo "A participant database is already running in '${env.ENV}' (${instanceId}): RESTART_IF_RUNNING " +
-                             'is set, so it will be dumped to participant_db_not_promoted.tar, destroyed, and replaced.'
-                    }
+                withEnv(["OVERWRITE=${params.OVERWRITE}",
+                         "RESTORE_FROM=${params.RESTORE_FROM?.trim() ?: ''}",
+                         "IF_LAST_RUN_FAILED=${params.IF_LAST_RUN_FAILED}"]) {
+                    sh 'etl-runners/participant-db/start.sh "$ENV"'
                 }
             }
         }
 
-        stage('Replace running DB') {
-            when { expression { env.RESTART_DB == 'true' } }
+        stage('Verify') {
             steps {
-                script {
-                    // The running database may hold writes no dump has captured. Dump them, not
-                    // promoted, before destroying anything; if that fails, stop here with it intact.
-                    int rc = sh(returnStatus: true, script:
-                        "make -C ${DB_DIR} backup STATE_KEY=${STATE_KEY} PROMOTE=false " +
-                        "BACKUP_TIMEOUT_SECONDS=${params.BACKUP_TIMEOUT_SECONDS.trim()}")
-                    if (rc != 0) {
-                        error('Backing up the running participant database failed, so it was NOT replaced and is ' +
-                              'still up. Fix the cause and re-run, or run participant-db-stop.')
-                    }
-                }
-                sh "make -C ${DB_DIR} destroy forget-credentials STATE_KEY=${STATE_KEY}"
-            }
-        }
-
-        stage('Provision') {
-            when { expression { env.REUSE_DB != 'true' } }
-            steps {
-                script {
-                    // From here on a failure must tear down: nothing has been written to the new
-                    // database yet, and the dump it restored from is still in S3.
-                    env.DB_APPLIED = 'true'
-                }
-                sh "make -C ${DB_DIR} apply STATE_KEY=${STATE_KEY}"
-            }
-        }
-
-        stage('Wait for ready') {
-            steps {
-                script {
-                    if (env.REUSE_DB != 'true') {
-                        sh "make -C ${DB_DIR} wait-ready STATE_KEY=${STATE_KEY} READY_TIMEOUT_SECONDS=${params.READY_TIMEOUT_SECONDS.trim()}"
-                        sh "make -C ${DB_DIR} fetch-credentials STATE_KEY=${STATE_KEY}"
-                    } else {
-                        // Reuse the credentials saved when this database started, if they are
-                        // still here and belong to this instance; otherwise fetch them again.
-                        def creds = sh(returnStdout: true, script: "etl-runners/common/db-credentials-path.sh ${env.ENV}").trim()
-                        def savedFor = sh(returnStdout: true, script: "jq -r '.instanceId // empty' '${creds}' 2>/dev/null || true").trim()
-                        if (savedFor && savedFor == env.DB_INSTANCE_ID) {
-                            echo "Using the credentials saved at ${creds}"
-                        } else {
-                            echo "No saved credentials for ${env.DB_INSTANCE_ID} at ${creds}: fetching them from the instance"
-                            sh "make -C ${DB_DIR} fetch-credentials STATE_KEY=${STATE_KEY}"
-                        }
-                    }
-                }
-                sh "etl-runners/common/require-db.sh ${env.ENV}"
+                sh 'etl-runners/common/require-db.sh "$ENV"'
             }
         }
     }
 
     post {
-        unsuccessful {
-            script {
-                if (env.DB_APPLIED == 'true') {
-                    echo 'Start failed after provisioning -- destroying the half-built database (no data is lost: ' +
-                         'nothing has written to it, and its restore source is still in S3).'
-                    int rc = sh(returnStatus: true, script: "make -C ${DB_DIR} destroy forget-credentials STATE_KEY=${STATE_KEY}")
-                    if (rc != 0) {
-                        echo "WARNING: terraform destroy returned ${rc}. Run participant-db-stop with SKIP_BACKUP=true to clean up."
-                    }
-                }
-            }
-        }
         success {
-            echo "Participant database is up in '${env.ENV}'" + (env.REUSE_DB == 'true' ? ' (reused, not restored)' : '') +
-                 '. Run participant-db-stop when the pipeline is done.'
+            echo "Participant database is up in '${env.ENV}'. It stays up; participant-db-backup saves it at the end of each pipeline run."
+        }
+        failure {
+            echo 'participant-db-start FAILED. If the log says the database was replaced but not brought back up, ' +
+                 'its previous contents are in participant_db_pre_overwrite.tar: re-run with OVERWRITE=true ' +
+                 'RESTORE_FROM=participant_db_pre_overwrite.tar.'
         }
     }
 }

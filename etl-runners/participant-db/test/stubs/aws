@@ -1,0 +1,44 @@
+#!/bin/bash
+# Test stub for the aws CLI: a versioned bucket under $STUB_STATE/s3/<key>, each key holding
+# "content" and "meta" (size dumped-at), and a running version count.
+#   versioning     get-bucket-versioning status (default Enabled)
+#   head_error     makes head-object fail with AccessDenied
+#   upload_short   makes uploads land one byte short
+S="$STUB_STATE"
+echo "aws $*" >> "$S/aws.log"
+f() { [[ -f "$S/$1" ]] && cat "$S/$1" || echo "$2"; }
+keydir() { local u="${1#s3://}"; echo "$S/s3/${u#*/}"; }
+
+if [[ "$1" == s3api && "$2" == get-bucket-versioning ]]; then f versioning Enabled; exit 0; fi
+if [[ "$1" == s3api && "$2" == head-object ]]; then
+  key="" query=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --key) key="$2"; shift ;; --query) query="$2"; shift ;; esac; shift
+  done
+  if [[ -f "$S/head_error" ]]; then echo "An error occurred (403) when calling the HeadObject operation: Forbidden" >&2; exit 255; fi
+  d="$S/s3/$key"
+  if [[ ! -f "$d/content" ]]; then echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 255; fi
+  [[ -n "$query" ]] && cat "$d/meta"
+  exit 0
+fi
+if [[ "$1" == s3 && "$2" == cp ]]; then
+  src="$3" dst="$4"; shift 4
+  size="" at=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --expected-size) size="$2"; shift ;; --metadata) at="${2#dumped-at=}"; shift ;; esac; shift
+  done
+  if [[ "$src" == - ]]; then
+    d=$(keydir "$dst"); mkdir -p "$d"
+    cat > "$d/content"
+    [[ -f "$S/upload_short" && -n "$size" ]] && size=$((size - 1))
+    echo "${size:-0} ${at:-None}" > "$d/meta"
+    echo $(( $(cat "$d/versions" 2>/dev/null || echo 0) + 1 )) > "$d/versions"
+    exit 0
+  fi
+  d=$(keydir "$src")
+  [[ -f "$d/content" ]] || { echo "download failed: $src (404)" >&2; exit 1; }
+  cat "$d/content"
+  exit 0
+fi
+echo "aws stub: unhandled $*" >&2
+exit 2

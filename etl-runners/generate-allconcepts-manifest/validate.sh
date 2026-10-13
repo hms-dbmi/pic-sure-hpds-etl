@@ -56,23 +56,24 @@ check "manifest has a version id" test -n "$(jq -r '.metrics.manifestVersionId /
 
 check "manifest copy archived" test -f "$MANIFEST"
 if [[ -f "$MANIFEST" ]]; then
-  check "header is study,consent,s3_uri,version_id,last_updated,md5" \
-    test "$(head -1 "$MANIFEST")" = "study,consent,s3_uri,version_id,last_updated,md5"
+  check "header is partition,s3_uri,version_id,last_updated,md5" \
+    test "$(head -1 "$MANIFEST")" = "partition,s3_uri,version_id,last_updated,md5"
   check "row count matches the report ($ROWS)" test "$(($(wc -l < "$MANIFEST") - 1))" -eq "$ROWS"
-  # The global AllConcepts row is always first; the rest are consent groups.
-  check "first row is the GLOBAL AllConcepts file" test "$(sed -n 2p "$MANIFEST" | cut -d, -f1)" = "GLOBAL"
-  check "exactly one GLOBAL row" test "$(tail -n +2 "$MANIFEST" | cut -d, -f1 | grep -c '^GLOBAL$' || true)" -eq 1
+  # The global AllConcepts row (partition "global") is always first; the rest are consent groups.
+  check "first row is the global AllConcepts file" test "$(sed -n 2p "$MANIFEST" | cut -d, -f1)" = "global"
+  check "exactly one global row" test "$(tail -n +2 "$MANIFEST" | cut -d, -f1 | grep -c '^global$' || true)" -eq 1
+  bad_partition=$(tail -n +3 "$MANIFEST" | cut -d, -f1 | grep -vc '^[^.,]\{1,\}\.c[^.,]\{1,\}$' || true)
+  check "every other partition is {study_id}.c{code}" test "$bad_partition" -eq 0
   check "at least one consent group listed" test "$ROWS" -gt 1
   # Values are unquoted unless they contain a comma; ids, URIs and hashes never do.
   # length() rather than a {32} interval: older mawk builds don't support intervals.
-  bad_md5=$(tail -n +2 "$MANIFEST" | awk -F, 'length($6) != 32 || $6 !~ /^[0-9a-f]+$/' | grep -c . || true)
+  bad_md5=$(tail -n +2 "$MANIFEST" | awk -F, 'length($5) != 32 || $5 !~ /^[0-9a-f]+$/' | grep -c . || true)
   check "every md5 is 32 hex characters" test "$bad_md5" -eq 0
-  # consent is blank only on the GLOBAL row.
-  blank=$(tail -n +2 "$MANIFEST" | awk -F, '$1=="" || ($2=="" && $1!="GLOBAL") || $3=="" || $4=="" || $5==""' | grep -c . || true)
+  blank=$(tail -n +2 "$MANIFEST" | awk -F, '$1=="" || $2=="" || $3=="" || $4==""' | grep -c . || true)
   check "no blank fields" test "$blank" -eq 0
-  dupes=$(tail -n +2 "$MANIFEST" | cut -d, -f1,2 | sort | uniq -d | grep -c . || true)
-  check "one row per study/consent" test "$dupes" -eq 0
-  not_s3=$(tail -n +2 "$MANIFEST" | cut -d, -f3 | grep -vc '^s3://' || true)
+  dupes=$(tail -n +2 "$MANIFEST" | cut -d, -f1 | sort | uniq -d | grep -c . || true)
+  check "one row per partition" test "$dupes" -eq 0
+  not_s3=$(tail -n +2 "$MANIFEST" | cut -d, -f2 | grep -vc '^s3://' || true)
   check "every s3_uri is an s3:// URI" test "$not_s3" -eq 0
 fi
 

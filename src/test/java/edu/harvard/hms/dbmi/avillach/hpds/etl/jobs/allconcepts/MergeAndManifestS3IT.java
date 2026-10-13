@@ -126,10 +126,10 @@ class MergeAndManifestS3IT extends AbstractIntegrationTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         HeadObjectResponse global = head("global_allconcepts/global_AllConcepts.csv");
         assertThat(get("allConcepts_manifest.csv")).isEqualTo(
-                "study,consent,s3_uri,version_id,last_updated,md5\n"
-                        + "GLOBAL,," + root() + "global_allconcepts/global_AllConcepts.csv," + global.versionId() + ","
+                "partition,s3_uri,version_id,last_updated,md5\n"
+                        + "global," + root() + "global_allconcepts/global_AllConcepts.csv," + global.versionId() + ","
                         + global.lastModified() + "," + md5("global\n") + "\n"
-                        + "phs000001,1," + root() + MERGED + "," + merged.versionId() + ","
+                        + "phs000001.c1," + root() + MERGED + "," + merged.versionId() + ","
                         + merged.lastModified() + "," + md5("a1\nb1\n") + "\n");
         assertThat(result.getMetrics()).containsEntry("manifestVersionId", head("allConcepts_manifest.csv").versionId());
     }

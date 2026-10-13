@@ -56,7 +56,7 @@ they resolve to siblings inside the same folder.
 | `hpds-etl-pipeline`                           | `Jenkinsfile`                                               |
 | `new-hpds-etl-participant-migration-pipeline` | `Jenkinsfile.migration`                                     |
 | `participant-db-start`                        | `etl-runners/participant-db/Jenkinsfile.start`              |
-| `participant-db-stop`                         | `etl-runners/participant-db/Jenkinsfile.stop`               |
+| `participant-db-backup`                       | `etl-runners/participant-db/Jenkinsfile.backup`             |
 | `participants-migration`                      | `etl-runners/participants-migration/Jenkinsfile`            |
 | `split-allconcepts`                           | `etl-runners/split-allconcepts/Jenkinsfile`                 |
 | `sstr-populate-rds-participants`              | `etl-runners/sstr-populate-rds-participants/Jenkinsfile`    |
@@ -99,7 +99,7 @@ gate and stopped in `post { always }`.
             Init ▸ Build JAR ▸ Pre-flight ▸ Package image
             ▸ Provision (require-db.sh, terraform apply) ▸ Monitor ▸ Fetch reports ▸ Validate
             post: terraform destroy, archive reports
-  post { always }: build job: participant-db-stop      PROMOTE_BACKUP = build SUCCESS/UNSTABLE
+  post { always }: build job: participant-db-backup    PROMOTE_BACKUP = build SUCCESS/UNSTABLE (DB stays up)
 ```
 
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
@@ -147,13 +147,13 @@ Properties of this model:
   is assumed. The only remaining assume is `generate-identity-consent-mapping`'s in-process
   `--role-arn` (the NHLBI exchange role), made by the instance role.
 - **No SSH.** Access is AWS SSM Session Manager only; no instance has a key pair.
-- **No long-lived ETL host.** The participant DB's credentials exist only while it is up: a
-  `600`-mode file on the Jenkins server, written by `participant-db-start` and deleted by
-  `participant-db-stop`. So the start, the stop, and every DB-backed runner job must run on the
-  same Jenkins node (see [Credential Handling](#credential-handling)).
+- **The participant DB lives on the Jenkins host**, as a long-lived PostgreSQL 16 container
+  started through the host's podman socket. Its credentials are a `600`-mode file on the Jenkins
+  server, written by `participant-db-start`, so the start, the backup, and every DB-backed runner
+  job must run on that node (see [Credential Handling](#credential-handling) and
+  [PARTICIPANT_DB.md](PARTICIPANT_DB.md)).
 - **Self-terminating runners.** A runner terminates whether the job succeeded, failed, was
-  OOM-killed, or had its spot capacity reclaimed. (The participant DB deliberately does not; see
-  [PARTICIPANT_DB.md](PARTICIPANT_DB.md).)
+  OOM-killed, or had its spot capacity reclaimed.
 - **Completion is a sentinel, not a log match.** `status.json` carries the job's exit code and is
   uploaded last, so its presence also proves every other artifact reached S3.
 
@@ -302,10 +302,9 @@ every provider sets `allowed_account_ids`, so an apply against the wrong account
 
 ### 1. Participant DB Credentials
 
-No AWS secret is needed, and none is created. The DB instance generates its password at boot and
-writes its connection details to a root-only file on itself once Postgres has restored.
-`participant-db-start` copies that file over SSM to a `600`-mode file on the Jenkins server, and
-`participant-db-stop` deletes it. Details in [PARTICIPANT_DB.md](PARTICIPANT_DB.md#credentials).
+No AWS secret is needed, and none is created. `participant-db-start` generates the app role's
+password when it creates the database container and writes the connection details to a
+`600`-mode file on the Jenkins server. Details in [PARTICIPANT_DB.md](PARTICIPANT_DB.md#credentials).
 
 ### 2. IAM
 
@@ -320,16 +319,16 @@ permissions it needs, derived from every AWS call the Jenkinsfiles, scripts, Ter
 | IAM console service | Actions | Resource | Why |
 |---|---|---|---|
 | EC2 | `ec2:Describe*` | `*` | Terraform's lookups and refreshes (AMI, subnet, VPC, instance, volumes, ENIs, instance types, attributes); `require-db.sh`, `wait-ready.sh`, `monitor-runner.sh`, the start job's reuse check |
-| EC2 | `ec2:RunInstances` | `*` | Launching the DB and every runner |
+| EC2 | `ec2:RunInstances` | `*` | Launching every runner |
 | EC2 | `ec2:CreateTags` | `*`, condition `ec2:CreateAction = RunInstances` | Tags applied at launch |
-| EC2 | `ec2:TerminateInstances` | instances tagged `ManagedBy=terraform` | `terraform destroy` of the DB and runners |
+| EC2 | `ec2:TerminateInstances` | instances tagged `ManagedBy=terraform` | `terraform destroy` of the runners |
 | EC2 | `ec2:ModifyInstanceAttribute` | instances tagged `ManagedBy=terraform` | The AWS provider re-applies `instance_initiated_shutdown_behavior` right after every launch that sets it (the runners' `terminate`), even though `RunInstances` already set it |
 | IAM | `iam:PassRole` | `bdc-etl-jenkins-role` | Launching instances with `bdc-etl-jenkins-temp-profile` |
-| Systems Manager | `ssm:SendCommand` | the instances **and** `document/AWS-RunShellScript` (both required) | DB backup, fetching the DB credentials, runner log tailing |
+| Systems Manager | `ssm:SendCommand` | the instances **and** `document/AWS-RunShellScript` (both required) | Runner log tailing |
 | Systems Manager | `ssm:GetCommandInvocation` | `*` (not resource-scopable) | Reading those commands' results |
-| S3 | see below | `bdc-etl-data-d0d6191` | Terraform state (`tf_backend/`), image upload, reports, logs, sentinels |
+| S3 | see below | `bdc-etl-data-d0d6191` | Terraform state (`tf_backend/`), image upload, reports, logs, sentinels, participant DB dumps and restores (`participant-db-start` / `-backup` run on the Jenkins server) |
 
-**Used by the instances** (DB and runners):
+**Used by the runner instances** (and, for S3, by the Jenkins server's participant DB jobs):
 
 | IAM console service | Actions | Resource | Why |
 |---|---|---|---|
@@ -338,8 +337,8 @@ permissions it needs, derived from every AWS call the Jenkinsfiles, scripts, Ter
 | Managed policy | `AmazonSSMManagedInstanceCore` (attach it; it is not in the service list) | | Registers the instances with SSM, without which `SendCommand` has nothing to deliver to |
 | STS | `sts:AssumeRole` | the NHLBI exchange roles | `generate-identity-consent-mapping` only; those roles must also trust `bdc-etl-jenkins-role` |
 
-S3 versioning must be **Enabled** on `bdc-etl-data-d0d6191`: `participant-db-stop` refuses to
-overwrite the restore point otherwise. If the root volumes are encrypted with a customer-managed KMS
+S3 versioning must be **Enabled** on `bdc-etl-data-d0d6191`: `participant-db-start` and
+`participant-db-backup` refuse to overwrite a dump otherwise. If the root volumes are encrypted with a customer-managed KMS
 key, launching also needs `kms:CreateGrant`, `kms:GenerateDataKeyWithoutPlaintext`, `kms:Decrypt`,
 and `kms:DescribeKey` on it.
 
@@ -388,9 +387,7 @@ Notes:
   `TerminateInstances` and `ModifyInstanceAttribute` above.
 - Any job pointed at a bucket other than `bdc-etl-data-d0d6191` needs that bucket added to both S3
   statements.
-- **Optional, for manual recovery only:** `ssm:StartSession` (connect to a database kept for
-  debugging), `ec2:StartInstances` (restart a stopped DB), `s3:GetObjectVersion` (restore an older
-  dump by hand).
+- **Optional, for manual recovery only:** `s3:GetObjectVersion` (restore an older dump by hand).
 - **Not needed** (the code no longer does these): Secrets Manager; creating or deleting instance
   profiles; `iam:PutRolePolicy` / `DeleteRolePolicy` / `GetRolePolicy`; creating, deleting, or
   authorizing security groups; `ssm:DescribeInstanceInformation`.
@@ -424,12 +421,12 @@ lets the runners reach Postgres, and so can anything else in that group.
 
 ### Credential Handling
 
-The DB password is generated on the DB instance at boot, and is new for each instance.
-`participant-db-start` reads it over SSM Run Command and saves it, mode `600` (directory `700`), at
-`${HPDS_ETL_CREDENTIALS_DIR:-$HOME/.hpds-etl}/participant-db-<ENV>.json` on the Jenkins server;
-`participant-db-stop` deletes that file. Because it is a local file, `participant-db-start`,
-`participant-db-stop`, and every DB-backed runner job must run on the same Jenkins node (all are
-`agent any`, which is fine on a single-node Jenkins).
+The DB password is generated by `participant-db-start` when it creates the database container (or
+re-issued if the saved one stops working), and saved, mode `600` (directory `700`), at
+`${HPDS_ETL_CREDENTIALS_DIR:-$HOME/.hpds-etl}/participant-db-<ENV>.json` on the Jenkins server.
+Because it is a local file, `participant-db-start`, `participant-db-backup`, and every DB-backed
+runner job must run on the same Jenkins node (all are `agent any`, which is fine on a single-node
+Jenkins).
 
 The DB-backed runners' `terraform plan`/`apply` read the file into `TF_VAR_db_credentials_json`
 inside the recipe shell, and the runner decodes it from its user data and writes the values to a
@@ -437,9 +434,9 @@ inside the recipe shell, and the runner decodes it from its user data and writes
 them out of the process table and `podman inspect`. `xtrace` is disabled in both bootstraps.
 
 The password is never printed to the Jenkins console, but it is **not** confined to Jenkins: it
-passes through SSM command output (kept in SSM's command history), and it is stored in each
-DB-backed runner's EC2 user data and Terraform state, including older versions of that state in
-the versioned `tf_backend` bucket. It stays valid only for the life of that one DB instance.
+is stored in each DB-backed runner's EC2 user data and Terraform state, including older versions
+of that state in the versioned `tf_backend` bucket. It stays valid until the database container is
+recreated, which issues a new one.
 
 ---
 
@@ -478,7 +475,8 @@ reload.
 A DB-backed runner job (`sstr-populate-rds-participants`, `participants-migration`,
 `split-allconcepts`, `generate-global-all-concepts`, `create-vcf-indexes`,
 `all-concepts-data-generator`) run on its own needs the participant DB up: run
-`participant-db-start` first and `participant-db-stop` afterwards. Without it, `require-db.sh`
+`participant-db-start` first (it leaves the database up; run `participant-db-backup` afterwards
+to save the runner's writes). Without it, `require-db.sh`
 fails the build before provisioning. For a manual single-study SSTR load, the per-study checks are
 job parameters on `sstr-populate-rds-participants`: `EXPECTED_CONSENT_CODES`,
 `EXPECTED_MIN_PARTICIPANTS`, and `INSTANCE_TYPE`.
@@ -544,11 +542,10 @@ Notes:
 
 ## Concurrency
 
-There is **one participant database per environment**. A `participant-db-start` that finds one
-already running reuses it (or, with `RESTART_DB_IF_RUNNING=true`, dumps and replaces it), so
-**do not run two pipelines at once in the same environment**: the second would share or replace
-the first's database, and whichever finishes first stops it under the other. See
-[PARTICIPANT_DB.md](PARTICIPANT_DB.md#when-a-database-is-already-running).
+There is **one participant database per environment**, kept up between runs. Nothing locks it,
+so **do not run two pipelines at once in the same environment**: they would interleave writes,
+and either one's end-of-run backup could capture the other's half-finished work. See
+[PARTICIPANT_DB.md](PARTICIPANT_DB.md).
 
 Study loads are **sequential by default** (`PARALLEL_STUDY_LOADS`, default `false`, on the
 permanent orchestrator). Parallel loads are correct but rarely worth it. Study scoping alone does
@@ -596,10 +593,10 @@ etl-runners/
 │  ├─ db-credentials-path.sh    where the participant DB credentials are saved on Jenkins
 │  ├─ require-db.sh             fails fast on the agent when the participant DB is down
 │  └─ validate-report.sh        assertions true of every JobResult report
-├─ participant-db/              SHARED: the per-pipeline Postgres server
-│  ├─ Jenkinsfile.start  Jenkinsfile.stop  Makefile  wait-ready.sh  backup-via-ssm.sh
-│  ├─ fetch-credentials.sh      copies the DB credentials from the instance to Jenkins (SSM)
-│  └─ terraform/                instance, user_data.sh.tpl, backup.sh.tpl
+├─ participant-db/              SHARED: the long-lived Postgres 16 container on the Jenkins host
+│  ├─ Jenkinsfile.start  Jenkinsfile.backup  Makefile  participant-db.conf
+│  ├─ lib.sh  start.sh  backup.sh   container, dump/restore, and start-decision logic
+│  └─ test/                     run-tests.sh + stub docker/aws
 ├─ participants-migration/            TEMPORARY
 ├─ split-allconcepts/                 TEMPORARY
 ├─ sstr-populate-rds-participants/    PERMANENT
@@ -641,13 +638,11 @@ etl-runners/
 The monitor gives up at `JOB_TIMEOUT_SECONDS` (default 7200) and exits 124. The instance still
 terminates itself. Check the tail of the runner log in S3 for the last phase reached.
 
-### Participant DB Left Running
+### Participant DB Backup Failed
 
-If an orchestrator ends with "participant-db-stop … ended FAILURE", the instance is still up and
-may hold writes no dump has captured. A failed build with `KEEP_DB_ON_FAILURE=true` (the default)
-leaves it up on purpose, for debugging. Re-run `participant-db-stop`; it backs up before
-destroying. The next pipeline reuses a database left running unless `RESTART_DB_IF_RUNNING=true`. See
-[PARTICIPANT_DB.md](PARTICIPANT_DB.md#recovery-and-troubleshooting).
+If an orchestrator ends with "participant-db-backup … ended FAILURE", that run's writes are only in
+the live database. Fix the cause and re-run `participant-db-backup` with the same
+`PROMOTE_BACKUP`. See [PARTICIPANT_DB.md](PARTICIPANT_DB.md#recovery-and-troubleshooting).
 
 ### Cost
 

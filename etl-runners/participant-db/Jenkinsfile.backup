@@ -1,0 +1,62 @@
+// =============================================================================
+// SHARED -- participant-db-backup
+//
+// Dumps the participant database to S3 at the end of a pipeline run, and leaves it running.
+//
+// PROMOTE_BACKUP decides where the dump goes. The orchestrators pass true only when the pipeline
+// succeeded (SUCCESS or UNSTABLE):
+//   true   overwrites backups/participant_db.tar, the latest clean backup
+//   false  overwrites backups/participant_db_not_promoted.tar and leaves participant_db.tar as it
+//          was; the live database is recorded as holding a failed run, so the next
+//          participant-db-start restores the clean backup unless IF_LAST_RUN_FAILED=continue
+// The bucket is versioned, so every overwrite keeps the previous dump as an older version.
+//
+// The dump is verified in S3 (size and dumped-at) before this job succeeds. If the database is
+// not up, nothing is dumped and the job fails; its data is still in the container's volume.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        disableConcurrentBuilds()
+        timeout(time: 3, unit: 'HOURS')
+    }
+
+    parameters {
+        booleanParam(name: 'PROMOTE_BACKUP', defaultValue: true,
+               description: 'Overwrite participant_db.tar (the latest clean backup) with this dump. False writes participant_db_not_promoted.tar instead. Orchestrators pass false when the pipeline failed or was aborted.')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
+    }
+
+    environment {
+        ENV        = "${params.ENV ?: 'development'}"
+        AWS_REGION = 'us-east-1'
+    }
+
+    stages {
+        stage('Back up') {
+            steps {
+                script {
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}" + (params.PROMOTE_BACKUP ? '' : ' (not promoted)')
+                }
+                sh "etl-runners/participant-db/backup.sh \"\$ENV\" ${params.PROMOTE_BACKUP}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo(params.PROMOTE_BACKUP
+                 ? "Backed up: participant_db.tar is the new clean backup for '${env.ENV}'."
+                 : "Backed up to participant_db_not_promoted.tar; participant_db.tar is unchanged.")
+        }
+        failure {
+            echo 'participant-db-backup FAILED: no verified dump of this run exists. The database is still up ' +
+                 'and holds the run\'s writes; fix the cause and re-run this job.'
+        }
+    }
+}

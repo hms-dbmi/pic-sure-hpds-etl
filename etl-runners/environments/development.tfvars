@@ -1,8 +1,9 @@
 # Shared infrastructure for the DEVELOPMENT environment (account 515157839325).
 #
-# Every ephemeral runner, and the participant-db stack, loads this file alongside its own
-# .tfvars so that account, network, and credential settings live in one place. Switch
-# environments by passing ENV=<name> to make (default: development).
+# Every ephemeral runner loads this file alongside its own .tfvars, and the participant-db scripts
+# read aws_region and participant_db_host from it, so that account, network, and credential
+# settings live in one place. Switch environments by passing ENV=<name> to make (default:
+# development).
 #
 # Data lives in the same account as the runners, so no cross-account role is assumed: every
 # instance does all S3 and SSM work as iam_role_name.
@@ -30,3 +31,9 @@ iam_instance_profile_name = "bdc-etl-jenkins-temp-profile"
 vpc_id                 = "vpc-0fcb0b3dc2167e8b4"
 subnet_id              = "subnet-03a30d72bd12478fc"
 vpc_security_group_ids = ["sg-0932143f21f7c533b"]
+
+# The participant database runs as a container on the Jenkins host (docs/PARTICIPANT_DB.md).
+# Runners connect to this address on port 5432: the Jenkins host's private IP or DNS name. Left
+# unset, participant-db-start reads it from instance metadata, which a container reaches only
+# when the instance's metadata hop limit is at least 2.
+# participant_db_host = "10.x.x.x"

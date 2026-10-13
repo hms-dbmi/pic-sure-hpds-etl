@@ -2,9 +2,9 @@
 // PERMANENT -- generate-allconcepts-manifest (JobType.PERMANENT)
 //
 // Writes {INPUT}/allConcepts_manifest.csv for production ingestion
-// (study, consent, s3_uri, version_id, last_updated, md5): first a GLOBAL row (blank consent) for
-// the current version of global_AllConcepts.csv, then one row per consent group of every study
-// marked ready in managed inputs, naming its MERGED allConcepts file.
+// (partition, s3_uri, version_id, last_updated, md5): first a "global" row for the current version
+// of global_AllConcepts.csv, then one row per consent group of every study marked ready in managed
+// inputs, partition {study_id}.c{code}, naming its MERGED allConcepts file.
 //
 // Runs last in both orchestrators, after generate-allconcepts-manifest. Before writing it verifies that every
 // ready consent group has a MERGED file built from exactly its current source files (the S3 version
