@@ -44,6 +44,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
@@ -269,8 +270,32 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             writeSourceReports(ctx, results);
             return new Output(results);
         } finally {
-            pool.shutdownNow();
+            // Studies still running are staging into stagingDir and holding open transactions.
+            awaitWorkers(pool);
             deleteRecursively(stagingDir);
+        }
+    }
+
+    /**
+     * Stops the pool and waits for every study already running to finish. Returns at once after
+     * a normal run, where all have; after a failure it waits however long they take, since a
+     * database call does not stop on interrupt. An interrupt while waiting is kept for the caller.
+     */
+    private void awaitWorkers(ExecutorService pool) {
+        pool.shutdownNow();
+        boolean interrupted = false;
+        while (true) {
+            try {
+                if (pool.awaitTermination(1, TimeUnit.MINUTES)) {
+                    break;
+                }
+                log.info("Waiting for in-flight studies to finish before removing the staging directory");
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
