@@ -25,6 +25,10 @@
         <java.version>25</java.version>
         <aws.sdk.version>2.52.1</aws.sdk.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <!-- Test JVMs size their GC and JIT thread pools for 4 CPUs instead of every core on the
+             host. The Jenkins container has a process/thread limit shared by every build;
+             .mvn/jvm.config does the same for the Maven JVM itself. -->
+        <test.jvm.args>-XX:ActiveProcessorCount=4</test.jvm.args>
     </properties>
 
     <dependencyManagement>
@@ -157,7 +161,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>
+                    <argLine>${test.jvm.args} -javaagent:${org.mockito:mockito-core:jar}</argLine>
                 </configuration>
             </plugin>
 
@@ -167,7 +171,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <configuration>
-                    <argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>
+                    <argLine>${test.jvm.args} -javaagent:${org.mockito:mockito-core:jar}</argLine>
                 </configuration>
                 <executions>
                     <execution>

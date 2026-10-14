@@ -1,0 +1,85 @@
+#!/bin/bash
+# Test stub for the aws CLI: S3 is a directory tree under $STUB_STATE/s3/<bucket>/<key>, and writing
+# a runner-pool task.json simulates the worker running it. State files under $STUB_STATE:
+#   instance_state           what ec2 describe-instances reports (default: running)
+#   head_error               a key substring whose head-object fails with 403 Forbidden
+#   scenario/<study_id>      the worker's outcome per attempt, space separated:
+#                              ok | warn | data | validation | infra | die | hang
+#   attempts/<study_id>      attempts so far (written here)
+#   <key>.size               overrides the size head-object reports for <key>
+S="$STUB_STATE"
+echo "aws $*" >> "$S/aws.log"
+path() { local u="${1#s3://}"; echo "$S/s3/$u"; }
+
+report() {   # report <dir> <run> <study> <kind>
+  local dir="$1" run="$2" sid="$3" kind="$4"
+  local status=SUCCESS exit=SUCCESS err=null rows=10 unmapped=0 consents='{"1": 7, "2": 3}'
+  case "$kind" in
+    warn) exit=SUCCESS_WITH_WARNINGS; unmapped=2 ;;
+    data) status=FAILED; exit=DATA_ERROR; err='"Mapping CSV at s3://b/m.csv contained no data rows"'; rows=0; consents='{}' ;;
+    validation) rows=0; consents='{}' ;;
+    infra) status=FAILED; exit=INFRASTRUCTURE_ERROR; err='"Delete from consents failed: connection refused"'; rows=0; consents='{}' ;;
+  esac
+  mkdir -p "$dir"
+  cat > "$dir/split-allconcepts-$run.json" <<JSON
+{"jobName": "split-allconcepts", "jobType": "MIGRATION", "runId": "$run", "exitCode": "$exit",
+ "status": "$status", "durationMillis": 1200, "errorMessage": $err,
+ "inputValidation": {"phase": "input", "issues": [], "counts": {"error": 0, "warning": 0, "info": 0}},
+ "outputValidation": {"phase": "output", "issues": [], "counts": {"error": 0, "warning": 0, "info": 0}},
+ "metrics": {"studyId": "$sid", "totalRows": $rows, "unmappedIds": $unmapped, "noConsentRows": 0,
+             "malformedRows": 0, "rowsPerConsent": $consents}}
+JSON
+  echo '{"job": "split-allconcepts"}' > "$dir/container-status.json"
+}
+
+simulate_worker() {   # the task file just written to <mailbox>/<instance>/task.json
+  local task="$1" run sid reports log kind n code
+  run=$(jq -r .runId "$task"); sid=$(jq -r .env.ETL_PARAM_study_id "$task")
+  reports="$S/s3/$(dirname "${task#$S/s3/}" | cut -d/ -f1)/$(jq -r .reportsPrefix "$task")"
+  log="$S/s3/$(dirname "${task#$S/s3/}" | cut -d/ -f1)/$(jq -r .logKey "$task")"
+  mkdir -p "$S/attempts"
+  n=$(( $(cat "$S/attempts/$sid" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/attempts/$sid"
+  kind=$(cut -d' ' -f"$n" "$S/scenario/$sid" 2>/dev/null); kind="${kind:-ok}"
+  rm -f "$task"   # claimed
+  mkdir -p "$(dirname "$log")"
+  echo "runner log for $run ($kind)" > "$log"
+  case "$kind" in
+    die)  echo terminated > "$S/instance_state"; return ;;
+    hang) return ;;
+  esac
+  report "$reports" "$run" "$sid" "$kind"
+  case "$kind" in ok|warn|validation) code=0 ;; data) code=3 ;; infra) code=4 ;; esac
+  instance=$(basename "$(dirname "$task")")
+  printf '{"runId": "%s", "instanceId": "%s", "phase": "done", "exitCode": %s, "exitName": "x"}\n' \
+    "$run" "$instance" "$code" > "$reports/status.json"
+}
+
+case "$1 $2" in
+  "ec2 describe-instances") cat "$S/instance_state" 2>/dev/null || echo running ;;
+  "ssm send-command") exit 255 ;;
+  "s3 ls") [[ -e "$(path "$3")" ]] || exit 1; echo "2026-01-01 00:00:00 1 $(basename "$3")" ;;
+  "s3 rm") rm -rf "$(path "$3")" ;;
+  "s3 sync")
+    src="$(path "$3")"; dst="$4"
+    [[ -d "$src" ]] || exit 0
+    mkdir -p "$dst"; cp -R "$src"/. "$dst"/ ;;
+  "s3 cp")
+    if [[ "$3" == - ]]; then
+      f="$(path "$4")"; mkdir -p "$(dirname "$f")"; cat > "$f"
+      [[ "$4" == */task.json && ! -f "$S/no_worker" ]] && simulate_worker "$f"
+      exit 0
+    fi
+    f="$(path "$3")"
+    [[ -f "$f" ]] || { echo "download failed: $3 An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 1; }
+    if [[ "$4" == - ]]; then cat "$f"; else cp "$f" "$4"; fi ;;
+  "s3api head-object")
+    bucket="" key=""
+    while [[ $# -gt 0 ]]; do case "$1" in --bucket) bucket="$2"; shift ;; --key) key="$2"; shift ;; esac; shift; done
+    if [[ -f "$S/head_error" && "$key" == *"$(cat "$S/head_error")"* ]]; then
+      echo "An error occurred (403) when calling the HeadObject operation: Forbidden" >&2; exit 255
+    fi
+    f="$S/s3/$bucket/$key"
+    [[ -f "$f" ]] || { echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 255; }
+    if [[ -f "$f.size" ]]; then cat "$f.size"; else wc -c < "$f" | tr -d ' '; fi ;;
+  *) echo "aws stub: unsupported: $*" >&2; exit 2 ;;
+esac

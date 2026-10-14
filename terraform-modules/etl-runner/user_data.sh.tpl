@@ -12,6 +12,15 @@
 #     presence means the run is over and every other artifact is already in S3
 #   - the instance always terminates -- normal completion, error, OOM kill, or spot reclaim
 #
+# Two modes:
+#   single (pool_prefix empty)  boot, run the one job Terraform rendered in, terminate.
+#   worker (pool_prefix set)    boot once, then run tasks from this instance's S3 mailbox,
+#                               s3://<bucket>/<pool_prefix>/<instance-id>/task.json, one at a time,
+#                               publishing each task's reports, log and status.json sentinel exactly
+#                               as a single run would. Terminates on a `stop` file in the mailbox,
+#                               after pool_idle_timeout seconds with no task, or on any boot failure.
+#                               See etl-runners/runner-pool/ and etl-runners/common/pool-dispatch.sh.
+#
 # xtrace is NOT enabled: this script handles database credentials, and `set -x` would echo them into the
 # log uploaded to S3.
 set -euo pipefail
@@ -29,6 +38,9 @@ exec > >(tee -a "$LOG") 2>&1
 
 STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 PHASE=boot
+POOL_PREFIX='${pool_prefix}'
+TASK_ACTIVE=0
+INSTANCE_ID=
 # Pre-seeded with the code this phase's failure should report. Bootstrap problems are
 # infrastructure (4) so Jenkins retries them; the job phase overwrites this.
 JOB_EXIT=4
@@ -54,6 +66,33 @@ imds() {
     "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true
 }
 
+# Worker mode: publishes the current task's reports, log and status.json sentinel (last), so its
+# split build sees exactly what a single run would publish.
+publish_task() {
+  local code=$1 phase=$2
+  cat > "$WORK/task-status.json" <<TASKSTATUSEOF
+{
+  "job": "$TASK_JOB",
+  "runId": "$TASK_RUN_ID",
+  "module": "${module_name}",
+  "instanceId": "$INSTANCE_ID",
+  "phase": "$phase",
+  "exitCode": $code,
+  "exitName": "$(exit_name "$code")",
+  "startedAt": "$TASK_STARTED",
+  "finishedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+TASKSTATUSEOF
+  aws s3 sync "$REPORTS" "s3://${stack_s3_bucket}/$TASK_REPORTS/" \
+    --region "${aws_region}" --no-progress || say "WARN: report sync failed"
+  aws s3 cp "$WORK/task.log" "s3://${stack_s3_bucket}/$TASK_LOG_KEY" \
+    --region "${aws_region}" --no-progress || say "WARN: task log upload failed"
+  aws s3 cp "$WORK/task-status.json" "s3://${stack_s3_bucket}/$TASK_REPORTS/status.json" \
+    --region "${aws_region}" --no-progress || say "WARN: task status upload failed"
+  shred -u "$WORK/task.env" 2>/dev/null || rm -f "$WORK/task.env"
+  TASK_ACTIVE=0
+}
+
 # Runs on every exit path. Publishes artifacts, then the sentinel, then terminates.
 finish() {
   set +e
@@ -61,6 +100,21 @@ finish() {
   instance_id=$(imds instance-id)
 
   say "Finishing: phase=$PHASE exit=$JOB_EXIT ($(exit_name "$JOB_EXIT"))"
+
+  if [[ -n "$POOL_PREFIX" ]]; then
+    # A task cut short by a crash still gets a sentinel, so its build fails now as an
+    # infrastructure error instead of waiting out its timeout.
+    if [[ "$TASK_ACTIVE" == 1 ]]; then
+      publish_task 4 "$PHASE"
+    fi
+    shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"
+    aws s3 cp "$LOG" "s3://${stack_s3_bucket}/etl-runner/logs/${module_name}-${run_id}-$instance_id.log" \
+      --region "${aws_region}" --no-progress || say "WARN: worker log upload failed"
+    sync
+    say "Terminating worker"
+    shutdown now
+    return
+  fi
 
   # Never leave credentials on a volume that could outlive an aborted terminate.
   shred -u "$ENV_FILE" 2>/dev/null || rm -f "$ENV_FILE"
@@ -185,6 +239,93 @@ gunzip -c /tmp/image.tar.gz | podman load
 rm -f /tmp/image.tar.gz
 
 # --------------------------------------------------------------------------
+%{ if pool_prefix != "" ~}
+PHASE=idle
+JOB_EXIT=4
+INSTANCE_ID=$(imds instance-id)
+if [[ -z "$INSTANCE_ID" ]]; then
+  say "ERROR: could not read this instance's id from instance metadata"
+  exit 4
+fi
+MAILBOX="s3://${stack_s3_bucket}/$POOL_PREFIX/$INSTANCE_ID"
+
+# Runs one task: validates it, builds its env file (the boot env minus the pool's own job
+# identity, plus the task's), runs the container, and publishes the results.
+run_task() {
+  TASK_RUN_ID=$(jq -r '.runId // empty' "$WORK/task.json")
+  TASK_JOB=$(jq -r '.env.ETL_JOB // empty' "$WORK/task.json")
+  TASK_REPORTS=$(jq -r '.reportsPrefix // empty' "$WORK/task.json")
+  TASK_LOG_KEY=$(jq -r '.logKey // empty' "$WORK/task.json")
+  TASK_STARTED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local safe='^[A-Za-z0-9._-]+$' safe_key='^[A-Za-z0-9._/-]+$'
+  if [[ ! "$TASK_RUN_ID" =~ $safe || ! "$TASK_JOB" =~ $safe \
+        || ! "$TASK_REPORTS" =~ $safe_key || ! "$TASK_LOG_KEY" =~ $safe_key \
+        || "$TASK_REPORTS" == *..* || "$TASK_LOG_KEY" == *..* ]]; then
+    say "ERROR: rejecting a malformed task (run id, job, reports prefix or log key)"
+    return 0
+  fi
+
+  TASK_ACTIVE=1
+  rm -rf "$REPORTS" && mkdir -p "$REPORTS"
+  : > "$WORK/task.log"
+  say "Task $TASK_RUN_ID: running $TASK_JOB"
+
+  # Only the job identity and job parameters may come from a task, one line each.
+  local bad
+  bad=$(jq -r '.env | to_entries[]
+    | select((.key | test("^(ETL_JOB|ETL_RUN_ID|ETL_PARAM_[A-Za-z0-9_]+)$") | not)
+             or ((.value | type) != "string") or (.value | test("[\\r\\n]")))
+    | .key' "$WORK/task.json" 2>/dev/null || echo "(unreadable env)")
+  if [[ -n "$bad" ]]; then
+    say "ERROR: task $TASK_RUN_ID has disallowed env entries: $bad"
+    publish_task 5 task
+    return 0
+  fi
+  ( umask 077
+    grep -v -E '^(ETL_JOB|ETL_RUN_ID|ETL_PARAM_[A-Za-z0-9_]*)=' "$ENV_FILE" > "$WORK/task.env"
+    jq -r '.env | to_entries[] | "\(.key)=\(.value)"' "$WORK/task.json" >> "$WORK/task.env" )
+
+  PHASE=job
+  set +e
+  podman run --rm \
+    --env-file "$WORK/task.env" \
+    -v "$REPORTS":/reports:Z \
+    "${image_name}" 2>&1 | tee -a "$WORK/task.log"
+  local code=$${PIPESTATUS[0]}
+  set -e
+  PHASE=idle
+  say "Task $TASK_RUN_ID: $TASK_JOB exited $code ($(exit_name "$code"))"
+  publish_task "$code" done
+}
+
+say "Worker ready; waiting for tasks in $MAILBOX/ (idle limit ${pool_idle_timeout}s)"
+IDLE_SINCE=$(date +%s)
+while true; do
+  if aws s3 ls "$MAILBOX/stop" --region "${aws_region}" >/dev/null 2>&1; then
+    say "Stop requested"
+    PHASE=stopped
+    JOB_EXIT=0
+    exit 0
+  fi
+  if aws s3 cp "$MAILBOX/task.json" "$WORK/task.json" --region "${aws_region}" --only-show-errors >/dev/null 2>&1; then
+    # Claimed: this mailbox has a single reader, and the dispatcher writes the next task only
+    # after this one's sentinel exists.
+    aws s3 rm "$MAILBOX/task.json" --region "${aws_region}" --only-show-errors || true
+    run_task
+    rm -f "$WORK/task.json"
+    IDLE_SINCE=$(date +%s)
+    continue
+  fi
+  if (( $(date +%s) - IDLE_SINCE >= ${pool_idle_timeout} )); then
+    say "No task for ${pool_idle_timeout}s; shutting down"
+    PHASE=idle-timeout
+    JOB_EXIT=0
+    exit 0
+  fi
+  sleep 10
+done
+%{ else ~}
+# --------------------------------------------------------------------------
 PHASE=job
 
 say "Running job ${job_name} (run ${run_id})"
@@ -201,3 +342,4 @@ say "Job ${job_name} exited $JOB_EXIT ($(exit_name "$JOB_EXIT"))"
 PHASE=done
 # The EXIT trap uploads artifacts and terminates the instance.
 exit "$JOB_EXIT"
+%{ endif ~}

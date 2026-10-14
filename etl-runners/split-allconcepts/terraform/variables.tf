@@ -67,8 +67,8 @@ variable "vpc_security_group_ids" {
 
 variable "root_volume_size" {
   type        = number
-  default     = 500
-  description = "Root EBS size in GiB. Holds the container image plus the per-consent temp spool, which totals roughly the input size (phs000200's legacy allConcepts is 34 GiB). Sized generously: the volume is ephemeral and gp3 is cheap, running out of disk mid-split is not."
+  default     = 50
+  description = "Root EBS size in GiB (Jenkins ROOT_VOLUME_GB). Holds the container image plus the per-consent temp spool, which totals roughly the input size (phs000200's legacy allConcepts is 34 GiB). The migration orchestrator passes twice the input plus 50 GiB, at least 100, for studies of SPLIT_LARGE_STUDY_GB or more; smaller studies run on the runner pool."
 }
 
 variable "db_credentials_json" {

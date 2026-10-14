@@ -16,6 +16,17 @@ The instance:
 - captures the container's exit code, syncs `/reports` and the full log to S3, and uploads
   `status.json` **last** as the completion sentinel
 - shuts itself down immediately afterwards (`instance_initiated_shutdown_behavior = terminate`)
+
+**Worker mode.** When `user_data_template_vars` sets `pool_prefix` (as
+[`etl-runners/runner-pool`](../../etl-runners/runner-pool/) does), the instance instead boots once and
+then runs tasks from its S3 mailbox, `s3://<stack_s3_bucket>/<pool_prefix>/<instance-id>/task.json`,
+one at a time. Each task names its job, run id and job parameters (see
+[`pool-dispatch.sh`](../../etl-runners/common/pool-dispatch.sh)) and is published exactly like a single
+run: reports and the `status.json` sentinel under `etl-runner/reports/<module>/<run-id>/`, the log at
+`etl-runner/logs/<module>-<run-id>.log`. A worker terminates on a `stop` file in its mailbox, after
+`pool_idle_timeout` seconds (default 1800) with no task, or on any boot failure; a task interrupted by
+a crash still gets a sentinel with exit 4. Only `ETL_JOB`, `ETL_RUN_ID` and single-line
+`ETL_PARAM_*` values are accepted from a task.
 - uses IMDSv2 (token required, hop limit 2 so the AWS SDK inside the container reaches the
   instance-role credentials it uses for **all** S3 I/O), an encrypted root volume, and no SSH
   key — access is SSM Session Manager only

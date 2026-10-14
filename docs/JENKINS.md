@@ -105,8 +105,8 @@ gate and stopped in `post { always }`.
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
 invoked with `SKIP_TESTS=true` so the same commit's suites are not re-run per study. Per-study
 jobs go further: each orchestrator builds the runner image once and passes it as
-`PREBUILT_IMAGE_TAR`, so the per-study builds (split, SSTR load, allConcepts generation) build
-nothing on the Jenkins host.
+`PREBUILT_IMAGE_TAR`, so the per-study builds (SSTR load, allConcepts generation, large splits)
+build nothing on the Jenkins host; smaller splits run on a runner pool with no per-study build at all.
 
 The orchestrator stops only a database it started itself (`DB_STARTED`), so a failed start —
 for example because another pipeline's database is already up — never tears down someone else's.
@@ -573,10 +573,14 @@ Loads that share subjects serialize on those rows anyway — the loser waits for
 transaction to commit — so parallelism buys least where studies overlap most, and sequential keeps
 the participant DB load predictable and the console log readable.
 
-The migration's `Split AllConcepts` stage runs its studies in **parallel**, at most
-`SPLIT_CONCURRENCY` (default 5) at a time: the split job only reads the participant DB (consents),
-so there is nothing to race on, and the cap keeps hundreds of ready studies from becoming hundreds
-of simultaneous builds and EC2 runners. The DB's `max_connections` (300) is far above that.
+The migration's `Split AllConcepts` stage runs its studies in **parallel**: the split job only reads
+the participant DB (consents), so there is nothing to race on. Studies are sized up front and run
+largest first, small ones on `SPLIT_CONCURRENCY` (default 5) long-lived runner-pool workers that the
+orchestrator feeds directly (no Jenkins build per study), large ones on their own right-sized
+instances, `SPLIT_LARGE_CONCURRENCY` (default 2) at a time. The stage ends with one consolidated
+report, `downstream-artifacts/split-allconcepts-report-<build-tag>.md` (see
+[MIGRATION_PIPELINE.md](MIGRATION_PIPELINE.md#stage-4-split-allconcepts)). The DB's
+`max_connections` (300) is far above that concurrency.
 
 ---
 

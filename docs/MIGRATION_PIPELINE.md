@@ -59,7 +59,7 @@ Build ▸ Tests
              │  uploaded by the orchestrator to {DATA_ROOT}/{study_id}/mappings/<build-tag>/
              ▼
 ┌─────────────────────────┐
-│  Split AllConcepts       │  (one runner per study, SPLIT_CONCURRENCY at a time)
+│  Split AllConcepts       │  (planned, largest first: runner pool + own instances for large)
 │  split-allconcepts       │
 └────────────┬────────────┘
              │  produces {study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv per consent
@@ -281,16 +281,93 @@ artifacts.
 
 **Job:** `split-allconcepts`
 **Class:** [`SplitAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/SplitAllConceptsJob.java)
-**Runs:** once per ready study, **in parallel**, at most `SPLIT_CONCURRENCY` (default 5) at a
-time (one runner each; the job only reads the database). A fixed pool of that many workers takes
-the next study as each finishes, so 600 ready studies still mean at most 5 split builds and 5 EC2
-runners at once.
+**Runs:** once per ready study. The stage is planned, then run in two lanes in parallel, largest
+studies first, then consolidated into one report. Every step is a script under
+[`etl-runners/split-allconcepts/`](../etl-runners/split-allconcepts/) with its own tests
+(`make -C etl-runners/split-allconcepts test`, also run in the Tests stage).
 
-**Runner image:** the orchestrator builds the runner image once, at the start of this stage, and
-passes it to every split build as `PREBUILT_IMAGE_TAR`; those builds skip their own JAR build and
-image packaging. Without this, each study would compile the JAR and build, save and upload the same
-image on the Jenkins host. The orchestrator deletes the image (S3 tarball, local tarball, and the
-host's podman image) in `post { always }`. Run standalone, `split-allconcepts` still builds its own.
+#### 1. Plan ([`plan-studies.sh`](../etl-runners/split-allconcepts/plan-studies.sh))
+
+One parallel pass of S3 HEAD requests checks and sizes every study's legacy allConcepts input, then
+orders the studies largest first, so the longest runs start first instead of trailing the stage.
+Each study gets a lane:
+
+| Lane | Which studies | Runs on |
+|---|---|---|
+| Runner pool | input under `SPLIT_LARGE_STUDY_GB` (default 5 GiB) | `SPLIT_CONCURRENCY` long-lived workers, one study after another |
+| Own instance | input of `SPLIT_LARGE_STUDY_GB` or more | a `split-allconcepts` build per study on a `SPLIT_LARGE_INSTANCE_TYPE` instance with a root volume of twice the input plus 50 GiB (at least 100), at most `SPLIT_LARGE_CONCURRENCY` at once |
+
+A study with no input, or an id that is not `phs######`, fails here and is not run. An S3 error
+other than not-found (access, network) stops the stage before anything is provisioned. The plan is
+archived as `downstream-artifacts/split-plan/` (`plan.tsv`, `missing.tsv`). With `PREFLIGHT_ONLY`,
+the stage stops after planning and fails if any study has no usable input.
+
+#### 2. Run
+
+**Runner image:** built once for the whole stage and used by both lanes (`PREBUILT_IMAGE_TAR`); the
+orchestrator deletes it (S3 tarball, local tarball, and the host's podman image) in `post { always }`.
+
+**Pool lane** ([`etl-runners/runner-pool`](../etl-runners/runner-pool/),
+[`run-pooled-study.sh`](../etl-runners/split-allconcepts/run-pooled-study.sh)): the workers boot,
+load the image and read the participant DB credentials once. The orchestrator itself hands each
+study to a free worker through that worker's S3 mailbox
+(`etl-runner/pools/<pool-id>/<instance-id>/task.json`, written by
+[`pool-dispatch.sh`](../etl-runners/common/pool-dispatch.sh)), waits on its status sentinel with
+`monitor-runner.sh`, fetches its reports and runs `validate.sh` on them. There is no Jenkins build per
+pool-lane study.
+
+- **Retries:** an exit 4 (infrastructure) is retried once on the same worker while it is running.
+- **A worker that dies** fails its current study and takes no more; the others carry on. If every
+  worker dies, the remaining pool-lane studies are recorded as not started.
+- **Teardown:** the pool is destroyed as soon as the last study finishes, and again (idempotently) in
+  `post { always }`. As a backstop, a worker with no task for 30 minutes terminates itself.
+- `SPLIT_USE_RUNNER_POOL=false` runs every study through its own `split-allconcepts` build instead,
+  `SPLIT_CONCURRENCY` at a time.
+
+**Own-instance lane:** a `split-allconcepts` build per study (its usual Terraform runner, retried once
+on exit 4), with `INSTANCE_TYPE`, `ROOT_VOLUME_GB` and `JOB_TIMEOUT_SECONDS` sized for it. Its reports
+are copied back and validated like a pool-lane study's.
+
+#### 3. One report ([`split-report.sh`](../etl-runners/split-allconcepts/split-report.sh))
+
+Every study, whichever lane ran it and however it ended, leaves the same files in
+`downstream-artifacts/split-allconcepts/<study_id>/`:
+
+| File | What it is |
+|---|---|
+| `study-result.json` | outcome (`SUCCESS`, `SUCCESS_WITH_WARNINGS`, `FAILED`, `NOT_STARTED`), the stage it failed in (`preflight`, `dispatch`, `run`, `validation`, `not-started`) and why, the runner's exit code and attempts, the job's metrics, `errorMessage` and issues, every failed validation check and warning, and where to look next (runner log, worker log or build URL, reports, re-run setting) |
+| `reports/` | the job's `split-allconcepts-<run-id>.json`, `container-status.json` and the runner's `status.json` (own-instance lane: under `build/etl-runners/split-allconcepts/reports/`) |
+| `validation.txt` | `validate.sh`'s output |
+| `monitor-attempt-<n>.log` | pool lane: the monitor's output per attempt, ending with the full runner log |
+
+These are consolidated into **`downstream-artifacts/split-allconcepts-report-<build-tag>.md`** and
+**`.json`**, archived on the orchestrator build as soon as the stage ends:
+
+- **`.json`** has the shape of every job report (`jobName`, `runId`, `status`, `exitCode`,
+  `inputValidation`, `outputValidation`, `metrics`, `errorMessage`) plus `studies`, each study's full
+  result. A failed or unstarted study is an `ERROR` issue in `outputValidation` (one with no usable
+  input, in `inputValidation`) and a study with warnings a `WARNING`, so
+  `etl-runners/common/validate-report.sh` checks it like any job report. `metrics` totals the
+  studies by outcome, lane, failure stage and exit code, plus rows, unmapped ids, rows without a
+  consent and retried studies.
+- **`.md`** is the version to read: the result and totals first, then **each failed study** with its
+  reason, the job's error, the failed checks, the runner exit code and attempts, the runner and worker
+  logs or build, its artifacts folder and the `STUDY_FILTER` value to re-run it, then the studies that
+  did not start or had warnings, then a table of every study.
+
+The console shows one `[<study_id>]` line per step for each study (the last 40 lines of the monitor
+output when an attempt fails), and the report's summary at the end. The stage fails if any study
+failed or did not start, and is unstable if any had warnings.
+
+#### Debugging one study
+
+1. Open the `.md` report on the orchestrator build; failed studies are at the top, each with its
+   reason and log locations.
+2. The study's folder in the build's artifacts (`downstream-artifacts/split-allconcepts/<study_id>/`)
+   has everything listed above.
+3. Re-run only that study with `STUDY_FILTER=<study_id>`, or run the `split-allconcepts` job on its own
+   for a single study on a fresh instance (it also accepts `POOL_INSTANCE_ID` and `POOL_MAILBOX` to
+   reuse a running pool worker).
 
 ### Input
 
@@ -336,8 +413,8 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
 
 - Rows with unmapped HPDS ids are logged as warnings and skipped
 - `CONTINUE_ON_STUDY_FAILURE` (default `true`) lets the remaining studies finish when one
-  fails; off, no new study is started after a failure (builds already running finish), and the
-  studies never started are reported as `NOT_BUILT`
+  fails; off, no new study is started after a failure (runs already in progress finish), and the
+  studies never started are recorded as `NOT_STARTED` in the report
 - `DATA_ROOT`, `ALL_CONCEPTS_OUTPUT`, and `VCF_INDEXES_OUTPUT` must
   be `s3://` URIs — checked before any split is scheduled
 
@@ -472,7 +549,13 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
 | `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
 | `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |
-| `SPLIT_CONCURRENCY` | `5` | Most split builds (and EC2 runners) at once; the other studies wait for a free slot |
+| `SPLIT_USE_RUNNER_POOL` | `true` | Run studies under `SPLIT_LARGE_STUDY_GB` on `SPLIT_CONCURRENCY` long-lived worker instances that take study after study, instead of one fresh instance per study |
+| `SPLIT_CONCURRENCY` | `5` | Runner-pool workers (at most 50); with the pool off, the most split builds at once |
+| `SPLIT_LARGE_STUDY_GB` | `5` | Studies with an input this large or larger run on their own right-sized instance; `0` sends every study to the pool |
+| `SPLIT_LARGE_CONCURRENCY` | `2` | Most large studies at once, alongside the pool |
+| `SPLIT_LARGE_INSTANCE_TYPE` | `r6i.xlarge` | Instance type for large studies |
+| `SPLIT_LARGE_TIMEOUT_SECONDS` | `14400` | Wait for one large study before failing it (exit 124) |
+| `SPLIT_POOL_TIMEOUT_SECONDS` | `3600` | Wait for one pool-lane study before failing it (exit 124); includes the worker's boot for its first study |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep splitting remaining studies when one fails |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
 | `PREFLIGHT_ONLY` | `false` | Validate inputs and stop without provisioning (see [Pre-flight Only](#pre-flight-only)) |

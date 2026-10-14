@@ -56,6 +56,9 @@ locals {
 
   template_vars = merge(
     {
+      # Worker mode is off unless a runner pool passes pool_prefix (etl-runners/runner-pool).
+      pool_prefix       = ""
+      pool_idle_timeout = 1800
       aws_region      = var.aws_region
       stack_s3_bucket = var.stack_s3_bucket
       module_name     = var.module_name
