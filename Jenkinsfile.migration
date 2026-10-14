@@ -57,7 +57,10 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
         // A migration is a one-off against shared tables. Never run two at once.
         disableConcurrentBuilds()
-        timeout(time: 8, unit: 'HOURS')
+        // A backstop only. Stuck runs are caught by each study's own timeout, which grows with its
+        // input (a 30 GiB+ allConcepts split can take many hours), and 600+ studies of participant
+        // migration and splitting take a long time end to end.
+        timeout(time: 72, unit: 'HOURS')
     }
 
     parameters {
@@ -112,9 +115,13 @@ pipeline {
         string(name: 'SPLIT_LARGE_INSTANCE_TYPE', defaultValue: 'r6i.xlarge',
                description: 'Instance type for large studies.')
         string(name: 'SPLIT_LARGE_TIMEOUT_SECONDS', defaultValue: '14400',
-               description: 'How long to wait for one large study before failing it (exit 124).')
+               description: 'Least time one large study gets before it is failed as stuck (exit 124). Its timeout grows with its input; see SPLIT_TIMEOUT_SECONDS_PER_GB.')
         string(name: 'SPLIT_POOL_TIMEOUT_SECONDS', defaultValue: '3600',
-               description: 'How long to wait for one pool-lane study before failing it (exit 124). Includes the worker\'s boot for its first study.')
+               description: 'Least time one pool-lane study gets before it is failed as stuck (exit 124), its worker then retired. Includes the worker\'s boot for its first study. Its timeout grows with its input; see SPLIT_TIMEOUT_SECONDS_PER_GB.')
+        string(name: 'SPLIT_TIMEOUT_BASE_SECONDS', defaultValue: '1800',
+               description: 'Size-scaled split timeout: this plus SPLIT_TIMEOUT_SECONDS_PER_GB per GiB of the study\'s allConcepts input, never less than its lane\'s minimum above.')
+        string(name: 'SPLIT_TIMEOUT_SECONDS_PER_GB', defaultValue: '600',
+               description: 'Seconds allowed per GiB of allConcepts input (default 10 minutes: a 30 GiB study gets 5.5 hours). Raise it if large studies time out while still making progress.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
@@ -332,8 +339,10 @@ pipeline {
                         error("SPLIT_LARGE_STUDY_GB must be a whole number of GiB (0 sends every study to the pool), got '${params.SPLIT_LARGE_STUDY_GB}'.")
                     }
                     int largeGb = params.SPLIT_LARGE_STUDY_GB.trim() as int
-                    positiveParam('SPLIT_POOL_TIMEOUT_SECONDS')
-                    positiveParam('SPLIT_LARGE_TIMEOUT_SECONDS')
+                    int poolTimeoutFloor  = positiveParam('SPLIT_POOL_TIMEOUT_SECONDS')
+                    int largeTimeoutFloor = positiveParam('SPLIT_LARGE_TIMEOUT_SECONDS')
+                    int timeoutBase       = positiveParam('SPLIT_TIMEOUT_BASE_SECONDS')
+                    int timeoutPerGb      = positiveParam('SPLIT_TIMEOUT_SECONDS_PER_GB')
 
                     // Everything about each study lands in <resultsDir>/<study_id>/ and is consolidated into
                     // one report at the end. A previous build's results in this workspace would otherwise
@@ -458,7 +467,7 @@ pipeline {
                                          "INPUT_BYTES=${s.input_bytes}", "MAPPING_URI=${s.mapping_uri}", "OUTPUT_URI=${dataRoot}",
                                          "RUN_ID=${runBase}-split-${s.study_id}", "POOL_INSTANCE=${poolInstance}",
                                          "POOL_MAILBOX=${env.POOL_MAILBOX_URI}", "POOL_LOG_PREFIX=${env.POOL_LOG_PREFIX}",
-                                         "PIPELINE_TIMEOUT=${params.SPLIT_POOL_TIMEOUT_SECONDS.trim()}",
+                                         "PIPELINE_TIMEOUT=${splitTimeoutSeconds(s.input_bytes, poolTimeoutFloor, timeoutBase, timeoutPerGb)}",
                                          "STUDY_OUT=${resultsDir}/${s.study_id}"]) {
                                     rc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/run-pooled-study.sh "$STUDY_OUT"')
                                 }
@@ -467,10 +476,12 @@ pipeline {
                                     progress.stop = true
                                     progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
                                 }
-                                // A dead worker takes no more studies; the others carry on.
-                                if (!ok && instanceState(poolInstance) != 'running') {
+                                // A dead worker takes no more studies, nor does one retired after a timeout
+                                // (exit 2), which may still be running the timed-out job; the others carry on.
+                                if (!ok && (rc == 2 || instanceState(poolInstance) != 'running')) {
                                     progress.liveWorkers = progress.liveWorkers - 1
-                                    echo "${workerName}: worker ${poolInstance} is no longer running, so it takes no more studies " +
+                                    def why = rc == 2 ? 'was retired after a timed-out study' : 'is no longer running'
+                                    echo "${workerName}: worker ${poolInstance} ${why}, so it takes no more studies " +
                                          "(${progress.liveWorkers} pool worker(s) left). Worker log: ${env.POOL_LOG_PREFIX}-${poolInstance}.log"
                                     break
                                 }
@@ -489,7 +500,8 @@ pipeline {
                                 long t0 = System.currentTimeMillis().intdiv(1000)
                                 def buildUrl = ''
                                 def buildReason = ''
-                                echo "[${s.study_id}] own instance (${large ? "large, ${s.volume_gb} GiB volume, ${params.SPLIT_LARGE_INSTANCE_TYPE.trim()}" : 'default size'})"
+                                def studyTimeout = splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)
+                                echo "[${s.study_id}] own instance (${large ? "large, ${s.volume_gb} GiB volume, ${params.SPLIT_LARGE_INSTANCE_TYPE.trim()}" : 'default size'}; timeout ${studyTimeout}s)"
                                 try {
                                     def downstream = build(
                                         job: params.SPLIT_ALLCONCEPTS_JOB,
@@ -505,7 +517,7 @@ pipeline {
                                             string(name: 'PREBUILT_IMAGE_TAR',  value: env.RUNNER_IMAGE_TAR ?: ''),
                                             string(name: 'INSTANCE_TYPE',       value: large ? params.SPLIT_LARGE_INSTANCE_TYPE.trim() : 'r6i.large'),
                                             string(name: 'ROOT_VOLUME_GB',      value: large ? s.volume_gb : '50'),
-                                            string(name: 'JOB_TIMEOUT_SECONDS', value: large ? params.SPLIT_LARGE_TIMEOUT_SECONDS.trim() : params.SPLIT_POOL_TIMEOUT_SECONDS.trim()),
+                                            string(name: 'JOB_TIMEOUT_SECONDS', value: "${splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)}"),
                                             string(name: 'ENV',                 value: params.ENV),
                                             booleanParam(name: 'SKIP_TESTS',     value: true),
                                             booleanParam(name: 'PREFLIGHT_ONLY', value: false),
@@ -569,10 +581,10 @@ pipeline {
                         stopRunnerPool()
                     }
 
-                    // Studies never started: the run was stopped early, or every pool worker died.
+                    // Studies never started: the run was stopped early, or every pool worker died or was retired.
                     for (s in plan.findAll { !(it.study_id in started) }) {
                         def why = progress.stopReason ?: (s.lane == 'pool' && progress.liveWorkers == 0
-                                    ? 'every runner-pool worker died before reaching it; see the worker logs'
+                                    ? 'every runner-pool worker died or was retired after a timeout before reaching it; see the worker logs'
                                     : 'no worker was left to run it')
                         withEnv(["R_OUT=${resultsDir}/${s.study_id}/study-result.json", "R_SID=${s.study_id}",
                                  "R_ABV=${s.abbreviation}", "R_LANE=${s.lane}", "R_REASON=not started: ${why}",
@@ -833,6 +845,16 @@ def backupParticipantDb(String backupJob, String envName) {
 }
 
 // The integer value of a positive whole-number parameter, or a clear error.
+// How long one split study may run before it is failed as stuck: grows with its allConcepts input
+// (whole GiB, rounded up), and is never less than its lane's minimum.
+def splitTimeoutSeconds(inputBytes, int floor, int base, int perGb) {
+    def raw = "${inputBytes ?: ''}".trim()
+    long bytes = raw ==~ /[0-9]+/ ? (raw as long) : 0L
+    long gib = (bytes + 1073741823L).intdiv(1073741824L)
+    long scaled = base + gib * perGb
+    return scaled > floor ? scaled : (long) floor
+}
+
 def positiveParam(String name) {
     def raw = "${params[name] ?: ''}".trim()
     if (!(raw ==~ /[1-9][0-9]{0,6}/)) {

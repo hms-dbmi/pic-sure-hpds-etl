@@ -16,6 +16,10 @@
 # The console gets one prefixed line per step, so parallel studies stay readable, and the last
 # 40 lines of the monitor output when an attempt fails.
 #
+# A run that times out may still be running on the worker, so the worker is terminated
+# (../common/pool-retire-worker.sh) and this script exits 2: the caller must give that worker no
+# more studies, even if terminating it failed.
+#
 # Usage: run-pooled-study.sh <out-dir>
 #
 # Environment (required):
@@ -30,7 +34,8 @@
 #   RETRY_DELAY         seconds before a retry (default 30)
 #   AWS_REGION          default us-east-1
 #
-# Exit: 0 succeeded | 10 succeeded with warnings | 1 failed (see study-result.json) | 64 usage
+# Exit: 0 succeeded | 10 succeeded with warnings | 1 failed (see study-result.json)
+#       2 failed and the worker is retired: give it no more studies | 64 usage
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +82,7 @@ while (( attempt < max_attempts )); do
   attempt=$((attempt + 1))
   run_id="$RUN_ID"; (( attempt > 1 )) && run_id="$RUN_ID-r$attempt"
 
-  say "attempt $attempt/$max_attempts: handing run $run_id to worker $POOL_INSTANCE"
+  say "attempt $attempt/$max_attempts: handing run $run_id to worker $POOL_INSTANCE (timeout ${PIPELINE_TIMEOUT}s)"
   if ! handoff=$("$COMMON/pool-dispatch.sh" "$POOL_INSTANCE" "$POOL_MAILBOX" split-allconcepts split-allconcepts \
                    "$run_id" study_id="$STUDY_ID" abbreviation="$ABBREVIATION" input="$INPUT_URI" \
                    mapping="$MAPPING_URI" output="$OUTPUT_URI" 2>"$OUT/dispatch.err"); then
@@ -109,6 +114,19 @@ while (( attempt < max_attempts )); do
   sleep "$RETRY_DELAY"
 done
 
+# A timed-out run may still be going on the worker. Handing that worker another study would start
+# the next study's clock while it cannot run, and refuse every study after that as "unclaimed".
+retired=false
+if [[ "$rc" == 124 ]]; then
+  retired=true
+  if "$COMMON/pool-retire-worker.sh" "$POOL_INSTANCE" "run $run_id of $STUDY_ID timed out" 2>&1 \
+       | sed "s/^/[$STUDY_ID]   /"; then
+    say "worker $POOL_INSTANCE terminated: it takes no more studies"
+  else
+    say "WARN: could not terminate worker $POOL_INSTANCE; it takes no more studies, but run $run_id may still be running on it"
+  fi
+fi
+
 # --- reports and validation --------------------------------------------------------------------
 mkdir -p "$OUT/reports"
 if ! aws s3 sync "$REPORTS_URI" "$OUT/reports" --region "$AWS_REGION" --no-progress --only-show-errors \
@@ -131,5 +149,6 @@ case "$outcome" in
   SUCCESS_WITH_WARNINGS) say "SUCCESS WITH WARNINGS (run $run_id): $(jq -r '.validation.warnings | join("; ")' "$OUT/study-result.json")"; exit 10 ;;
   *)                     say "FAILED (run $run_id): ${reason:-see $OUT/study-result.json}"
                          say "  runner log: ${LOG_URI:-unknown}${worker_log:+; worker log: $worker_log}"
+                         [[ "$retired" == true ]] && exit 2
                          exit 1 ;;
 esac

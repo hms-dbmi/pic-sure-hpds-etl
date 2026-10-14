@@ -2,6 +2,7 @@
 # Test stub for the aws CLI: S3 is a directory tree under $STUB_STATE/s3/<bucket>/<key>, and writing
 # a runner-pool task.json simulates the worker running it. State files under $STUB_STATE:
 #   instance_state           what ec2 describe-instances reports (default: running)
+#   terminate_error          ec2 terminate-instances fails with this message
 #   head_error               a key substring whose head-object fails with 403 Forbidden
 #   scenario/<study_id>      the worker's outcome per attempt, space separated:
 #                              ok | warn | data | validation | infra | die | hang
@@ -56,6 +57,9 @@ simulate_worker() {   # the task file just written to <mailbox>/<instance>/task.
 
 case "$1 $2" in
   "ec2 describe-instances") cat "$S/instance_state" 2>/dev/null || echo running ;;
+  "ec2 terminate-instances")
+    if [[ -f "$S/terminate_error" ]]; then cat "$S/terminate_error" >&2; exit 254; fi
+    echo shutting-down > "$S/instance_state" ;;
   "ssm send-command") exit 255 ;;
   "s3 ls") [[ -e "$(path "$3")" ]] || exit 1; echo "2026-01-01 00:00:00 1 $(basename "$3")" ;;
   "s3 rm") rm -rf "$(path "$3")" ;;

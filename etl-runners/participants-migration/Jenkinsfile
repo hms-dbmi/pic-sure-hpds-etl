@@ -60,7 +60,8 @@ pipeline {
         // Two concurrent migrations would write the same RDS tables from different
         // snapshots of the legacy export. Never allow it.
         disableConcurrentBuilds()
-        timeout(time: 4, unit: 'HOURS')
+        // Above JOB_TIMEOUT_SECONDS plus build, tests and provisioning: 600+ studies, growing monthly.
+        timeout(time: 14, unit: 'HOURS')
     }
 
     parameters {
@@ -80,8 +81,8 @@ pipeline {
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG. Appears in the report filename and the S3 report prefix.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
                description: 'Runner instance type. Memory-bound: a study\'s patient mapping and its SSTR or MULTI subject ids are joined in memory.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
-               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '43200',
+               description: 'How long to wait for the runner before giving up (monitor exits 124). Generous: every ready study, 600+ and growing, runs in this one job.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,

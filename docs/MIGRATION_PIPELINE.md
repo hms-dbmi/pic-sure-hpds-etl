@@ -319,6 +319,16 @@ pool-lane study.
 - **Retries:** an exit 4 (infrastructure) is retried once on the same worker while it is running.
 - **A worker that dies** fails its current study and takes no more; the others carry on. If every
   worker dies, the remaining pool-lane studies are recorded as not started.
+- **Timeouts grow with the input:** each study gets `SPLIT_TIMEOUT_BASE_SECONDS` plus
+  `SPLIT_TIMEOUT_SECONDS_PER_GB` per GiB of its allConcepts input (rounded up), and never less than
+  its lane's minimum (`SPLIT_POOL_TIMEOUT_SECONDS`, or `SPLIT_LARGE_TIMEOUT_SECONDS` for the
+  own-instance lane). With the defaults, a 4 GiB study gets 70 minutes, a 30 GiB one 5.5 hours and a
+  60 GiB one 10.5 hours. Each study logs the timeout it was given.
+- **A study that times out** may still be running on its worker, so
+  that worker is terminated ([`pool-retire-worker.sh`](../etl-runners/common/pool-retire-worker.sh))
+  and, like a dead one, takes no more studies -- even if terminating it failed. Otherwise the next
+  study's clock would start while it could not run, and every study after it would be refused at
+  dispatch.
 - **Teardown:** the pool is destroyed as soon as the last study finishes, and again (idempotently) in
   `post { always }`. As a backstop, a worker with no task for 30 minutes terminates itself.
 - `SPLIT_USE_RUNNER_POOL=false` runs every study through its own `split-allconcepts` build instead,
@@ -554,8 +564,10 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `SPLIT_LARGE_STUDY_GB` | `5` | Studies with an input this large or larger run on their own right-sized instance; `0` sends every study to the pool |
 | `SPLIT_LARGE_CONCURRENCY` | `2` | Most large studies at once, alongside the pool |
 | `SPLIT_LARGE_INSTANCE_TYPE` | `r6i.xlarge` | Instance type for large studies |
-| `SPLIT_LARGE_TIMEOUT_SECONDS` | `14400` | Wait for one large study before failing it (exit 124) |
-| `SPLIT_POOL_TIMEOUT_SECONDS` | `3600` | Wait for one pool-lane study before failing it (exit 124); includes the worker's boot for its first study |
+| `SPLIT_LARGE_TIMEOUT_SECONDS` | `14400` | Least time one large study gets before it is failed as stuck (exit 124) |
+| `SPLIT_POOL_TIMEOUT_SECONDS` | `3600` | Least time one pool-lane study gets before it is failed as stuck (exit 124) and its worker retired; includes the worker's boot for its first study |
+| `SPLIT_TIMEOUT_BASE_SECONDS` | `1800` | Size-scaled timeout: this plus `SPLIT_TIMEOUT_SECONDS_PER_GB` per GiB of input, never below the lane minimum above |
+| `SPLIT_TIMEOUT_SECONDS_PER_GB` | `600` | Seconds per GiB of allConcepts input (a 30 GiB study gets 5.5 hours); raise it if large studies time out while still progressing |
 | `CONTINUE_ON_STUDY_FAILURE` | `true` | Keep splitting remaining studies when one fails |
 | `RUN_INTEGRATION_TESTS` | `true` | Run Testcontainers IT suites |
 | `PREFLIGHT_ONLY` | `false` | Validate inputs and stop without provisioning (see [Pre-flight Only](#pre-flight-only)) |

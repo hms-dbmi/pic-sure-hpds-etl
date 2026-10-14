@@ -308,9 +308,15 @@ while true; do
     exit 0
   fi
   if aws s3 cp "$MAILBOX/task.json" "$WORK/task.json" --region "${aws_region}" --only-show-errors >/dev/null 2>&1; then
-    # Claimed: this mailbox has a single reader, and the dispatcher writes the next task only
-    # after this one's sentinel exists.
-    aws s3 rm "$MAILBOX/task.json" --region "${aws_region}" --only-show-errors || true
+    # Claimed only once it is gone from the mailbox: left there, it would run again after this
+    # run, and the dispatcher would refuse the next task as unclaimed. Until the delete succeeds
+    # the task is not run; the next poll claims it again. This mailbox has a single reader.
+    if ! aws s3 rm "$MAILBOX/task.json" --region "${aws_region}" --only-show-errors; then
+      say "WARN: could not remove the claimed task from $MAILBOX/; not running it until that succeeds"
+      rm -f "$WORK/task.json"
+      sleep 10
+      continue
+    fi
     run_task
     rm -f "$WORK/task.json"
     IDLE_SINCE=$(date +%s)

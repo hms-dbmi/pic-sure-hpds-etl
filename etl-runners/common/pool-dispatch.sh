@@ -58,10 +58,21 @@ for kv in "$@"; do
 done
 
 # One task at a time per worker: a task still in the mailbox means the worker has not picked up
-# the previous one, and overwriting it would silently drop a run.
-if aws s3 ls "$TASK_URI" --region "$REGION" >/dev/null 2>&1; then
-  die "worker $INSTANCE_ID still has an unclaimed task at $TASK_URI"
-fi
+# the previous one, and overwriting it would silently drop a run. Only S3's 404 means "no task":
+# any other error (throttling, network, credentials) is retried, and then refuses the dispatch
+# rather than risk the overwrite.
+TASK_KEY="${TASK_URI#s3://$BUCKET/}"
+attempts="${DISPATCH_CHECK_ATTEMPTS:-3}"
+for (( n = 1; ; n++ )); do
+  if err=$(aws s3api head-object --bucket "$BUCKET" --key "$TASK_KEY" --region "$REGION" 2>&1 >/dev/null); then
+    die "worker $INSTANCE_ID still has an unclaimed task at $TASK_URI"
+  fi
+  [[ "$err" == *"(404)"* || "$err" == *"Not Found"* ]] && break
+  if (( n >= attempts )); then
+    die "could not check $TASK_URI for an unclaimed task: $(tr '\n' ' ' <<<"$err")"
+  fi
+  sleep "${DISPATCH_CHECK_DELAY:-5}"
+done
 
 # A sentinel left by an earlier attempt with the same run id would read as this run's result.
 aws s3 rm "s3://$BUCKET/$REPORTS_PREFIX/status.json" --region "$REGION" --only-show-errors >/dev/null 2>&1 || true

@@ -56,9 +56,10 @@ pipeline {
         // Lets the migration orchestrator (Jenkinsfile.migration) copy this job's reports.
         copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
-        // Large studies run here on their own instance and can take hours; JOB_TIMEOUT_SECONDS
-        // bounds the run itself.
-        timeout(time: 12, unit: 'HOURS')
+        // Large studies run here on their own instance and can take many hours (30 GiB+ inputs);
+        // JOB_TIMEOUT_SECONDS, which the orchestrator scales with the input, bounds the run itself.
+        // This is only a backstop above it.
+        timeout(time: 48, unit: 'HOURS')
     }
 
     parameters {
@@ -273,6 +274,17 @@ pipeline {
                         ''')
 
                         env.JOB_EXIT_CODE = "${rc}"
+                        if (rc == 124) {
+                            // The timed-out run may still be going on the worker; the next study
+                            // handed to it could not start, and later ones would be refused.
+                            int retireRc = sh(returnStatus: true, script: '''
+                                etl-runners/common/pool-retire-worker.sh "$POOL_INSTANCE" "run $EFFECTIVE_RUN_ID timed out"
+                            ''')
+                            echo(retireRc == 0
+                                 ? "Pool worker ${env.POOL_INSTANCE} terminated after the timeout"
+                                 : "WARNING: could not terminate pool worker ${env.POOL_INSTANCE}; run ${env.EFFECTIVE_RUN_ID} " +
+                                   'may still be running on it. Give it no more studies.')
+                        }
                         if (rc != 4 || attempt == maxAttempts) {
                             break
                         }

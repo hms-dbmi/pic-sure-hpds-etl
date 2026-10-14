@@ -33,6 +33,7 @@ setup() {
     export PATH="$HERE/stubs:$PATH" AWS_REGION=us-east-1
     # monitor-runner.sh, without its waits
     export POLL_INTERVAL=0 GRACE_TIMEOUT=0 BOOT_TIMEOUT=5 PIPELINE_TIMEOUT=60 RETRY_DELAY=0
+    export DISPATCH_CHECK_DELAY=0
     export DATA_ROOT=s3://data/root
     unset LARGE_STUDY_GB RETRY_ON_INFRA POOL_LOG_PREFIX INPUT_BYTES STAGE_STARTED_EPOCH
 }
@@ -242,11 +243,28 @@ pooled_worker_that_dies_is_not_retried_and_points_at_its_logs() {
     expect_file_has "$T/out/phs000001/monitor-attempt-1.log" "Instance terminated without publishing a status sentinel"
 }
 
-pooled_hung_run_times_out() {
+pooled_hung_run_times_out_and_retires_its_worker() {
     PIPELINE_TIMEOUT=0 run_pooled phs000001 hang
-    expect_rc 1
+    expect_rc 2
     expect_eq "$(result .exitName)" TIMEOUT
     expect_eq "$(result .failureReason)" "TIMEOUT (exit 124): timed out waiting for the runner to finish"
+    expect_file_has "$STUB_STATE/aws.log" "ec2 terminate-instances --region us-east-1 --instance-ids i-0abc1234"
+    expect_out "worker i-0abc1234 terminated: it takes no more studies"
+}
+
+pooled_timeout_still_retires_the_worker_when_it_cannot_be_terminated() {
+    echo "An error occurred (UnauthorizedOperation) when calling the TerminateInstances operation" \
+        > "$STUB_STATE/terminate_error"
+    PIPELINE_TIMEOUT=0 run_pooled phs000001 hang
+    expect_rc 2
+    expect_out "UnauthorizedOperation"
+    expect_out "could not terminate worker i-0abc1234; it takes no more studies"
+}
+
+pooled_failure_other_than_a_timeout_leaves_the_worker_alone() {
+    run_pooled phs000001 data
+    expect_rc 1
+    if grep -q "terminate-instances" "$STUB_STATE/aws.log"; then fail "terminated the worker"; fi
 }
 
 pooled_busy_worker_fails_at_dispatch_without_overwriting_its_task() {
@@ -257,6 +275,18 @@ pooled_busy_worker_fails_at_dispatch_without_overwriting_its_task() {
     expect_eq "$(result .failureStage)" dispatch
     expect_out "still has an unclaimed task"
     expect_eq "$(jq -r .runId "$STUB_STATE/s3/data/etl-runner/pools/p1/i-0abc1234/task.json")" other
+}
+
+pooled_dispatch_that_cannot_check_for_a_pending_task_refuses_instead_of_overwriting() {
+    echo "pools/p1/i-0abc1234/task.json" > "$STUB_STATE/head_error"
+    run_pooled phs000001 ok
+    expect_rc 1
+    expect_eq "$(result .failureStage)" dispatch
+    expect_out "could not check s3://data/etl-runner/pools/p1/i-0abc1234/task.json for an unclaimed task"
+    expect_out "(403)"
+    # Retried before giving up, and never written.
+    expect_eq "$(grep -c "s3api head-object.*task.json" "$STUB_STATE/aws.log")" 3
+    [[ ! -e "$STUB_STATE/s3/data/etl-runner/pools/p1/i-0abc1234/task.json" ]] || fail "task.json was written"
 }
 
 pooled_requires_its_environment() {
