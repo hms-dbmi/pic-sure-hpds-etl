@@ -23,6 +23,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.slf4j.Logger;
+import org.slf4j.MDC;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -39,6 +40,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -92,6 +99,8 @@ import java.util.stream.Stream;
  *   <li>{@value #SUMMARY_REPORT}: the two above, for a person to read</li>
  * </ul>
  *
+ * <p>Studies are migrated {@code --parallelism} at a time (default {@value #DEFAULT_PARALLELISM}).
+ *
  * <p>Studies are processed independently: a data problem in one study (bad row, unmatched
  * id, no usable source) is recorded as a failure for that study only and does not stop the
  * rest of the run -- surfaced as an output-validation error so the run's exit code still
@@ -121,6 +130,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     private static final String SSTR_COL_SUBJECT_ID = "SUBJECT_ID";
     private static final String SSTR_COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
     private static final int DEFAULT_BATCH_SIZE = 1000;
+    private static final int DEFAULT_PARALLELISM = 4;
+    /**
+     * Each study in flight holds one pooled connection for its load, so more studies than
+     * connections would queue on the pool and fail on its timeout. Matches the default
+     * {@code spring.datasource.hikari.maximum-pool-size}.
+     */
+    private static final int MAX_PARALLELISM = 8;
     private static final int MAX_EXAMPLES = 10;
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
     private static final Pattern TABLE_ACCESSION = Pattern.compile("pht\\d+");
@@ -174,6 +190,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
                         ParamSpec.optional("batch-size", "Rows per batch insert", "1000"),
+                        ParamSpec.optional("parallelism",
+                                "Studies migrated at once (1-" + MAX_PARALLELISM + "; default "
+                                        + DEFAULT_PARALLELISM + "); each holds one database connection",
+                                "4"),
                         ParamSpec.optional("study-filter",
                                 "Comma-separated study ids to process; blank processes every ready study",
                                 "phs000200,phs000280")),
@@ -193,12 +213,24 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 report.error("BAD_BATCH_SIZE", "batch-size must be an integer, got: " + bs, "--batch-size");
             }
         });
+        ctx.get("parallelism").ifPresent(p -> {
+            try {
+                int n = Integer.parseInt(p);
+                if (n < 1 || n > MAX_PARALLELISM) {
+                    report.error("BAD_PARALLELISM", "parallelism must be between 1 and " + MAX_PARALLELISM
+                            + " (one database connection each), got: " + p, "--parallelism");
+                }
+            } catch (NumberFormatException e) {
+                report.error("BAD_PARALLELISM", "parallelism must be an integer, got: " + p, "--parallelism");
+            }
+        });
     }
 
     @Override
     protected Output execute(JobContext ctx) {
         String baseUri = ctx.require("data-folder");
         int batchSize = Integer.parseInt(ctx.get("batch-size", String.valueOf(DEFAULT_BATCH_SIZE)));
+        int parallelism = Integer.parseInt(ctx.get("parallelism", String.valueOf(DEFAULT_PARALLELISM)));
 
         List<ManagedInputRow> managedInputs = managedInputsService.read();
 
@@ -207,38 +239,129 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             log.info("Study filter active: only processing {}", studyFilter);
         }
 
+        // Two concurrent loads of one study would purge and rewrite the same consents, so a study
+        // listed twice is migrated once.
+        Map<String, ManagedInputRow> studies = new LinkedHashMap<>();
+        for (ManagedInputRow row : managedInputs) {
+            if (!row.isReady() || (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId()))) {
+                continue;
+            }
+            if (studies.putIfAbsent(row.studyId(), row) != null) {
+                log.warn("Study '{}' is listed more than once in the managed inputs; migrating it once",
+                        row.studyId());
+            }
+        }
+
         Path stagingDir;
         try {
             stagingDir = Files.createTempDirectory("migration-staging");
         } catch (IOException e) {
             throw new InfrastructureException("Failed to create staging directory", e);
         }
-        log.info("Staging data files to {}", stagingDir);
+        log.info("Staging data files to {}; migrating {} studies, {} at a time", stagingDir, studies.size(),
+                parallelism);
 
+        ExecutorService pool = Executors.newFixedThreadPool(parallelism,
+                Thread.ofPlatform().name("migrate-study-", 1).factory());
         try {
-            List<StudyResult> results = new ArrayList<>();
-            for (ManagedInputRow row : managedInputs) {
-                if (!row.isReady()) {
-                    continue;
-                }
-                if (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId())) {
-                    continue;
-                }
-                SourceTrace trace = new SourceTrace(row.studyId());
-                try {
-                    StudyFiles files = discoverStudyFiles(baseUri, row, stagingDir, trace);
-                    results.add(processStudy(row, files, batchSize, ctx, trace));
-                } catch (InfrastructureException | RunAbortedException e) {
-                    throw e;
-                } catch (Exception e) {
-                    log.error("Study '{}' failed during migration", row.studyId(), e);
-                    results.add(StudyResult.failed(row.studyId(), row.abv(), e.getMessage(), trace.snapshot()));
-                }
-            }
+            List<StudyResult> results = migrateAll(new ArrayList<>(studies.values()), baseUri, stagingDir,
+                    batchSize, ctx, pool);
             writeSourceReports(ctx, results);
             return new Output(results);
         } finally {
+            pool.shutdownNow();
             deleteRecursively(stagingDir);
+        }
+    }
+
+    /**
+     * Migrates every study on {@code pool}, returning results in input order. Studies share no
+     * state but the database, where each loads in its own transaction and writes rows in key order
+     * (see {@code BatchOps.upsertInChunks}), so two studies sharing a participant wait on each other
+     * rather than deadlock.
+     *
+     * <p>A failure that aborts the run (see {@link #abortUnlessDataFailure}) stops any study not yet
+     * started; studies already running finish, so none is left half-written. Of the studies that
+     * aborted, the earliest in input order is the one rethrown.
+     */
+    private List<StudyResult> migrateAll(List<ManagedInputRow> studies, String baseUri, Path stagingDir,
+                                         int batchSize, JobContext ctx, ExecutorService pool) {
+        Map<String, String> mdc = MDC.getCopyOfContextMap();
+        AtomicBoolean aborted = new AtomicBoolean();
+        AtomicInteger finished = new AtomicInteger();
+
+        List<Future<StudyOutcome>> futures = new ArrayList<>();
+        for (ManagedInputRow row : studies) {
+            futures.add(pool.submit(() -> {
+                if (aborted.get()) {
+                    return StudyOutcome.NOT_STARTED;
+                }
+                if (mdc != null) {
+                    MDC.setContextMap(mdc);
+                }
+                MDC.put("runId", ctx.runId() + "-" + row.studyId());
+                try {
+                    StudyResult result = migrateStudy(row, baseUri, stagingDir, batchSize, ctx);
+                    log.info("Study '{}' {} ({}/{} finished)", row.studyId(),
+                            result.success() ? "migrated" : "FAILED", finished.incrementAndGet(), studies.size());
+                    return new StudyOutcome(result, null);
+                } catch (RuntimeException e) {
+                    aborted.set(true);
+                    log.error("Study '{}' aborted the run; no further studies will start", row.studyId(), e);
+                    return new StudyOutcome(null, e);
+                } finally {
+                    MDC.clear();
+                }
+            }));
+        }
+
+        List<StudyResult> results = new ArrayList<>();
+        RuntimeException abort = null;
+        for (Future<StudyOutcome> future : futures) {
+            StudyOutcome outcome;
+            try {
+                outcome = future.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InfrastructureException("Interrupted while waiting for studies to finish", e);
+            } catch (ExecutionException e) {
+                // migrateStudy's RuntimeExceptions are caught in the task; this is an Error.
+                throw new IllegalStateException("A study worker failed", e.getCause());
+            }
+            if (outcome.result() != null) {
+                results.add(outcome.result());
+            } else if (abort == null && outcome.abort() != null) {
+                abort = outcome.abort();
+            }
+        }
+        if (abort != null) {
+            throw abort;
+        }
+        return results;
+    }
+
+    /** One study's worker result: its result, the failure that aborted the run, or neither if it never started. */
+    private record StudyOutcome(StudyResult result, RuntimeException abort) {
+        static final StudyOutcome NOT_STARTED = new StudyOutcome(null, null);
+    }
+
+    /**
+     * Migrates one study. A data problem fails the study and returns its result; a failure that
+     * aborts the run is thrown. Its staged files are deleted once it finishes either way.
+     */
+    private StudyResult migrateStudy(ManagedInputRow row, String baseUri, Path stagingDir, int batchSize,
+                                     JobContext ctx) {
+        SourceTrace trace = new SourceTrace(row.studyId());
+        try {
+            StudyFiles files = discoverStudyFiles(baseUri, row, stagingDir, trace);
+            return processStudy(row, files, batchSize, ctx, trace);
+        } catch (InfrastructureException | RunAbortedException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Study '{}' failed during migration", row.studyId(), e);
+            return StudyResult.failed(row.studyId(), row.abv(), e.getMessage(), trace.snapshot());
+        } finally {
+            deleteRecursively(stagingDir.resolve(row.studyId()));
         }
     }
 

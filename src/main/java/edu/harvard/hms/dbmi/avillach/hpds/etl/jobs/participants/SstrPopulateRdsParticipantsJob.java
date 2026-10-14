@@ -200,18 +200,21 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                     row.consent(), row.consentAbbreviation()));
             countsByConsentGroup.merge(row.consent(), 1L, Long::sum);
         }
-        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
+        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize,
+                ConsentRepository.KEY_ORDER);
 
         List<Sample> sampleRows = samplePairs.stream()
                 .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE))
                 .toList();
-        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
+        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize,
+                SampleRepository.KEY_ORDER);
 
         List<Sample> submittedSampleRows = submittedSamplePairs.stream()
                 .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
                 .toList();
         long submittedSamplesInserted =
-                BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize);
+                BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize,
+                SampleRepository.KEY_ORDER);
 
         log.info("Read {} row(s) for {} participant(s); {} new participant(s), {} consent row(s), "
                         + "{} dbGaP sample row(s) and {} submitted sample row(s) inserted",

@@ -282,6 +282,11 @@ SQL
             "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$DB_SCHEMA'" | tr -d '[:space:]')
         [[ "$has_schema" == 1 ]] || pdb_die "the restored dump has no '$DB_SCHEMA' schema (was it taken with --schema $DB_SCHEMA?)"
     fi
+    # A dump taken before ix_consents_study_id was added to schema.sql lacks it, and every study
+    # load's consents purge would then scan the whole table.
+    PDB_PSQL_DB="$DB_NAME" pdb_psql -c "SET ROLE \"$DB_USERNAME\";
+        CREATE INDEX IF NOT EXISTS ix_consents_study_id ON \"$DB_SCHEMA\".consents (study_id)" \
+        || pdb_die "could not create ix_consents_study_id"
     # Unqualified names resolve to the schema for the app role (the JAR also sets DB_SCHEMA).
     pdb_psql -c "ALTER ROLE \"$DB_USERNAME\" SET search_path TO \"$DB_SCHEMA\"" || pdb_die "could not set search_path"
     pdb_log "Row counts: $(PDB_PSQL_DB="$DB_NAME" pdb_psql -tA -F ' ' -c \

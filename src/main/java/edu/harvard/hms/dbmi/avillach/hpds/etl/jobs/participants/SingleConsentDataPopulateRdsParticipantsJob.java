@@ -212,14 +212,16 @@ public class SingleConsentDataPopulateRdsParticipantsJob
         List<Consent> consentRows = subjectIds.stream()
                 .map(id -> new Consent(idBySubject.get(id), studyId, consentCode, consentAbbreviation))
                 .toList();
-        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
+        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize,
+                ConsentRepository.KEY_ORDER);
 
         long samplesInserted = 0;
         if (subjectIdIsSampleId) {
             List<Sample> sampleRows = subjectIds.stream()
                     .map(id -> new Sample(idBySubject.get(id), id, studyId))
                     .toList();
-            samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
+            samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize,
+                SampleRepository.KEY_ORDER);
         }
 
         log.info("Read {} row(s) for {} distinct subject(s); {} new participant(s), {} consent row(s), "

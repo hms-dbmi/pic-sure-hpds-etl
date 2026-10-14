@@ -5,6 +5,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
+import org.mockito.stubbing.Answer;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.SimpleTransactionStatus;
@@ -25,7 +26,8 @@ import static org.mockito.Mockito.when;
 /**
  * Mocked repositories backed by in-memory lists, so unit tests can run the migration and its
  * sub-jobs end to end and assert on the rows they wrote without a database. Not transactional:
- * a job that fails after writing leaves its rows here, unlike against Postgres.
+ * a job that fails after writing leaves its rows here, unlike against Postgres. Every call is
+ * serialized on the store, since the migration loads studies from several threads.
  */
 final class InMemoryParticipantStore {
 
@@ -41,7 +43,7 @@ final class InMemoryParticipantStore {
 
     @SuppressWarnings("unchecked")
     InMemoryParticipantStore() {
-        when(participants.resolveOrCreate(any(), anyString(), anyInt())).thenAnswer(inv -> {
+        when(participants.resolveOrCreate(any(), anyString(), anyInt())).thenAnswer(locked(inv -> {
             Collection<String> ids = inv.getArgument(0);
             String source = inv.getArgument(1);
             Map<String, Long> resolved = new LinkedHashMap<>();
@@ -55,8 +57,8 @@ final class InMemoryParticipantStore {
                 resolved.put(id, participantIds.get(key));
             }
             return new ParticipantRepository.Resolution(resolved, inserted);
-        });
-        when(participants.findIdsChunked(anyList(), anyString(), anyInt())).thenAnswer(inv -> {
+        }));
+        when(participants.findIdsChunked(anyList(), anyString(), anyInt())).thenAnswer(locked(inv -> {
             List<String> ids = inv.getArgument(0);
             String source = inv.getArgument(1);
             Map<String, Long> found = new LinkedHashMap<>();
@@ -67,24 +69,32 @@ final class InMemoryParticipantStore {
                 }
             }
             return found;
-        });
-        when(consents.deleteByStudyId(anyString())).thenAnswer(inv -> {
+        }));
+        when(consents.deleteByStudyId(anyString())).thenAnswer(locked(inv -> {
             String studyId = inv.getArgument(0);
             purgedStudies.add(studyId);
             int before = consentRows.size();
             consentRows.removeIf(c -> c.studyId().equals(studyId));
             return before - consentRows.size();
-        });
-        when(consents.batchUpsert(anyList())).thenAnswer(inv -> {
+        }));
+        when(consents.batchUpsert(anyList())).thenAnswer(locked(inv -> {
             List<Consent> rows = inv.getArgument(0);
             consentRows.addAll(rows);
             return rows.size();
-        });
-        when(samples.batchUpsert(anyList())).thenAnswer(inv -> {
+        }));
+        when(samples.batchUpsert(anyList())).thenAnswer(locked(inv -> {
             List<Sample> rows = inv.getArgument(0);
             sampleRows.addAll(rows);
             return rows.size();
-        });
+        }));
+    }
+
+    private Answer<Object> locked(Answer<?> answer) {
+        return inv -> {
+            synchronized (this) {
+                return answer.answer(inv);
+            }
+        };
     }
 
     long hpdsId(String source, String sourceId) {

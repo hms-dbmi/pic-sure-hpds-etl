@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS consents (
     CONSTRAINT uq_consents_hpds_id_study UNIQUE (hpds_id, study_id)
 );
 CREATE INDEX IF NOT EXISTS ix_consents_hpds_id ON consents (hpds_id);
+-- Every study load starts with DELETE ... WHERE study_id = ?; the unique key leads with hpds_id,
+-- so without this index each delete scans the whole table.
+CREATE INDEX IF NOT EXISTS ix_consents_study_id ON consents (study_id);
 
 -- Table 3: samples
 -- Maps an HPDS id to potentially many source_sample_id/sample_source pairs.

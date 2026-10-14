@@ -25,6 +25,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -109,8 +110,14 @@ class ParticipantsMigrationJobTest {
     }
 
     private JobResult run(Map<String, String> files, String... managedRows) {
+        return run(Map.of(), files, managedRows);
+    }
+
+    private JobResult run(Map<String, String> extraParams, Map<String, String> files, String... managedRows) {
         String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + String.join("\n", managedRows) + "\n");
-        return executor.run(newJob(managed), Map.of("data-folder", baseUri(files)), "unit");
+        Map<String, String> params = new LinkedHashMap<>(extraParams);
+        params.put("data-folder", baseUri(files));
+        return executor.run(newJob(managed), params, "unit");
     }
 
     private JobResult runOneStudy(Map<String, String> rawData, String patientMapping) {
@@ -241,6 +248,48 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void migrates_several_studies_concurrently_and_reports_them_in_managed_inputs_order() {
+        Map<String, String> files = new LinkedHashMap<>();
+        List<String> rows = new ArrayList<>();
+        for (int i = 1; i <= 6; i++) {
+            String study = "phs00000" + i;
+            files.put(study + "/rawData/sstr_" + study + ".v1.txt", SSTR);
+            files.put(study + "/legacy/data/S" + i + "_PatientMapping.v2.csv", "1001,S" + i + ",900" + i + "\n");
+            rows.add("S" + i + "," + study + ",Yes");
+        }
+
+        JobResult result = run(Map.of("parallelism", "3"), files, rows.toArray(String[]::new));
+
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 6L).containsEntry("succeededStudies", 6L);
+        assertThat(result.getMetrics().get("sstrStudyIds"))
+                .isEqualTo(List.of("phs000001", "phs000002", "phs000003", "phs000004", "phs000005", "phs000006"));
+    }
+
+    @Test
+    void migrates_a_study_listed_twice_once() {
+        String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + "ABV2,phs000002,Yes\nABV2,phs000002,Yes\n");
+        String folder = baseUri(Map.of(
+                "phs000002/rawData/sstr_phs000002.v1.txt", SSTR,
+                "phs000002/legacy/data/ABV2_PatientMapping.v2.csv", "1001,ABV2,2002\n"));
+
+        JobResult result = executor.run(newJob(managed), Map.of("data-folder", folder), "unit-duplicate");
+
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L);
+    }
+
+    @Test
+    void rejects_parallelism_outside_one_to_eight() {
+        for (String bad : List.of("0", "9", "x")) {
+            JobResult result = executor.run(newJob("/unused.csv"),
+                    Map.of("data-folder", "/unused", "parallelism", bad), "unit-parallelism-" + bad);
+
+            assertThat(result.getExitCode()).as(bad).isEqualTo(ExitCode.VALIDATION_FAILED);
+            assertThat(result.getInputValidation().getIssues()).as(bad)
+                    .anyMatch(i -> i.code().equals("BAD_PARALLELISM"));
+        }
+    }
+
+    @Test
     void fails_study_when_patient_mapping_is_empty() {
         JobResult result = runOneStudy(Map.of(SSTR_NAME, SSTR), "");
 
@@ -292,7 +341,8 @@ class ParticipantsMigrationJobTest {
         files.put("phs000002/rawData/sstr_phs000002.v1.txt", SSTR);
         files.put("phs000002/legacy/data/B_PatientMapping.v2.csv", "1001,B,9001\n");
 
-        JobResult result = run(files, "A,phs000001,Yes", "B,phs000002,Yes");
+        // One at a time, so the second study is still queued when the first aborts the run.
+        JobResult result = run(Map.of("parallelism", "1"), files, "A,phs000001,Yes", "B,phs000002,Yes");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.UNKNOWN);
         assertThat(result.getErrorMessage())

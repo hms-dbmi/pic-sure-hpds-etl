@@ -40,6 +40,7 @@ module "etl_runner" {
       managed_inputs = var.managed_inputs_uri
       data_folder    = var.data_folder_uri
       batch_size     = var.batch_size
+      parallelism    = var.parallelism
     },
     var.study_filter != "" ? { study_filter = var.study_filter } : {}
   )

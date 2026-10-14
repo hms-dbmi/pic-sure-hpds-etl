@@ -249,7 +249,8 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
                     abbreviationByCode.getOrDefault(s.consentCode(), "")));
             countsByConsentGroup.merge(s.consentCode(), 1L, Long::sum);
         }
-        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
+        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize,
+                ConsentRepository.KEY_ORDER);
 
         List<Sample> dbgapSamples = new ArrayList<>();
         List<Sample> submittedSamples = new ArrayList<>();
@@ -281,8 +282,10 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
                                 + subjects.file() + " and were not loaded"));
             }
         }
-        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, dbgapSamples, batchSize);
-        long submittedSamplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, submittedSamples, batchSize);
+        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, dbgapSamples, batchSize,
+                SampleRepository.KEY_ORDER);
+        long submittedSamplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, submittedSamples, batchSize,
+                SampleRepository.KEY_ORDER);
 
         log.info("Study '{}': {} consented subject(s) from {} ({} new participant(s)), {} consent row(s), "
                         + "{} dbGaP sample row(s) and {} submitted sample row(s)",

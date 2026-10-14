@@ -6,6 +6,7 @@
 #   TF_VAR_managed_inputs_uri required
 #   TF_VAR_data_folder_uri    required
 #   TF_VAR_batch_size         optional (default 1000)
+#   TF_VAR_parallelism        optional (default 4)
 #   TF_VAR_name_suffix        optional (Jenkins BUILD_NUMBER)
 NAME := participants-migration
 

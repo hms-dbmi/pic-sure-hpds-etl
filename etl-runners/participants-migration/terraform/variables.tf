@@ -119,6 +119,12 @@ variable "batch_size" {
   description = "--batch-size: rows per batch insert"
 }
 
+variable "parallelism" {
+  type        = string
+  default     = "4"
+  description = "--parallelism: studies migrated at once (1-8); each holds one database connection"
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"
