@@ -171,8 +171,8 @@ dump of the legacy RDS database must be placed.
 | Managed inputs CSV | `--managed-inputs` | Study master list with readiness flags |
 | `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{study_id}/legacy/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id). Required |
 | `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
-| `{studyid}*Subject.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP subject table: the fallback source when there is no SSTR, or the SSTR is malformed. `#` preamble, then tab-delimited; `dbGaP_Subject_ID` plus a numeric consent column named `consent`, `consent_1217`, `consentcol` or `gencons` (any case) |
-| `{studyid}*Sample.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP sample table (optional, fallback only): `dbGaP_Subject_ID`, `dbGaP_Sample_ID`, usually `SAMPLE_ID` |
+| `{studyid}*Subject.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP subject table: the fallback source when there is no SSTR, or the SSTR is malformed. `#` preamble, then tab-delimited; `dbGaP_Subject_ID` (or the older `dbGaP SubjID`) plus a numeric consent column named `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code` or `consent_group` (any case, preferred in that order) |
+| `{studyid}*Sample.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP sample table (optional, fallback only): `dbGaP_Subject_ID`, `dbGaP_Sample_ID`, usually `SAMPLE_ID` (older releases: `dbGaP SubjID`, `dbGaP SampID`, `SAMPID`) |
 | `{studyid}*Subject.data_dict.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes |
 
 All rawData names are matched case-insensitively. When several MULTI files or dictionaries match,
@@ -270,7 +270,7 @@ Issue codes in the file issues report:
 | `NO_PARTICIPANT_SOURCE` | error | No usable SSTR and no Subject.MULTI; the study failed |
 | `MULTI_LOAD_FAILED` | error | The MULTI sub-job failed (e.g. no consent column, no consented subject); the study failed |
 | `MULTIPLE_SSTR_CANDIDATES`, `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named |
-| `MULTIPLE_CONSENT_COLUMNS` | warning | Several known consent headers; the first of `consent`, `consent_1217`, `consentcol`, `gencons` was used |
+| `MULTIPLE_CONSENT_COLUMNS` | warning | Several known consent headers; the first of `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code`, `consent_group` was used |
 | `CONSENT_ZERO_DROPPED` | info | Consent-0 subjects, dropped by design |
 | `BLANK_CONSENT`, `NON_NUMERIC_CONSENT`, `BLANK_DBGAP_SUBJECT_ID`, `CONFLICTING_CONSENT` | warning | Subject rows skipped (or, for a conflict, the first consent kept) |
 | `NO_SUBJECT_ID_COLUMN` | info | No `SUBJECT_ID`/`SUBJID`; patient mapping ids can only match the dbGaP id |

@@ -185,18 +185,31 @@ PHASE=install
 # SRCE RHEL9 golden image, initialised the way the pheno ETL environment's runners are
 # (avillach-jenkins-bdc-etl: pipelines/hpds-ingest/terraform/user_data.sh.integration.tpl):
 # podman is the container runtime, enabled through the SRCE startup config.
+# The SRCE yum mirror can answer 403 for a minute or so after the instance registers with
+# subscription management, which failed a whole run in the install phase. Retry before giving up.
+retry() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    "$@" && return 0
+    [ "$attempt" -lt 4 ] || break
+    say "WARN: '$*' failed (attempt $attempt/4); retrying in 30s"
+    sleep 30
+  done
+  return 1
+}
+
 say "SRCE golden image startup (podman)"
 echo "ENABLE_PODMAN=true" > /opt/srce/startup.config
 if [ -f /opt/srce/scripts/start-gsstools.sh ]; then
-  sh /opt/srce/scripts/start-gsstools.sh
+  retry sh /opt/srce/scripts/start-gsstools.sh
 fi
 say "SRCE golden image startup done"
 
 # No `dnf -y update`: the golden image is rebuilt monthly, and a full update on every boot of a
 # short-lived instance cost minutes. Only the packages below are installed.
 say "Installing runtime packages"
-dnf install -y podman jq
-command -v aws >/dev/null 2>&1 || dnf install -y awscli
+retry dnf install -y podman jq
+command -v aws >/dev/null 2>&1 || retry dnf install -y awscli
 
 # SSM only -- this instance has no SSH key. The Jenkins monitor tails the log through it.
 systemctl enable --now amazon-ssm-agent

@@ -67,7 +67,7 @@ class DbgapMultiFileReaderTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"consent", "CONSENT", "Consent_1217", "CONSENTCOL", "GenCons"})
+    @ValueSource(strings = {"consent", "CONSENT", "Consent_1217", "CONSENTCOL", "GenCons", "consent_code", "consent_group"})
     void accepts_every_known_consent_header_in_any_case(String header) {
         String path = file("s.txt", "dbGaP_Subject_ID\tSUBJID\t" + header + "\n1001\tS1\t1\n");
 
@@ -83,6 +83,31 @@ class DbgapMultiFileReaderTest {
         String path = file("s.txt", "DBGAP_SUBJECT_ID\tconsent\n1001\t1\n");
 
         assertThat(reader.readSubjects(path).consented()).containsOnlyKeys("1001");
+    }
+
+    @Test
+    void reads_the_older_dbgap_subjid_header() {
+        // As in phs000291's LHS_COPD_Subject.MULTI.txt.
+        String path = file("s.txt", "dbGaP SubjID\tSUBJID\tCONSENT\tSUBJ_SOURCE\n1001\tS1\t1\tX\n");
+
+        SubjectTable table = reader.readSubjects(path);
+
+        assertThat(table.consented()).containsOnlyKeys("1001");
+        assertThat(table.consented().get("1001").subjectId()).isEqualTo("S1");
+    }
+
+    @Test
+    void reads_the_newer_sstr_shaped_subject_file() {
+        // As in phs004183.v1.p1.pht1.Subject.MULTI.txt.
+        String path = file("s.txt", "dbgap_subject_id\tsubmitted_subject_id\tconsent_code\tconsent_abbreviation"
+                + "\tdbgap_sample_id\tsubmitted_sample_id\n1001\tS1\t1\tGRU\t5001\tNWD1\n");
+
+        SubjectTable table = reader.readSubjects(path);
+
+        assertThat(table.consentColumn()).isEqualTo("consent_code");
+        assertThat(table.subjectIdColumn()).isEqualTo("submitted_subject_id");
+        assertThat(table.consented().get("1001").consentCode()).isEqualTo("1");
+        assertThat(table.consented().get("1001").subjectId()).isEqualTo("S1");
     }
 
     @Test
@@ -288,6 +313,19 @@ class DbgapMultiFileReaderTest {
 
         assertThat(table.rows()).isEmpty();
         assertThat(issue(table.issues(), "NO_SAMPLE_ROWS").severity()).isEqualTo(Severity.WARNING);
+    }
+
+    @Test
+    void reads_the_older_dbgap_sampid_headers() {
+        String path = file("x.txt", "dbGaP SubjID\tdbGaP SampID\tSAMPID\n1001\t5001\tNWD1\n");
+
+        SampleTable table = reader.readSamples(path);
+
+        assertThat(table.rows()).singleElement().satisfies(r -> {
+            assertThat(r.dbgapSubjectId()).isEqualTo("1001");
+            assertThat(r.dbgapSampleId()).isEqualTo("5001");
+            assertThat(r.submittedSampleId()).isEqualTo("NWD1");
+        });
     }
 
     @Test

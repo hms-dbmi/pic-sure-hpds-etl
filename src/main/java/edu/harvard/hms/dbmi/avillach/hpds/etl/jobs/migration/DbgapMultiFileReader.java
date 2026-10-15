@@ -51,10 +51,21 @@ public class DbgapMultiFileReader {
     static final String COL_DBGAP_SUBJECT_ID = "dbGaP_Subject_ID";
     static final String COL_DBGAP_SAMPLE_ID = "dbGaP_Sample_ID";
     static final String COL_SUBMITTED_SAMPLE_ID = "SAMPLE_ID";
-    /** Consent column names seen across studies, most preferred first. Matched case-insensitively. */
-    static final List<String> CONSENT_COLUMNS = List.of("consent", "consent_1217", "consentcol", "gencons");
+    /** dbGaP subject id headers, most preferred first; older releases write {@code dbGaP SubjID}. */
+    static final List<String> DBGAP_SUBJECT_ID_COLUMNS = List.of(COL_DBGAP_SUBJECT_ID, "dbGaP SubjID");
+    /** dbGaP sample id headers, most preferred first; older releases write {@code dbGaP SampID}. */
+    static final List<String> DBGAP_SAMPLE_ID_COLUMNS = List.of(COL_DBGAP_SAMPLE_ID, "dbGaP SampID");
+    /** Submitted sample id headers, most preferred first. */
+    static final List<String> SUBMITTED_SAMPLE_ID_COLUMNS = List.of(COL_SUBMITTED_SAMPLE_ID, "SAMPID",
+            "submitted_sample_id");
+    /**
+     * Consent column names seen across studies, most preferred first. Matched case-insensitively.
+     * {@code consent_code} is the column in the newer, SSTR-shaped Subject.MULTI files.
+     */
+    static final List<String> CONSENT_COLUMNS = List.of("consent", "consent_1217", "consentcol", "gencons",
+            "consent_code", "consent_group");
     /** The study's own subject id, which a patient mapping file may use instead of the dbGaP id. */
-    static final List<String> SUBJECT_ID_COLUMNS = List.of("SUBJECT_ID", "SUBJID");
+    static final List<String> SUBJECT_ID_COLUMNS = List.of("SUBJECT_ID", "SUBJID", "submitted_subject_id", "subj_id");
     /** dbGaP's "did not consent / did not participate" group; never loaded. */
     static final String NOT_CONSENTED_CODE = "0";
 
@@ -93,7 +104,7 @@ public class DbgapMultiFileReader {
             for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
                 if (dbgapCol == null) {
                     Map<String, String> headers = headerIndex(row);
-                    dbgapCol = requireColumn(headers, COL_DBGAP_SUBJECT_ID, file);
+                    dbgapCol = requireColumn(headers, DBGAP_SUBJECT_ID_COLUMNS, file);
                     List<String> consentCols = CONSENT_COLUMNS.stream()
                             .map(c -> headers.get(c.toLowerCase(Locale.ROOT)))
                             .filter(c -> c != null)
@@ -108,10 +119,7 @@ public class DbgapMultiFileReader {
                                         + consentCols + "; using '" + consentCol + "'",
                                 context(file, consentCols.size(), consentCols)));
                     }
-                    subjectIdCol = SUBJECT_ID_COLUMNS.stream()
-                            .map(c -> headers.get(c.toLowerCase(Locale.ROOT)))
-                            .filter(c -> c != null)
-                            .findFirst().orElse(null);
+                    subjectIdCol = firstColumn(headers, SUBJECT_ID_COLUMNS);
                     if (subjectIdCol == null) {
                         tally.add(ValidationIssue.info("NO_SUBJECT_ID_COLUMN", file + ": no " + SUBJECT_ID_COLUMNS
                                 + " column; patient mapping rows can only be matched by " + COL_DBGAP_SUBJECT_ID));
@@ -183,9 +191,9 @@ public class DbgapMultiFileReader {
             for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
                 if (subjectCol == null) {
                     Map<String, String> headers = headerIndex(row);
-                    subjectCol = requireColumn(headers, COL_DBGAP_SUBJECT_ID, file);
-                    sampleCol = requireColumn(headers, COL_DBGAP_SAMPLE_ID, file);
-                    submittedCol = headers.get(COL_SUBMITTED_SAMPLE_ID.toLowerCase(Locale.ROOT));
+                    subjectCol = requireColumn(headers, DBGAP_SUBJECT_ID_COLUMNS, file);
+                    sampleCol = requireColumn(headers, DBGAP_SAMPLE_ID_COLUMNS, file);
+                    submittedCol = firstColumn(headers, SUBMITTED_SAMPLE_ID_COLUMNS);
                     if (submittedCol == null) {
                         tally.add(ValidationIssue.info("NO_SUBMITTED_SAMPLE_ID_COLUMN", file + ": no "
                                 + COL_SUBMITTED_SAMPLE_ID + " column; only dbGaP sample ids will be loaded"));
@@ -280,11 +288,20 @@ public class DbgapMultiFileReader {
         return index;
     }
 
-    private static String requireColumn(Map<String, String> headers, String column, String file) {
-        String actual = headers.get(column.toLowerCase(Locale.ROOT));
+    /** The first of {@code names} present in the row, as it appears there, or null. */
+    private static String firstColumn(Map<String, String> headers, List<String> names) {
+        return names.stream()
+                .map(c -> headers.get(c.toLowerCase(Locale.ROOT)))
+                .filter(c -> c != null)
+                .findFirst().orElse(null);
+    }
+
+    /** The first of {@code names} present in the row; the first name is the canonical one. */
+    private static String requireColumn(Map<String, String> headers, List<String> names, String file) {
+        String actual = firstColumn(headers, names);
         if (actual == null) {
-            throw new DataException(file + ": missing required column " + column + " (case-insensitive). Found: "
-                    + headers.values());
+            throw new DataException(file + ": missing required column " + names.get(0) + " (case-insensitive; also "
+                    + "accepted: " + names.subList(1, names.size()) + "). Found: " + headers.values());
         }
         return actual;
     }
