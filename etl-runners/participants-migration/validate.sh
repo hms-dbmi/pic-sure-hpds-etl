@@ -124,29 +124,50 @@ while IFS= read -r f; do
 done < <(find "$REPORTS" -maxdepth 1 -name '*_hpds_id_mapping.csv' | sort)
 check "one mapping CSV per succeeded study (found ${#MAPPINGS[@]})" test "${#MAPPINGS[@]}" -eq "$OK"
 
+# Every CSV is measured in ONE awk pass: with ~500 studies, the dozen processes per file this
+# used to start were most of validation's run time. Per file, awk prints (\037-separated, so an
+# empty field survives `read`): study, header, data rows, malformed new_hpds_ids, duplicated
+# old_hpds_ids, the first five of those, rows with a blank id. Blank lines are not rows.
+US=$'\037'
 # ${arr[@]+...} guard: under `set -u`, bash 3.2 treats an empty array's expansion as unbound.
-for csv in ${MAPPINGS[@]+"${MAPPINGS[@]}"}; do
-  study=$(basename "$csv" _hpds_id_mapping.csv)
-  header=$(head -1 "$csv")
-  rows=$(($(wc -l < "$csv") - 1))
-
+while IFS="$US" read -r study header rows bad_ids dupes dupe_examples blank; do
   check "$study: header is old_hpds_id,new_hpds_id,common_dbgap_id" \
     test "$header" = "old_hpds_id,new_hpds_id,common_dbgap_id"
   check "$study: has at least one mapping row" test "$rows" -gt 0
 
-  bad_ids=$(awk -F, -v re="$INTEGER_RE" 'NR>1 && $2 !~ re' "$csv" | grep -c . || true)
   check "$study: every new_hpds_id is an integer ($rows row(s))" test "$bad_ids" -eq 0
   [[ "$bad_ids" != "0" ]] && note "$bad_ids row(s) with a malformed hpds_id"
 
   # A duplicated legacy id would mean one old patient mapped to two new hpds ids -- the exact
   # corruption this migration exists to avoid.
-  dupes=$(tail -n +2 "$csv" | cut -d, -f1 | sort | uniq -d | grep -c . || true)
   check "$study: no duplicated old_hpds_id" test "$dupes" -eq 0
-  [[ "$dupes" != "0" ]] && note "duplicated old_hpds_id: $(tail -n +2 "$csv" | cut -d, -f1 | sort | uniq -d | head -5 | tr '\n' ' ')"
+  [[ "$dupes" != "0" ]] && note "duplicated old_hpds_id: $dupe_examples"
 
-  blank=$(awk -F, 'NR>1 && ($1=="" || $2=="" || $3=="")' "$csv" | grep -c . || true)
   check "$study: no blank ids" test "$blank" -eq 0
-done
+done < <(
+  [[ ${#MAPPINGS[@]} -eq 0 ]] || awk -v re="$INTEGER_RE" -v us="$US" '
+    BEGIN {
+      for (i = 1; i < ARGC; i++) {
+        f = ARGV[i]
+        study = f; sub(/^.*\//, "", study); sub(/_hpds_id_mapping\.csv$/, "", study)
+        header = ""; rows = 0; bad = 0; dupes = 0; examples = ""; blank = 0; first = 1
+        split("", seen)
+        while ((getline line < f) > 0) {
+          if (first) { header = line; first = 0; continue }
+          if (line == "") continue
+          rows++
+          n = split(line, col, ",")
+          if (col[2] !~ re) bad++
+          if (col[1] == "" || col[2] == "" || col[3] == "") blank++
+          # A blank old id is reported by the blank-id check, not as a duplicate.
+          if (col[1] != "" && seen[col[1]]++ == 1) { dupes++; if (dupes <= 5) examples = examples col[1] " " }
+        }
+        close(f)
+        print study us header us rows us bad us dupes us examples us blank
+      }
+      exit
+    }' ${MAPPINGS[@]+"${MAPPINGS[@]}"}
+)
 
 # --- sstr sub-reports ----------------------------------------------------
 # Studies with an sstr file are loaded by SstrPopulateRdsParticipantsJob, invoked in-process
@@ -174,9 +195,10 @@ for sub in ${SUBREPORTS[@]+"${SUBREPORTS[@]}"}; do
 
   fold_generic "$study: sstr sub-report checks" "$sub"
 
-  subjects=$(jq -r '.metrics.distinctParticipants // 0' "$sub")
-  consents=$(jq -r '.metrics.consentsWritten      // 0' "$sub")
-  rows_read=$(jq -r '.metrics.rowsRead            // 0' "$sub")
+  # Left empty for an unreadable report, so the checks below fail rather than pass on 0 == 0.
+  subjects=; consents=; rows_read=
+  IFS=$'\t' read -r subjects consents rows_read < <(jq -r '.metrics | [
+      .distinctParticipants // 0, .consentsWritten // 0, .rowsRead // 0] | @tsv' "$sub" 2>/dev/null) || true
 
   # The job writes exactly one consent row per distinct subject, and upserts them with
   # ON CONFLICT DO UPDATE (always 1 row affected), so this is an invariant, not a heuristic.
@@ -214,14 +236,15 @@ for sub in ${MULTI_REPORTS[@]+"${MULTI_REPORTS[@]}"}; do
 
   fold_generic "$study: multi sub-report checks" "$sub"
 
-  subjects=$(jq -r '.metrics.distinctParticipants // 0' "$sub")
-  consents=$(jq -r '.metrics.consentsWritten      // 0' "$sub")
-  dropped=$(jq -r '.metrics.notConsentedSubjects  // 0' "$sub")
+  subjects=; consents=; dropped=; samples_loaded=
+  IFS=$'\t' read -r subjects consents dropped samples_loaded < <(jq -r '.metrics | [
+      .distinctParticipants // 0, .consentsWritten // 0, .notConsentedSubjects // 0,
+      .sampleFileLoaded // false] | @tsv' "$sub" 2>/dev/null) || true
   check "$study: consentsWritten == distinctParticipants ($consents == $subjects)" \
     test "$consents" -eq "$subjects"
   check "$study: loaded at least one consented subject" test "$subjects" -gt 0
   [[ "$dropped" != "0" ]] && note "$study: $dropped consent-0 subject(s) dropped"
-  [[ "$(jq -r '.metrics.sampleFileLoaded // false' "$sub")" != "true" ]] && note "$study: no samples loaded (no usable Sample.MULTI)"
+  [[ "${samples_loaded:-false}" != "true" ]] && note "$study: no samples loaded (no usable Sample.MULTI)"
 done
 
 summary

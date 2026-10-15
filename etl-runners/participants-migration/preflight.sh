@@ -11,6 +11,7 @@
 #   TF_VAR_managed_inputs_uri   required   the --managed-inputs CSV
 #   TF_VAR_data_folder_uri      required   the --data-folder folder
 #   AWS_REGION                  optional   default us-east-1
+#   PREFLIGHT_PARALLELISM       optional   studies probed at once, default 16
 #
 # Exit: 0 clean | 10 clean but with warnings | 1 problems found
 set -uo pipefail
@@ -24,6 +25,7 @@ MANAGED_INPUTS="$(trim "$MANAGED_INPUTS")"
 DATA_FOLDER="${TF_VAR_data_folder_uri:?TF_VAR_data_folder_uri is required}"
 DATA_FOLDER="$(trim "$DATA_FOLDER")"
 REGION="${AWS_REGION:-us-east-1}"
+PARALLELISM="${PREFLIGHT_PARALLELISM:-16}"
 
 DATA_FOLDER="${DATA_FOLDER%/}"
 
@@ -69,7 +71,8 @@ if ! uri_exists "$MANAGED_INPUTS"; then
 fi
 
 MANIFEST=$(mktemp)
-trap 'rm -f "$MANIFEST"' EXIT
+PROBES=$(mktemp -d)
+trap 'rm -rf "$MANIFEST" "$PROBES"' EXIT
 read_uri "$MANAGED_INPUTS" > "$MANIFEST"
 
 # Parsed with python3's csv module rather than awk: the study list is a spreadsheet export, so
@@ -123,20 +126,23 @@ note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process
 #         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
 # A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
-echo ""
-echo "  Per-study inputs:"
-SSTR_STUDIES=0
-MULTI_STUDIES=0
-NO_SOURCE_STUDIES=0
+# Probing is two S3 round trips per study (~3s), and done one study at a time it took 28 minutes
+# for ~580 studies. probe_study runs PARALLELISM at once, each writing $PROBES/<n>; the results
+# are then printed in managed-inputs order, so the output reads exactly as a serial run's.
+# A probe record is \037-separated (an empty field must survive `read`): sstr file, Subject.MULTI,
+# Sample.MULTI, data dict, and 1/0 for whether the patient mapping exists.
+US=$'\037'
+READY_STUDIES="$PROBES/ready.tsv"
+awk -F'\t' '$3=="ready"' <<<"$STUDIES" > "$READY_STUDIES"
 
-while IFS=$'\t' read -r abv sid state; do
-  [[ "$state" != "ready" ]] && continue
+probe_study() {
+  local n="$1" abv sid state abv_upper mapping listing sstr_file subject_multi sample_multi data_dict mapping_ok
+  IFS=$'\t' read -r abv sid state < <(sed -n "${n}p" "$READY_STUDIES")
 
   abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
   mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
 
-  raw_data_dir="$DATA_FOLDER/${sid}/rawData"
-  listing=$(uri_ls "$raw_data_dir" 2>/dev/null || true)
+  listing=$(uri_ls "$DATA_FOLDER/${sid}/rawData" 2>/dev/null || true)
   # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
   # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
   # case-insensitively, preferring the canonical name -- mirrors the job's discovery.
@@ -147,6 +153,46 @@ while IFS=$'\t' read -r abv sid state; do
   subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
   sample_multi=$(grep -iE "^${sid}.*sample\.multi\.txt$" <<<"$listing" | head -1 || true)
   data_dict=$(grep -iE "^${sid}.*subject\.data_dict\.xml$" <<<"$listing" | head -1 || true)
+  uri_exists "$mapping" && mapping_ok=1 || mapping_ok=0
+
+  # Written whole, then renamed, so a probe that dies midway leaves no record at all.
+  printf '%s\n' "$sstr_file$US$subject_multi$US$sample_multi$US$data_dict$US$mapping_ok" > "$PROBES/$n.tmp" \
+    && mv "$PROBES/$n.tmp" "$PROBES/$n"
+}
+export -f probe_study uri_ls uri_exists
+export READY_STUDIES PROBES DATA_FOLDER REGION US
+
+READY_LINES=$(grep -c . "$READY_STUDIES" || true)
+if (( READY_LINES > 0 )); then
+  seq 1 "$READY_LINES" | xargs -P "$PARALLELISM" -I{} bash -c 'probe_study "$1"' _ {}
+fi
+
+# --- per-study files -----------------------------------------------------
+# Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
+#         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
+# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+# not a failure: the job still migrates every other study and reports the ones it could not.
+echo ""
+echo "  Per-study inputs:"
+SSTR_STUDIES=0
+MULTI_STUDIES=0
+NO_SOURCE_STUDIES=0
+n=0
+
+while IFS=$'\t' read -r abv sid state; do
+  n=$((n + 1))
+  abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
+  mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
+  raw_data_dir="$DATA_FOLDER/${sid}/rawData"
+
+  if [[ ! -f "$PROBES/$n" ]]; then
+    fail "$sid ($abv): could not probe its input files"
+    continue
+  fi
+  IFS="$US" read -r sstr_file subject_multi sample_multi data_dict mapping_ok < "$PROBES/$n"
 
   if [[ -n "$sstr_file" ]]; then
     SSTR_STUDIES=$((SSTR_STUDIES + 1))
@@ -166,8 +212,8 @@ while IFS=$'\t' read -r abv sid state; do
   fi
 
   # Required on every route; it supplies the old-hpds-id -> new-hpds-id pairs.
-  check "$sid ($abv, $route): $mapping" uri_exists "$mapping"
-done <<<"$STUDIES"
+  check "$sid ($abv, $route): $mapping" test "$mapping_ok" = 1
+done < "$READY_STUDIES"
 
 echo ""
 note "$SSTR_STUDIES study/studies will load from their SSTR, $MULTI_STUDIES from their MULTI files, "
