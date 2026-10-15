@@ -141,6 +141,21 @@ variable "study_filter" {
   description = "--study-filter: comma-separated study ids to process; blank processes every ready study"
 }
 
+variable "resume_from_run_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    --resume-from: run id of an earlier participants-migration run over the same data folder.
+    Studies it migrated successfully are copied from its reports instead of migrated again.
+    Blank migrates every study.
+  EOT
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]*$", var.resume_from_run_id))
+    error_message = "resume_from_run_id must be a run id: letters, digits, '.', '_' and '-' only."
+  }
+}
+
 variable "java_opts" {
   type        = string
   default     = "-XX:MaxRAMPercentage=75"

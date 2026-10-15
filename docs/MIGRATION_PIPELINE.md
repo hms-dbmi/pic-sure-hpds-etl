@@ -207,8 +207,21 @@ Read {ABV}_PatientMapping.v2.csv; join its id against the source's dbGaP subject
 or the study's own subject id (SSTR SUBJECT_ID / MULTI SUBJECT_ID or SUBJID)
         │
         ▼
-Write {studyid}_hpds_id_mapping.csv, then (once, for the run) the source and issue reports
+Write {studyid}_hpds_id_mapping.csv and studies/{studyid}.json, then (once, for the run)
+the source and issue reports
 ```
+
+Studies run `--parallelism` at a time, largest patient mapping first, so the biggest studies
+are not left running alone at the end; reports still list them in managed-inputs order.
+
+**Resuming.** The runner uploads its reports and log to S3 every five minutes while the job
+runs, so a run that times out or loses its instance still leaves the studies it finished. A new
+run with `RESUME_FROM_RUN_ID` (orchestrator: `PARTICIPANTS_RESUME_FROM_RUN_ID`) set to that run's
+id copies each study the earlier run migrated successfully, with its mapping file, instead of
+loading it again; studies it failed or never reached are migrated. A study the earlier run read
+from a different data folder is migrated again. An infrastructure-error retry (exit 4) resumes
+from the failed attempt automatically. Copied studies carry a `REUSED_FROM_PREVIOUS_RUN` issue
+and are listed in the `reusedStudyIds` metric.
 
 The MULTI sub-job writes the same rows the SSTR job would:
 
@@ -244,7 +257,10 @@ malformed SSTR or its MULTI files had problems.
   study and issue code, with severity, file, count and the first few examples
 - `participants_migration_file_report.md`: both of the above for a person to read, studies
   grouped by source and outcome
-- Metrics `sstrStudyIds`, `multiStudyIds`, `sstrFallbackStudyIds`, `noParticipantSourceStudyIds`
+- `studies/{studyid}.json`: each study's result and the data folder it came from, written as
+  the study finishes; what a resumed run reads back
+- Metrics `sstrStudyIds`, `multiStudyIds`, `sstrFallbackStudyIds`, `noParticipantSourceStudyIds`,
+  `reusedStudyIds`
 
 Issue codes in the file issues report:
 
@@ -268,7 +284,8 @@ Issue codes in the file issues report:
 | `CONSENT_CODE_NOT_DECODED` | warning | Codes the dictionary doesn't decode; their abbreviations are blank |
 | `CONSENT_LABEL_WITHOUT_ABBREVIATION` | warning | Labels with no trailing `(ABBREV)`; the full label was used |
 | `PATIENT_MAPPING_NOT_CONSENTED` | info | Patient mapping rows naming a consent-0 subject; not mapped |
-| `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped |
+| `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped (the log has one summary line per study, with the first few ids) |
+| `REUSED_FROM_PREVIOUS_RUN` | info | Copied from the `--resume-from` run, which migrated it; not loaded again |
 
 The orchestrator copies the mapping files from the runner's artifacts and uploads them, in one
 recursive copy, to `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot
@@ -545,6 +562,9 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders (see [S3 Layout](#s3-layout)); passed to `participants-migration` as `DATA_FOLDER`, used for the split input, mapping uploads, and split output (must be `s3://`) |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
 | `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready |
+| `PARTICIPANTS_PARALLELISM` | `4` | Studies migrated at once (1-8). Each wants about a vCPU on the participants runner, whose size is that job's `INSTANCE_TYPE` |
+| `PARTICIPANTS_RESUME_FROM_RUN_ID` | (blank) | Run id of an earlier participants-migration run over the same `DATA_ROOT` (e.g. `<build-tag>-participants` of one that timed out); studies it migrated are copied, not loaded again |
+| `PARTICIPANTS_TIMEOUT_SECONDS` | `43200` | How long participants-migration waits for its runner. Passed explicitly: a downstream job gets a parameter left out of the build call from its previous build, not its current Jenkinsfile |
 | `PARTICIPANTS_MIGRATION_JOB` | `participants-migration` | Participants runner job |
 | `SPLIT_ALLCONCEPTS_JOB` | `split-allconcepts` | Split runner job |
 | `ALL_CONCEPTS_JOB` | `generate-global-all-concepts` | Global AllConcepts runner job |

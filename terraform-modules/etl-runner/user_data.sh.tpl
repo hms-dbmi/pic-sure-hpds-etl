@@ -41,6 +41,8 @@ PHASE=boot
 POOL_PREFIX='${pool_prefix}'
 TASK_ACTIVE=0
 INSTANCE_ID=
+CHECKPOINT_PID=
+CHECKPOINT_STOP=$WORK/checkpoint.stop
 # Pre-seeded with the code this phase's failure should report. Bootstrap problems are
 # infrastructure (4) so Jenkins retries them; the job phase overwrites this.
 JOB_EXIT=4
@@ -93,9 +95,39 @@ TASKSTATUSEOF
   TASK_ACTIVE=0
 }
 
+# Single mode: uploads the reports and log every few minutes while the job runs, so a run cut
+# short (monitor timeout, lost instance) still leaves what it had finished in S3 -- for a
+# participants-migration rerun, the studies --resume-from can skip. Reports are written as
+# *.partial and renamed, so those are skipped. No status.json: that stays finish()'s alone.
+checkpoint_loop() {
+  while true; do
+    # Five minutes, in steps short enough that stop_checkpoints is never kept waiting long.
+    for _ in $(seq 60); do
+      [[ -f "$CHECKPOINT_STOP" ]] && return 0
+      sleep 5
+    done
+    aws s3 sync "$REPORTS" "s3://${stack_s3_bucket}/${reports_prefix}/" --exclude "*.partial" \
+      --region "${aws_region}" --no-progress --only-show-errors || say "WARN: checkpoint report sync failed"
+    [[ -f "$CHECKPOINT_STOP" ]] && return 0
+    aws s3 cp "$LOG" "s3://${stack_s3_bucket}/etl-runner/logs/${module_name}-${run_id}.log" \
+      --region "${aws_region}" --no-progress --only-show-errors || say "WARN: checkpoint log upload failed"
+  done
+}
+
+# Lets an upload in flight finish rather than killing it: an orphaned upload finishing after
+# finish()'s final copies would overwrite them with older ones.
+stop_checkpoints() {
+  if [[ -n "$CHECKPOINT_PID" ]]; then
+    touch "$CHECKPOINT_STOP"
+    wait "$CHECKPOINT_PID" 2>/dev/null || true
+    CHECKPOINT_PID=
+  fi
+}
+
 # Runs on every exit path. Publishes artifacts, then the sentinel, then terminates.
 finish() {
   set +e
+  stop_checkpoints
   local instance_id
   instance_id=$(imds instance-id)
 
@@ -133,7 +165,7 @@ finish() {
 }
 STATUSEOF
 
-  aws s3 sync "$REPORTS" "s3://${stack_s3_bucket}/${reports_prefix}/" \
+  aws s3 sync "$REPORTS" "s3://${stack_s3_bucket}/${reports_prefix}/" --exclude "*.partial" \
     --region "${aws_region}" --no-progress || say "WARN: report sync failed"
   aws s3 cp "$LOG" "s3://${stack_s3_bucket}/etl-runner/logs/${module_name}-${run_id}.log" \
     --region "${aws_region}" --no-progress || say "WARN: log upload failed"
@@ -335,6 +367,8 @@ done
 PHASE=job
 
 say "Running job ${job_name} (run ${run_id})"
+checkpoint_loop &
+CHECKPOINT_PID=$!
 set +e
 # :Z relabels the reports directory so the container may write it with SELinux enforcing.
 podman run --rm \
@@ -343,6 +377,7 @@ podman run --rm \
   "${image_name}"
 JOB_EXIT=$?
 set -e
+stop_checkpoints
 say "Job ${job_name} exited $JOB_EXIT ($(exit_name "$JOB_EXIT"))"
 
 PHASE=done

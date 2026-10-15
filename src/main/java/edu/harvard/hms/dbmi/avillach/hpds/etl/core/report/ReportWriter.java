@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 /**
  * Persists a {@link JobResult} as a JSON report artifact. Jenkins archives the reports
@@ -41,7 +42,11 @@ public class ReportWriter {
         try {
             Files.createDirectories(reportsDir);
             Path target = reportsDir.resolve(result.getJobName() + "-" + result.getRunId() + ".json");
-            mapper.writeValue(target.toFile(), result);
+            // Written aside and renamed: the runner uploads the reports directory while the job is
+            // still running, and must never pick up half a report.
+            Path partial = reportsDir.resolve(target.getFileName() + ".partial");
+            mapper.writeValue(partial.toFile(), result);
+            Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             log.info("Wrote report {}", target.toAbsolutePath());
             return target;
         } catch (IOException e) {

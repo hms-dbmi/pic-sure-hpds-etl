@@ -22,6 +22,9 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsP
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.MDC;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -29,8 +32,10 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -98,9 +103,16 @@ import java.util.stream.Stream;
  *       files were found, and why it fell back or failed</li>
  *   <li>{@value #ISSUES_REPORT}: every problem found while discovering or reading those files</li>
  *   <li>{@value #SUMMARY_REPORT}: the two above, for a person to read</li>
+ *   <li>{@code studies/{studyid}.json} per study, written as soon as it finishes, so a run that
+ *       dies part way still says which studies it completed</li>
  * </ul>
  *
- * <p>Studies are migrated {@code --parallelism} at a time (default {@value #DEFAULT_PARALLELISM}).
+ * <p>Studies are migrated {@code --parallelism} at a time (default {@value #DEFAULT_PARALLELISM}),
+ * largest patient mapping first, so the biggest studies are not left running alone at the end.
+ *
+ * <p>{@code --resume-from} names the reports directory of an earlier run of the same data folder.
+ * A study that run migrated successfully is not migrated again: its result and mapping file are
+ * copied into this run's reports instead. Studies it failed, or never reached, are migrated.
  *
  * <p>Studies are processed independently: a data problem in one study (bad row, unmatched
  * id, no usable source) is recorded as a failure for that study only and does not stop the
@@ -141,6 +153,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /** Unresolved patient-mapping ids named in the per-study log summary; the report lists them all. */
     private static final int UNRESOLVED_LOG_SAMPLE = 5;
     private static final int MAX_EXAMPLES = 10;
+    /** Holds one {@link StudyRecord} per finished study; what {@code --resume-from} reads back. */
+    static final String STUDY_RESULTS_DIR = "studies";
+    /** Reports are written here first and renamed, so a sync of the reports dir never copies half a file. */
+    static final String PARTIAL_SUFFIX = ".partial";
+    static final String REUSED_ISSUE = "REUSED_FROM_PREVIOUS_RUN";
+    private static final ObjectMapper RESULT_JSON = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
     private static final Pattern TABLE_ACCESSION = Pattern.compile("pht\\d+");
 
@@ -197,6 +216,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                 "Studies migrated at once (1-" + MAX_PARALLELISM + "; default "
                                         + DEFAULT_PARALLELISM + "); each holds one database connection",
                                 "4"),
+                        ParamSpec.optional("resume-from",
+                                "Reports directory of an earlier run over the same data folder; studies it "
+                                        + "migrated successfully are copied from it instead of migrated again",
+                                "s3://bucket/etl-runner/reports/participants-migration/<run-id>/"),
                         ParamSpec.optional("study-filter",
                                 "Comma-separated study ids to process; blank processes every ready study",
                                 "phs000200,phs000280")),
@@ -234,6 +257,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         String baseUri = ctx.require("data-folder");
         int batchSize = Integer.parseInt(ctx.get("batch-size", String.valueOf(DEFAULT_BATCH_SIZE)));
         int parallelism = Integer.parseInt(ctx.get("parallelism", String.valueOf(DEFAULT_PARALLELISM)));
+        String resumeFrom = Strings.trimToNull(ctx.get("resume-from", ""));
+        if (resumeFrom != null) {
+            log.info("Resuming from {}: studies it migrated successfully are copied, not migrated again", resumeFrom);
+        }
 
         List<ManagedInputRow> managedInputs = managedInputsService.read();
 
@@ -267,8 +294,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         ExecutorService pool = Executors.newFixedThreadPool(parallelism,
                 Thread.ofPlatform().name("migrate-study-", 1).factory());
         try {
-            List<StudyResult> results = migrateAll(new ArrayList<>(studies.values()), baseUri, stagingDir,
-                    batchSize, ctx, pool);
+            List<StudyResult> results = migrateAll(new ArrayList<>(studies.values()), baseUri, resumeFrom,
+                    stagingDir, batchSize, ctx, pool);
             writeSourceReports(ctx, results);
             return new Output(results);
         } finally {
@@ -302,7 +329,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     /**
-     * Migrates every study on {@code pool}, returning results in input order. Studies share no
+     * Migrates every study on {@code pool}, largest first, returning results in input order. Studies share no
      * state but the database, where each loads in its own transaction and writes rows in key order
      * (see {@code BatchOps.upsertInChunks}), so two studies sharing a participant wait on each other
      * rather than deadlock.
@@ -311,15 +338,15 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * started; studies already running finish, so none is left half-written. Of the studies that
      * aborted, the earliest in input order is the one rethrown.
      */
-    private List<StudyResult> migrateAll(List<ManagedInputRow> studies, String baseUri, Path stagingDir,
-                                         int batchSize, JobContext ctx, ExecutorService pool) {
+    private List<StudyResult> migrateAll(List<ManagedInputRow> studies, String baseUri, String resumeFrom,
+                                         Path stagingDir, int batchSize, JobContext ctx, ExecutorService pool) {
         Map<String, String> mdc = MDC.getCopyOfContextMap();
         AtomicBoolean aborted = new AtomicBoolean();
         AtomicInteger finished = new AtomicInteger();
 
-        List<Future<StudyOutcome>> futures = new ArrayList<>();
-        for (ManagedInputRow row : studies) {
-            futures.add(pool.submit(() -> {
+        Map<String, Future<StudyOutcome>> futures = new HashMap<>();
+        for (ManagedInputRow row : largestFirst(studies, baseUri, pool)) {
+            futures.put(row.studyId(), pool.submit(() -> {
                 if (aborted.get()) {
                     return StudyOutcome.NOT_STARTED;
                 }
@@ -328,7 +355,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 }
                 MDC.put("runId", ctx.runId() + "-" + row.studyId());
                 try {
-                    StudyResult result = migrateStudy(row, baseUri, stagingDir, batchSize, ctx);
+                    StudyResult result = migrateStudy(row, baseUri, resumeFrom, stagingDir, batchSize, ctx);
                     log.info("Study '{}' {} ({}/{} finished)", row.studyId(),
                             result.success() ? "migrated" : "FAILED", finished.incrementAndGet(), studies.size());
                     return new StudyOutcome(result, null);
@@ -344,10 +371,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         List<StudyResult> results = new ArrayList<>();
         RuntimeException abort = null;
-        for (Future<StudyOutcome> future : futures) {
+        for (ManagedInputRow row : studies) {
             StudyOutcome outcome;
             try {
-                outcome = future.get();
+                outcome = futures.get(row.studyId()).get();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new InfrastructureException("Interrupted while waiting for studies to finish", e);
@@ -367,28 +394,135 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return results;
     }
 
+    /**
+     * The studies ordered by the size of their patient mapping, largest first: a cheap stand-in for
+     * how long each takes, read with one request per study. A study whose mapping can't be sized
+     * goes last; it fails quickly anyway.
+     */
+    private List<ManagedInputRow> largestFirst(List<ManagedInputRow> studies, String baseUri, ExecutorService pool) {
+        Map<String, Future<Long>> lookups = new HashMap<>();
+        for (ManagedInputRow row : studies) {
+            lookups.put(row.studyId(), pool.submit(() -> {
+                try {
+                    return io.size(patientMappingUri(baseUri, row));
+                } catch (RuntimeException e) {
+                    log.warn("Study '{}': could not size its patient mapping ({}); scheduling it last",
+                            row.studyId(), e.getMessage());
+                    return -1L;
+                }
+            }));
+        }
+        Map<String, Long> sizes = new HashMap<>();
+        for (Map.Entry<String, Future<Long>> lookup : lookups.entrySet()) {
+            try {
+                sizes.put(lookup.getKey(), lookup.getValue().get());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InfrastructureException("Interrupted while sizing studies", e);
+            } catch (ExecutionException e) {
+                throw new IllegalStateException("Sizing a study failed", e.getCause());
+            }
+        }
+        List<ManagedInputRow> ordered = studies.stream()
+                .sorted(Comparator.comparingLong((ManagedInputRow r) -> sizes.get(r.studyId())).reversed())
+                .toList();
+        log.info("Migrating largest patient mappings first: {}", ordered.stream().limit(5)
+                .map(r -> r.studyId() + " (" + sizes.get(r.studyId()) + " bytes)").toList());
+        return ordered;
+    }
+
     /** One study's worker result: its result, the failure that aborted the run, or neither if it never started. */
     private record StudyOutcome(StudyResult result, RuntimeException abort) {
         static final StudyOutcome NOT_STARTED = new StudyOutcome(null, null);
     }
 
     /**
-     * Migrates one study. A data problem fails the study and returns its result; a failure that
-     * aborts the run is thrown. Its staged files are deleted once it finishes either way.
+     * Migrates one study, or copies it from {@code resumeFrom} when that run migrated it. A data
+     * problem fails the study and returns its result; a failure that aborts the run is thrown. Its
+     * result is written to {@value #STUDY_RESULTS_DIR}/ and its staged files deleted once it finishes.
      */
-    private StudyResult migrateStudy(ManagedInputRow row, String baseUri, Path stagingDir, int batchSize,
-                                     JobContext ctx) {
+    private StudyResult migrateStudy(ManagedInputRow row, String baseUri, String resumeFrom, Path stagingDir,
+                                     int batchSize, JobContext ctx) {
+        StudyResult reused = resumeFrom == null ? null : reusePrevious(row, baseUri, resumeFrom, ctx);
+        if (reused != null) {
+            writeStudyRecord(ctx, baseUri, reused);
+            return reused;
+        }
         SourceTrace trace = new SourceTrace(row.studyId());
+        StudyResult result;
         try {
             StudyFiles files = discoverStudyFiles(baseUri, row, stagingDir, trace);
-            return processStudy(row, files, batchSize, ctx, trace);
+            result = processStudy(row, files, batchSize, ctx, trace);
         } catch (InfrastructureException | RunAbortedException e) {
             throw e;
         } catch (Exception e) {
             log.error("Study '{}' failed during migration", row.studyId(), e);
-            return StudyResult.failed(row.studyId(), row.abv(), e.getMessage(), trace.snapshot());
+            result = StudyResult.failed(row.studyId(), row.abv(), e.getMessage(), trace.snapshot());
         } finally {
             deleteRecursively(stagingDir.resolve(row.studyId()));
+        }
+        writeStudyRecord(ctx, baseUri, result);
+        return result;
+    }
+
+    /**
+     * The study's result from {@code resumeFrom}, with its mapping file copied into this run's
+     * reports, or null when it must be migrated again: that run failed it, never finished it,
+     * or read a different data folder.
+     */
+    private StudyResult reusePrevious(ManagedInputRow row, String baseUri, String resumeFrom, JobContext ctx) {
+        String studyId = row.studyId();
+        String recordUri = joinPath(joinPath(resumeFrom, STUDY_RESULTS_DIR), studyId + ".json");
+        String mappingUri = joinPath(resumeFrom, mappingFileName(studyId));
+        if (!io.exists(recordUri)) {
+            return null;
+        }
+        StudyRecord previous;
+        try (InputStream in = io.openInput(recordUri)) {
+            previous = RESULT_JSON.readValue(in, StudyRecord.class);
+        } catch (IOException e) {
+            log.warn("Study '{}': unreadable result in {} ({}); migrating it again", studyId, recordUri,
+                    e.getMessage());
+            return null;
+        }
+        if (previous.result() == null || !previous.result().success()) {
+            return null;
+        }
+        if (!baseUri.equals(previous.dataFolder())) {
+            log.warn("Study '{}': {} migrated it from a different data folder ({}); migrating it again",
+                    studyId, resumeFrom, previous.dataFolder());
+            return null;
+        }
+        if (!io.exists(mappingUri)) {
+            log.warn("Study '{}': {} has no mapping file for it; migrating it again", studyId, resumeFrom);
+            return null;
+        }
+        try (InputStream in = io.openInput(mappingUri)) {
+            writeReport(ctx, mappingFileName(studyId), in.readAllBytes());
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to copy " + mappingUri, e);
+        }
+
+        StudyResult r = previous.result();
+        List<FileIssue> issues = new ArrayList<>(r.usage().issues().stream()
+                .filter(i -> !REUSED_ISSUE.equals(i.code())).toList());
+        issues.add(new FileIssue(Severity.INFO, REUSED_ISSUE, null, 1,
+                "migrated by an earlier run; result and mapping file copied from " + resumeFrom, List.of()));
+        SourceUsage u = r.usage();
+        log.info("Study '{}': already migrated by {}; copied its mapping file ({} rows)", studyId, resumeFrom,
+                r.mappingRowCount());
+        return new StudyResult(r.studyId(), r.abv(), r.source(), true, null, r.mappingRowCount(),
+                r.unresolvedHpdsIds(), new SourceUsage(u.sstrFile(), u.sstrStatus(), u.sstrError(),
+                u.subjectMultiFile(), u.sampleMultiFile(), u.dataDictFile(), u.multiStatus(), u.consentColumn(),
+                List.copyOf(issues)));
+    }
+
+    private void writeStudyRecord(JobContext ctx, String baseUri, StudyResult result) {
+        try {
+            writeReport(ctx, STUDY_RESULTS_DIR + "/" + result.studyId() + ".json",
+                    RESULT_JSON.writeValueAsBytes(new StudyRecord(baseUri, result)));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialise the result of study " + result.studyId(), e);
         }
     }
 
@@ -398,7 +532,6 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      */
     private StudyFiles discoverStudyFiles(String baseUri, ManagedInputRow row, Path stagingDir, SourceTrace trace) {
         String studyId = row.studyId();
-        String abvUpper = row.abv().toUpperCase(Locale.ROOT);
         Path studyDir = stagingDir.resolve(studyId);
         String studyBase = joinPath(baseUri, studyId);
 
@@ -438,12 +571,20 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             log.info("Study '{}': staged SSTR file '{}'", studyId, sstrFileName);
         }
 
-        String pmFileName = abvUpper + "_PatientMapping.v2.csv";
-        String pmUri = joinPath(joinPath(studyBase, "legacy/data"), pmFileName);
-        Path localPm = studyDir.resolve(pmFileName);
+        String pmUri = patientMappingUri(baseUri, row);
+        Path localPm = studyDir.resolve(pmUri.substring(pmUri.lastIndexOf('/') + 1));
         io.copyToLocal(pmUri, localPm);
 
         return new StudyFiles(rawDataDir, studyDir, localSstr, subjectMultis, sampleMultis, dataDicts, localPm);
+    }
+
+    private static String patientMappingUri(String baseUri, ManagedInputRow row) {
+        return joinPath(joinPath(joinPath(baseUri, row.studyId()), "legacy/data"),
+                row.abv().toUpperCase(Locale.ROOT) + "_PatientMapping.v2.csv");
+    }
+
+    private static String mappingFileName(String studyId) {
+        return studyId + "_hpds_id_mapping.csv";
     }
 
     private StudyResult processStudy(ManagedInputRow row, StudyFiles files, int batchSize, JobContext ctx,
@@ -736,7 +877,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             csv.append(Strings.csvQuote(row.oldHpdsId())).append(',').append(row.newHpdsId()).append(',')
                     .append(Strings.csvQuote(row.commonDbgapId())).append('\n');
         }
-        writeReport(ctx, studyId + "_hpds_id_mapping.csv", csv.toString());
+        writeReport(ctx, mappingFileName(studyId), csv.toString());
     }
 
     /** Writes {@value #SOURCES_REPORT}, {@value #ISSUES_REPORT} and {@value #SUMMARY_REPORT}. */
@@ -851,10 +992,17 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     private void writeReport(JobContext ctx, String fileName, String content) {
+        writeReport(ctx, fileName, content.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Writes to a {@value #PARTIAL_SUFFIX} file and renames it, so the runner's periodic sync never uploads half a file. */
+    private void writeReport(JobContext ctx, String fileName, byte[] content) {
         try {
-            Path dir = ctx.reportsDir();
-            Files.createDirectories(dir);
-            Files.writeString(dir.resolve(fileName), content);
+            Path target = ctx.reportsDir().resolve(fileName);
+            Files.createDirectories(target.getParent());
+            Path partial = target.resolveSibling(target.getFileName() + PARTIAL_SUFFIX);
+            Files.write(partial, content);
+            Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             throw new InfrastructureException("Failed to write report " + fileName, e);
         }
@@ -1040,7 +1188,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 .metric("multiStudyIds", idsWhere(results, r -> r.success() && r.source() == Source.MULTI))
                 .metric("sstrFallbackStudyIds", idsWhere(results, r -> "malformed".equals(r.usage().sstrStatus())))
                 .metric("noParticipantSourceStudyIds",
-                        idsWhere(results, r -> r.usage().hasIssue("NO_PARTICIPANT_SOURCE")));
+                        idsWhere(results, r -> r.usage().hasIssue("NO_PARTICIPANT_SOURCE")))
+                .metric("reusedStudyIds", idsWhere(results, r -> r.usage().hasIssue(REUSED_ISSUE)));
     }
 
     private static List<String> idsWhere(List<StudyResult> results, Predicate<StudyResult> p) {
@@ -1166,6 +1315,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         static StudyResult failed(String studyId, String abv, String errorMessage, SourceUsage usage) {
             return new StudyResult(studyId, abv, Source.NONE, false, errorMessage, 0, List.of(), usage);
         }
+    }
+
+    /** One study's line in {@value #STUDY_RESULTS_DIR}/: its result and the data folder it was migrated from. */
+    record StudyRecord(String dataFolder, StudyResult result) {
     }
 
     /** Immutable result of {@link #execute}; inspected by {@link #validateOutput}/{@link #report}. */

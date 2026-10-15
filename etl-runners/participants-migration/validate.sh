@@ -11,6 +11,7 @@
 #   participants_migration_sources.csv                         one row per ready study: source used
 #   participants_migration_file_issues.csv                     problems found in the source files
 #   participants_migration_file_report.md                      the two above, human-readable
+#   studies/<studyId>.json                                     one per ready study, written as it finished
 #   container-status.json                                      what was actually invoked
 #
 # Checking the mapping CSVs matters more than checking the exit code: the job deliberately
@@ -81,6 +82,10 @@ echo ""
 echo "  Participant sources:"
 note "sstr:  $(jq -r '(.metrics.sstrStudyIds  // []) | length' "$REPORT") study/studies"
 note "multi: $(jq -r '(.metrics.multiStudyIds // []) | length' "$REPORT") study/studies"
+REUSED=$(jq -r '(.metrics.reusedStudyIds // []) | length' "$REPORT")
+# A reused study was migrated by the run given as RESUME_FROM_RUN_ID; this run only copied its
+# mapping file, so it has no sstr/multi sub-report below.
+[[ "$REUSED" != "0" ]] && note "copied from an earlier run (--resume-from): $REUSED study/studies"
 FELL_BACK=$(jq -r '(.metrics.sstrFallbackStudyIds // []) | join(",")' "$REPORT")
 NO_SOURCE=$(jq -r '(.metrics.noParticipantSourceStudyIds // []) | join(", ")' "$REPORT")
 soft "no study had a malformed SSTR" test -z "$FELL_BACK"
@@ -95,6 +100,8 @@ check "file issues report present" test -f "$ISSUES"
 if [[ -f "$SOURCES" ]]; then
   check "one sources row per ready study" test "$(($(wc -l < "$SOURCES") - 1))" -eq "$READY"
 fi
+STUDY_RECORDS=$(find "$REPORTS/studies" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+check "one studies/<id>.json per ready study (found $STUDY_RECORDS)" test "$STUDY_RECORDS" -eq "$READY"
 if [[ -f "$ISSUES" ]]; then
   # Severity is the second column; the first (study id) never contains a comma.
   issue_warn=$(tail -n +2 "$ISSUES" | cut -d, -f2 | grep -c '^WARNING$' || true)

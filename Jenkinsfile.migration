@@ -74,6 +74,8 @@ pipeline {
                description: 'Rows per batch insert, passed to every migration job')
         string(name: 'PARTICIPANTS_PARALLELISM', defaultValue: '4',
                description: 'participants-migration --parallelism: studies migrated at once, 1-8')
+        string(name: 'PARTICIPANTS_RESUME_FROM_RUN_ID', defaultValue: '',
+               description: 'participants-migration --resume-from: run id of an earlier participants-migration run over the same DATA_ROOT, e.g. <build-tag>-participants of a run that timed out. Studies it migrated are copied, not migrated again. Blank migrates every study.')
         string(name: 'PARTICIPANTS_TIMEOUT_SECONDS', defaultValue: '43200',
                description: 'How long participants-migration waits for its runner before giving up (exit 124). Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'STUDY_FILTER', defaultValue: '',
@@ -225,6 +227,7 @@ pipeline {
                             string(name: 'BATCH_SIZE',     value: params.BATCH_SIZE),
                             string(name: 'PARALLELISM',    value: params.PARTICIPANTS_PARALLELISM),
                             string(name: 'JOB_TIMEOUT_SECONDS', value: params.PARTICIPANTS_TIMEOUT_SECONDS ?: '43200'),
+                            string(name: 'RESUME_FROM_RUN_ID', value: params.PARTICIPANTS_RESUME_FROM_RUN_ID ?: ''),
                             string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
                             string(name: 'ENV',            value: params.ENV),
@@ -256,6 +259,8 @@ pipeline {
                                 projectName: params.PARTICIPANTS_MIGRATION_JOB,
                                 selector: specific(env.PARTICIPANTS_BUILD ?: '0'),
                                 target: 'downstream-artifacts/participants-migration',
+                                // One result file per study; the sources report already summarises them.
+                                excludes: '**/studies/**',
                                 flatten: true,
                                 optional: true)
                         } catch (err) {

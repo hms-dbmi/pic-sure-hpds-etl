@@ -77,6 +77,8 @@ pipeline {
                description: '--batch-size: rows per batch insert')
         string(name: 'PARALLELISM', defaultValue: '4',
                description: '--parallelism: studies migrated at once, 1-8. Each holds one participant-DB connection.')
+        string(name: 'RESUME_FROM_RUN_ID', defaultValue: '',
+               description: 'Run id of an earlier run over the same DATA_FOLDER (e.g. one that timed out). Studies it migrated successfully are copied from its reports instead of migrated again; the rest are migrated. Blank migrates every study.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG. Appears in the report filename and the S3 report prefix.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
@@ -128,7 +130,14 @@ pipeline {
                     env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
 
+                    // Set here, not in environment {}: a retry replaces it, and environment {}
+                    // values cannot be reassigned from a script.
+                    env.TF_VAR_resume_from_run_id = (params.RESUME_FROM_RUN_ID ?: '').trim()
+
                     echo "run id: ${env.BASE_RUN_ID}"
+                    if (env.TF_VAR_resume_from_run_id) {
+                        echo "resuming from run ${env.TF_VAR_resume_from_run_id}"
+                    }
                     echo "image:  ${env.IMAGE_TAR}"
                 }
                 sh '''
@@ -223,7 +232,10 @@ pipeline {
                             break
                         }
 
-                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        // The failed attempt uploaded what it finished, including studies it copied
+                        // from RESUME_FROM_RUN_ID, so the retry carries on from it.
+                        env.TF_VAR_resume_from_run_id = env.EFFECTIVE_RUN_ID
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying from ${env.EFFECTIVE_RUN_ID}"
                         sh(returnStatus: true,
                            script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
                         sleep time: 60, unit: 'SECONDS'

@@ -105,6 +105,30 @@ public class IoResolver {
         return Files.exists(toLocalPath(uri));
     }
 
+    /** A file's size in bytes, or -1 if it does not exist. */
+    public long size(String uri) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            try {
+                return s3.headObject(HeadObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build())
+                        .contentLength();
+            } catch (NoSuchKeyException e) {
+                return -1;
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to read the size of S3 object: " + uri, e);
+            }
+        }
+        Path path = toLocalPath(uri);
+        if (!Files.isRegularFile(path)) {
+            return -1;
+        }
+        try {
+            return Files.size(path);
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to read the size of local file: " + path, e);
+        }
+    }
+
     /**
      * Deletes a single file. Deleting a location that does not exist is not an error. On a
      * versioned S3 bucket this adds a delete marker, so the previous version stays recoverable.

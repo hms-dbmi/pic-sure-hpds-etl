@@ -290,6 +290,86 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void migrates_the_largest_patient_mapping_first_but_reports_in_managed_inputs_order() {
+        String folder = baseUri(Map.of(
+                "phs000001/rawData/sstr_phs000001.v1.txt", SSTR,
+                "phs000001/legacy/data/A_PatientMapping.v2.csv", "1001,A,9001\n",
+                "phs000002/rawData/sstr_phs000002.v1.txt", SSTR,
+                "phs000002/legacy/data/B_PatientMapping.v2.csv", "1001,B,9002\n2001,B,9003\n3001,B,9004\n"));
+        String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + "A,phs000001,Yes\nB,phs000002,Yes\n");
+
+        JobResult result = executor.run(newJob(managed), Map.of("data-folder", folder, "parallelism", "1"),
+                "unit-largest-first");
+
+        assertThat(store.purgedStudies).containsExactly("phs000002", "phs000001");
+        assertThat(result.getMetrics().get("sstrStudyIds")).isEqualTo(List.of("phs000001", "phs000002"));
+    }
+
+    @Test
+    void writes_each_study_s_result_as_it_finishes_without_partial_files() throws IOException {
+        runOneStudy(Map.of(SSTR_NAME, SSTR), "1001,FHS,2002\n");
+
+        assertThat(report(ParticipantsMigrationJob.STUDY_RESULTS_DIR + "/" + STUDY + ".json"))
+                .contains("\"success\":true").contains("\"dataFolder\"");
+        try (var files = Files.walk(reportsDir)) {
+            assertThat(files.map(Path::toString)).noneMatch(f -> f.endsWith(ParticipantsMigrationJob.PARTIAL_SUFFIX));
+        }
+    }
+
+    @Test
+    void resume_copies_studies_the_earlier_run_migrated_and_retries_the_rest() throws IOException {
+        String folder = baseUri(Map.of(
+                "phs000001/rawData/sstr_phs000001.v1.txt", SSTR,
+                "phs000001/legacy/data/A_PatientMapping.v2.csv", "1001,A,9001\n",
+                "phs000003/legacy/data/C_PatientMapping.v2.csv", "3001,C,9003\n"));
+        String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + "A,phs000001,Yes\nC,phs000003,Yes\n");
+        executor.run(newJob(managed), Map.of("data-folder", folder), "unit-first");
+        Path previous = moveReportsAside();
+
+        JobResult result = executor.run(newJob(managed),
+                Map.of("data-folder", folder, "resume-from", previous.toString()), "unit-resumed");
+
+        // phs000001 was loaded once, by the first run; phs000003 failed there and is tried again.
+        assertThat(store.purgedStudies).containsOnlyOnce("phs000001");
+        assertThat(result.getMetrics())
+                .containsEntry("succeededStudies", 1L)
+                .containsEntry("reusedStudyIds", List.of("phs000001"))
+                .containsEntry("sstrStudyIds", List.of("phs000001"))
+                .containsEntry("failedStudyIds", List.of("phs000003"));
+        assertThat(report("phs000001_hpds_id_mapping.csv"))
+                .isEqualTo(Files.readString(previous.resolve("phs000001_hpds_id_mapping.csv")));
+        assertThat(issueCodes("phs000001")).contains(ParticipantsMigrationJob.REUSED_ISSUE);
+        // This run's record carries the reuse forward, so a later run can resume from it in turn.
+        assertThat(report(ParticipantsMigrationJob.STUDY_RESULTS_DIR + "/phs000001.json"))
+                .contains(ParticipantsMigrationJob.REUSED_ISSUE);
+    }
+
+    @Test
+    void resume_migrates_again_a_study_the_earlier_run_read_from_another_data_folder() throws IOException {
+        Map<String, String> files = Map.of(
+                "phs000001/rawData/sstr_phs000001.v1.txt", SSTR,
+                "phs000001/legacy/data/A_PatientMapping.v2.csv", "1001,A,9001\n");
+        String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + "A,phs000001,Yes\n");
+        executor.run(newJob(managed), Map.of("data-folder", baseUri(files)), "unit-first");
+        Path previous = moveReportsAside();
+
+        JobResult result = executor.run(newJob(managed),
+                Map.of("data-folder", baseUri(files), "resume-from", previous.toString()), "unit-resumed");
+
+        assertThat(store.purgedStudies).containsExactly("phs000001", "phs000001");
+        assertThat(result.getMetrics()).containsEntry("reusedStudyIds", List.of());
+    }
+
+    /** Moves this test's reports to a new directory, as an earlier run's would be, and returns it. */
+    private Path moveReportsAside() throws IOException {
+        Path previous = Files.createTempDirectory("migration-previous");
+        Files.delete(previous);
+        Files.move(reportsDir, previous);
+        Files.createDirectories(reportsDir);
+        return previous;
+    }
+
+    @Test
     void fails_study_when_patient_mapping_is_empty() {
         JobResult result = runOneStudy(Map.of(SSTR_NAME, SSTR), "");
 
