@@ -241,17 +241,20 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void study_with_neither_sstr_nor_multi_fails_and_is_reported() throws IOException {
+    void study_with_neither_sstr_nor_multi_is_skipped_and_reported() throws IOException {
         managedInputs("FHS,phs000007,Yes");
         String base = baseUri(Map.of("phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
 
         JobResult result = executor.run(job, Map.of("data-folder", base), "it-no-source");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
-        assertThat(result.getMetrics()).containsEntry("noParticipantSourceStudyIds", List.of("phs000007"));
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics())
+                .containsEntry("noParticipantSourceStudyIds", List.of("phs000007"))
+                .containsEntry("skippedStudyIds", List.of("phs000007"))
+                .containsEntry("failedStudies", 0L);
         assertThat(participants.count()).isZero();
         assertThat(Files.readString(reportsDir.resolve(ParticipantsMigrationJob.ISSUES_REPORT)))
-                .contains("phs000007,ERROR,NO_PARTICIPANT_SOURCE");
+                .contains("phs000007,WARNING,NO_PARTICIPANT_FILES");
     }
 
     @Test

@@ -200,7 +200,10 @@ For each ready study:
         │                              ├── data, validation or config error ─▶ study FAILS (MULTI_LOAD_FAILED)
         │                              └── any other error (infrastructure, unknown) ─▶ abort the run
         │
-        └─── neither ──▶ study FAILS (NO_PARTICIPANT_SOURCE)
+        ├─── malformed SSTR, no Subject.MULTI ──▶ study FAILS (NO_PARTICIPANT_SOURCE)
+        └─── no SSTR and no Subject.MULTI at all ──▶ study SKIPPED (NO_PARTICIPANT_FILES): a warning,
+             the run goes on, and the pipeline's later stages get a managed-inputs copy that marks
+             it not ready
         │
         ▼
 Read {ABV}_PatientMapping.v2.csv; join its id against the source's dbGaP subject id
@@ -260,14 +263,16 @@ malformed SSTR or its MULTI files had problems.
 - `studies/{studyid}.json`: each study's result and the data folder it came from, written as
   the study finishes; what a resumed run reads back
 - Metrics `sstrStudyIds`, `multiStudyIds`, `sstrFallbackStudyIds`, `noParticipantSourceStudyIds`,
-  `reusedStudyIds`
+  `reusedStudyIds`, `skippedStudies`/`skippedStudyIds` (no participant files; not counted in
+  `failedStudies`)
 
 Issue codes in the file issues report:
 
 | Code | Severity | Meaning |
 |------|----------|---------|
 | `SSTR_MALFORMED` | warning | The SSTR sub-job failed on its data; the study fell back to MULTI |
-| `NO_PARTICIPANT_SOURCE` | error | No usable SSTR and no Subject.MULTI; the study failed |
+| `NO_PARTICIPANT_FILES` | warning | No SSTR and no Subject.MULTI at all; the study was skipped (not migrated), and the run and pipeline carried on |
+| `NO_PARTICIPANT_SOURCE` | error | The SSTR is malformed and there is no Subject.MULTI to fall back to; the study failed |
 | `MULTI_LOAD_FAILED` | error | The MULTI sub-job failed (e.g. no consent column, no consented subject); the study failed |
 | `MULTIPLE_SSTR_CANDIDATES`, `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named |
 | `MULTIPLE_CONSENT_COLUMNS` | warning | Several known consent headers; the first of `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code`, `consent_group` was used |

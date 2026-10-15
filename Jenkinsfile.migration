@@ -295,7 +295,7 @@ pipeline {
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
-                        conceptParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
+                        conceptParams << string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs())
                     }
 
                     def downstream = build(
@@ -340,7 +340,7 @@ pipeline {
                         booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
-                        vcfParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
+                        vcfParams << string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs())
                     }
 
                     def downstream = build(
@@ -382,7 +382,7 @@ pipeline {
 
                     def mergeParams = [
                         string(name: 'INPUT', value: mergeInput),
-                        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ?: ''),
+                        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : ''),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -429,7 +429,7 @@ pipeline {
                         parameters: [
                             string(name: 'INPUT', value: params.MERGE_ALLCONCEPTS_INPUT?.trim() ?: params.DATA_ROOT.trim()),
                             string(name: 'GLOBAL_ALLCONCEPTS', value: params.ALL_CONCEPTS_OUTPUT.trim()),
-                            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ?: ''),
+                            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : ''),
                             string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-manifest"),
                             string(name: 'ENV',    value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS', value: true),
@@ -463,6 +463,11 @@ pipeline {
                 backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
                 stopRunnerPool()
                 removeRunnerImage()
+                if (env.SKIPPED_PARTICIPANT_STUDIES) {
+                    echo "NOT MIGRATED -- no participant files (no SSTR and no Subject.MULTI in rawData): " +
+                         "${env.SKIPPED_PARTICIPANT_STUDIES.split(',').join(', ')}. The stages after participants-migration " +
+                         'left them out; see participants_migration_file_report.md under downstream-artifacts/participants-migration/.'
+                }
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
@@ -659,6 +664,59 @@ static List<String> parseCsvLine(String line) {
     return fields
 }
 
+// The managed-inputs URI for every stage after participants-migration. participants-migration
+// skips (and reports) a ready study that has no participant files at all; every later stage reads
+// its ready list from managed inputs on its own, and would then fail on that study instead --
+// Split AllConcepts finds no mapping CSV for it, the manifest no consent folders. So when studies
+// were skipped, the later stages get a copy of managed inputs with them marked not ready, written
+// once under this run's report prefix. Without skipped studies this is MANAGED_INPUTS unchanged.
+def laterStageManagedInputs() {
+    def original = params.MANAGED_INPUTS?.trim() ?: ''
+    if (env.LATER_STAGE_MANAGED_INPUTS) {
+        return env.LATER_STAGE_MANAGED_INPUTS
+    }
+    def skipped = sh(returnStdout: true, script: '''
+        for f in downstream-artifacts/participants-migration/participants-migration-*.json; do
+          [ -f "$f" ] && jq -r '(.metrics.skippedStudyIds // [])[]' "$f"
+        done | sort -u
+    ''').trim()
+    if (!skipped || !(original ==~ /^s3:\/\/[^\/]+\/.+/)) {
+        env.LATER_STAGE_MANAGED_INPUTS = original
+        return original
+    }
+
+    env.SKIPPED_PARTICIPANT_STUDIES = skipped.readLines().join(',')
+    def bucket = original.substring('s3://'.length()).split('/')[0]
+    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def effective = "s3://${bucket}/etl-runner/reports/migration-pipeline/${tag}/managed_inputs.csv"
+    withEnv(["MI_SRC=${original}", "MI_DST=${effective}"]) {
+        // python3's csv module, not a line edit: the sheet's quoted fields can contain commas.
+        sh '''#!/bin/bash
+            set -euo pipefail
+            mkdir -p downstream-artifacts
+            aws s3 cp "$MI_SRC" managed_inputs.original.csv --only-show-errors
+            python3 - managed_inputs.original.csv downstream-artifacts/managed_inputs.later-stages.csv \
+                "$SKIPPED_PARTICIPANT_STUDIES" <<'PY'
+import csv, sys
+src, dst, skipped = sys.argv[1], sys.argv[2], set(sys.argv[3].split(","))
+with open(src, newline="", encoding="utf-8-sig") as fh:
+    rows = list(csv.reader(fh))
+sid, ready = rows[0].index("Study Identifier"), rows[0].index("Data is ready to process")
+for row in rows[1:]:
+    if len(row) > max(sid, ready) and row[sid].strip() in skipped:
+        row[ready] = "No"
+with open(dst, "w", newline="", encoding="utf-8") as fh:
+    csv.writer(fh, lineterminator="\\n").writerows(rows)
+PY
+            aws s3 cp downstream-artifacts/managed_inputs.later-stages.csv "$MI_DST" --only-show-errors
+        '''
+    }
+    echo "participants-migration skipped ${skipped.readLines().size()} study/studies with no participant files " +
+         "(${env.SKIPPED_PARTICIPANT_STUDIES}). The stages after it use ${effective}, which marks them not ready."
+    env.LATER_STAGE_MANAGED_INPUTS = effective
+    return effective
+}
+
 // The Split AllConcepts stage. A function rather than inline in pipeline {}: declarative compiles
 // the whole pipeline block into one JVM method, and this body alone pushed it past the 64 KB limit
 // ("Method too large"). Keep long stage logic out here.
@@ -681,8 +739,9 @@ def runSplitAllConcepts() {
               'A local path resolves inside the runner container and is destroyed with it.')
     }
 
-    // Resolve the study list from managed inputs so we can loop per study.
-    def managedInputsUri = params.MANAGED_INPUTS?.trim()
+    // Resolve the study list from managed inputs so we can loop per study. Studies participants-migration
+    // skipped for lack of participant files are marked not ready in this copy (see laterStageManagedInputs).
+    def managedInputsUri = params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : null
     if (!managedInputsUri) {
         error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
     }

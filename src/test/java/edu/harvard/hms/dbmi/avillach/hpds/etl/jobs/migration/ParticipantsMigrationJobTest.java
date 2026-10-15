@@ -7,6 +7,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureExcep
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.DelimitedReader;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.Severity;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
@@ -329,13 +330,14 @@ class ParticipantsMigrationJobTest {
         JobResult result = executor.run(newJob(managed),
                 Map.of("data-folder", folder, "resume-from", previous.toString()), "unit-resumed");
 
-        // phs000001 was loaded once, by the first run; phs000003 failed there and is tried again.
+        // phs000001 was loaded once, by the first run; phs000003 (no participant files) was not
+        // migrated there, so it is tried again rather than copied.
         assertThat(store.purgedStudies).containsOnlyOnce("phs000001");
         assertThat(result.getMetrics())
                 .containsEntry("succeededStudies", 1L)
                 .containsEntry("reusedStudyIds", List.of("phs000001"))
                 .containsEntry("sstrStudyIds", List.of("phs000001"))
-                .containsEntry("failedStudyIds", List.of("phs000003"));
+                .containsEntry("skippedStudyIds", List.of("phs000003"));
         assertThat(report("phs000001_hpds_id_mapping.csv"))
                 .isEqualTo(Files.readString(previous.resolve("phs000001_hpds_id_mapping.csv")));
         assertThat(issueCodes("phs000001")).contains(ParticipantsMigrationJob.REUSED_ISSUE);
@@ -571,26 +573,32 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
-    void fails_a_study_with_neither_sstr_nor_subject_multi() {
+    void skips_a_study_with_neither_sstr_nor_multi_as_a_warning_not_a_failure() {
         JobResult result = runOneStudy(Map.of(SAMPLE_MULTI_NAME, SAMPLE_MULTI), "1001,FHS,9001\n");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(result.getMetrics())
-                .containsEntry("failedStudies", 1L)
+                .containsEntry("failedStudies", 0L)
+                .containsEntry("failedStudyIds", List.of())
+                .containsEntry("skippedStudies", 1L)
+                .containsEntry("skippedStudyIds", List.of(STUDY))
                 .containsEntry("noParticipantSourceStudyIds", List.of(STUDY));
+        assertThat(result.getOutputValidation().getIssues()).noneMatch(i -> i.code().equals("STUDY_FAILED"));
         assertThat(result.getOutputValidation().getIssues())
-                .filteredOn(i -> i.code().equals("STUDY_FAILED"))
+                .filteredOn(i -> i.code().equals("STUDY_SKIPPED"))
                 .singleElement()
                 .satisfies(i -> {
-                    assertThat(i.message()).contains("no SSTR file and no Subject.MULTI file");
-                    assertThat(i.context()).containsEntry("reason", "NO_PARTICIPANT_SOURCE");
+                    assertThat(i.severity()).isEqualTo(Severity.WARNING);
+                    assertThat(i.message()).contains("no participant files");
+                    assertThat(i.context()).containsEntry("reason", "NO_PARTICIPANT_FILES");
                 });
         assertThat(store.participantIds).isEmpty();
         assertThat(reportsDir.resolve(STUDY + "_hpds_id_mapping.csv")).doesNotExist();
-        assertThat(sourcesRow(STUDY)).containsEntry("outcome", "failed").containsEntry("source", "none");
-        assertThat(issueCodes(STUDY)).contains("NO_PARTICIPANT_SOURCE");
+        assertThat(sourcesRow(STUDY)).containsEntry("outcome", "skipped").containsEntry("source", "none");
+        assertThat(issueCodes(STUDY)).contains("NO_PARTICIPANT_FILES");
         assertThat(report(ParticipantsMigrationJob.SUMMARY_REPORT))
-                .contains("| Failed: no usable participant source | 1 |");
+                .contains("| Skipped: no participant files | 1 |")
+                .contains("| Failed: no usable participant source | 0 |");
     }
 
     @Test
@@ -769,17 +777,18 @@ class ParticipantsMigrationJobTest {
 
         JobResult result = run(files, "A,phs000001,Yes", "B,phs000002,Yes", "C,phs000003,Yes", "D,phs000004,No");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(result.getMetrics())
                 .containsEntry("readyStudies", 3L)
                 .containsEntry("succeededStudies", 2L)
                 .containsEntry("sstrStudyIds", List.of("phs000001"))
                 .containsEntry("multiStudyIds", List.of("phs000002"))
-                .containsEntry("failedStudyIds", List.of("phs000003"))
+                .containsEntry("failedStudyIds", List.of())
+                .containsEntry("skippedStudyIds", List.of("phs000003"))
                 .containsEntry("noParticipantSourceStudyIds", List.of("phs000003"));
         assertThat(sourcesRow("phs000001")).containsEntry("source", "sstr");
         assertThat(sourcesRow("phs000002")).containsEntry("source", "multi");
-        assertThat(sourcesRow("phs000003")).containsEntry("source", "none").containsEntry("outcome", "failed");
+        assertThat(sourcesRow("phs000003")).containsEntry("source", "none").containsEntry("outcome", "skipped");
         assertThat(report(ParticipantsMigrationJob.SOURCES_REPORT)).doesNotContain("phs000004");
     }
 

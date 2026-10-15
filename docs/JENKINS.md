@@ -240,7 +240,9 @@ because a truncated file is internally consistent.
 per-study data problem as a study-level failure and continues, and skips unmatched ids with only a
 log warning. Neither is visible in the exit status.
 
-- `readyStudies > 0`, `failedStudies == 0`, `succeeded + failed == ready`
+- `readyStudies > 0`, `failedStudies == 0`, `succeeded + skipped + failed == ready`
+- `skippedStudies == 0` is a warning, not a failure: a study with no participant files is
+  listed and left out of the later stages, and the build is UNSTABLE
 - one `STUDY_MIGRATED` record per success
 - one `*_hpds_id_mapping.csv` per succeeded study
 - per mapping file: exact header (`old_hpds_id,new_hpds_id,common_dbgap_id`), at least one row,

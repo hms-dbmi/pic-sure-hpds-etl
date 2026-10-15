@@ -63,13 +63,20 @@ fi
 READY=$(jq -r '.metrics.readyStudies      // 0' "$REPORT")
 OK=$(jq -r    '.metrics.succeededStudies  // 0' "$REPORT")
 BAD=$(jq -r   '.metrics.failedStudies     // 0' "$REPORT")
+SKIPPED=$(jq -r '.metrics.skippedStudies   // 0' "$REPORT")
 
 echo ""
-echo "  Studies: $READY ready, $OK succeeded, $BAD failed"
+echo "  Studies: $READY ready, $OK succeeded, $SKIPPED skipped, $BAD failed"
 
 check "at least one ready study was processed"   test "$READY" -gt 0
 check "no study failed"                          test "$BAD" -eq 0
-check "succeeded + failed accounts for every ready study" test "$((OK + BAD))" -eq "$READY"
+check "succeeded + skipped + failed accounts for every ready study" test "$((OK + SKIPPED + BAD))" -eq "$READY"
+# A study with no participant files at all is not migrated, but it does not fail the run: it is
+# a warning (UNSTABLE), so the pipeline carries on and the study is listed for follow-up.
+soft "no ready study was skipped for lack of participant files" test "$SKIPPED" -eq 0
+if [[ "$SKIPPED" != "0" ]]; then
+  note "skipped, not migrated (no SSTR and no Subject.MULTI in rawData): $(jq -r '(.metrics.skippedStudyIds // []) | join(", ")' "$REPORT")"
+fi
 
 if [[ "$BAD" != "0" ]]; then
   note "failed study ids: $(jq -r '(.metrics.failedStudyIds // []) | join(", ")' "$REPORT")"
@@ -87,11 +94,8 @@ REUSED=$(jq -r '(.metrics.reusedStudyIds // []) | length' "$REPORT")
 # mapping file, so it has no sstr/multi sub-report below.
 [[ "$REUSED" != "0" ]] && note "copied from an earlier run (--resume-from): $REUSED study/studies"
 FELL_BACK=$(jq -r '(.metrics.sstrFallbackStudyIds // []) | join(",")' "$REPORT")
-NO_SOURCE=$(jq -r '(.metrics.noParticipantSourceStudyIds // []) | join(", ")' "$REPORT")
 soft "no study had a malformed SSTR" test -z "$FELL_BACK"
 [[ -n "$FELL_BACK" ]] && note "malformed SSTR: $FELL_BACK"
-soft "every study had an SSTR or a Subject.MULTI" test -z "$NO_SOURCE"
-[[ -n "$NO_SOURCE" ]] && note "no participant source: $NO_SOURCE"
 
 SOURCES="$REPORTS/participants_migration_sources.csv"
 ISSUES="$REPORTS/participants_migration_file_issues.csv"

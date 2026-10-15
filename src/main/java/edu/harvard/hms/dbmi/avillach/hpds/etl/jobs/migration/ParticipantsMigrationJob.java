@@ -22,6 +22,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsP
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -158,6 +159,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /** Reports are written here first and renamed, so a sync of the reports dir never copies half a file. */
     static final String PARTIAL_SUFFIX = ".partial";
     static final String REUSED_ISSUE = "REUSED_FROM_PREVIOUS_RUN";
+    /**
+     * The study has no participant files at all (no SSTR, no Subject.MULTI). It cannot be migrated,
+     * but that is a gap in the data, not a broken run: it is reported as skipped and the run goes on.
+     */
+    static final String NO_PARTICIPANT_FILES = "NO_PARTICIPANT_FILES";
     private static final ObjectMapper RESULT_JSON = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
@@ -357,7 +363,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 try {
                     StudyResult result = migrateStudy(row, baseUri, resumeFrom, stagingDir, batchSize, ctx);
                     log.info("Study '{}' {} ({}/{} finished)", row.studyId(),
-                            result.success() ? "migrated" : "FAILED", finished.incrementAndGet(), studies.size());
+                            result.success() ? "migrated" : result.skipped() ? "skipped" : "FAILED", finished.incrementAndGet(), studies.size());
                     return new StudyOutcome(result, null);
                 } catch (RuntimeException e) {
                     aborted.set(true);
@@ -456,8 +462,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         } catch (InfrastructureException | RunAbortedException e) {
             throw e;
         } catch (Exception e) {
-            log.error("Study '{}' failed during migration", row.studyId(), e);
             result = StudyResult.failed(row.studyId(), row.abv(), e.getMessage(), trace.snapshot());
+            if (result.skipped()) {
+                log.warn("Study '{}' skipped: {}", row.studyId(), e.getMessage());
+            } else {
+                log.error("Study '{}' failed during migration", row.studyId(), e);
+            }
         } finally {
             deleteRecursively(stagingDir.resolve(row.studyId()));
         }
@@ -601,11 +611,15 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             identities = runSstr(studyId, files, batchSize, ctx, trace);
         }
         if (identities == null) {
+            if (files.subjectMulti() == null && trace.sstrFile == null) {
+                String reason = "no SSTR file and no Subject.MULTI file in rawData";
+                trace.issue(Severity.WARNING, NO_PARTICIPANT_FILES, null, reason + "; skipped", List.of());
+                throw new DataException(studyId + " has no participant files (" + reason + "); skipped");
+            }
             if (files.subjectMulti() == null) {
-                String reason = trace.sstrFile == null
-                        ? "no SSTR file and no Subject.MULTI file in rawData"
-                        : "SSTR '" + trace.sstrFile + "' is malformed (" + trace.sstrError
-                                + ") and there is no Subject.MULTI file to fall back to";
+                // There is a file, it is just unusable: that is a data error to fix, so the study fails.
+                String reason = "SSTR '" + trace.sstrFile + "' is malformed (" + trace.sstrError
+                        + ") and there is no Subject.MULTI file to fall back to";
                 trace.issue(Severity.ERROR, "NO_PARTICIPANT_SOURCE", null, reason, List.of());
                 throw new DataException(studyId + " has no usable participant source: " + reason);
             }
@@ -888,7 +902,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         StringBuilder issues = new StringBuilder("study_id,severity,code,file,count,message,examples\n");
         for (StudyResult r : results) {
             SourceUsage u = r.usage();
-            sources.append(csvRow(r.studyId(), r.abv(), r.success() ? "success" : "failed", r.source().label(),
+            sources.append(csvRow(r.studyId(), r.abv(), r.outcome(), r.source().label(),
                     u.sstrFile(), u.sstrStatus(), u.subjectMultiFile(), u.sampleMultiFile(), u.dataDictFile(),
                     u.multiStatus(), u.consentColumn(), String.valueOf(r.mappingRowCount()),
                     String.valueOf(r.unresolvedHpdsIds().size()), r.errorMessage()));
@@ -906,7 +920,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         StringBuilder md = new StringBuilder("# Participants migration: participant sources (run ")
                 .append(ctx.runId()).append(")\n\n")
                 .append("Each study uses its SSTR when it has a usable one, otherwise its Subject/Sample MULTI files; ")
-                .append("a study with neither fails.\n\n");
+                .append("a study with neither file is skipped; one whose files are unusable fails.\n\n");
 
         Map<String, List<StudyResult>> groups = new LinkedHashMap<>();
         groups.put("Loaded from SSTR", results.stream().filter(r -> r.success() && r.source() == Source.SSTR).toList());
@@ -914,12 +928,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 .filter(r -> r.success() && r.source() == Source.MULTI && r.usage().sstrFile() == null).toList());
         groups.put("Loaded from MULTI (SSTR malformed)", results.stream()
                 .filter(r -> r.success() && r.source() == Source.MULTI && r.usage().sstrFile() != null).toList());
+        groups.put("Skipped: no participant files", results.stream().filter(StudyResult::skipped).toList());
         groups.put("Failed: no usable participant source", results.stream()
                 .filter(r -> !r.success() && r.usage().hasIssue("NO_PARTICIPANT_SOURCE")).toList());
         groups.put("Failed: MULTI files unusable", results.stream()
                 .filter(r -> !r.success() && r.usage().hasIssue("MULTI_LOAD_FAILED")).toList());
         groups.put("Failed: other", results.stream()
-                .filter(r -> !r.success() && !r.usage().hasIssue("NO_PARTICIPANT_SOURCE")
+                .filter(r -> !r.success() && !r.skipped() && !r.usage().hasIssue("NO_PARTICIPANT_SOURCE")
                         && !r.usage().hasIssue("MULTI_LOAD_FAILED")).toList());
 
         md.append("| Outcome | Studies |\n|---|---|\n");
@@ -956,7 +971,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             }
             any = true;
             md.append("### ").append(r.studyId()).append(" (").append(r.source().label()).append(", ")
-                    .append(r.success() ? "success" : "failed").append(")\n\n");
+                    .append(r.outcome()).append(")\n\n");
             for (FileIssue i : list) {
                 md.append("- **").append(i.severity()).append("** `").append(i.code()).append('`');
                 if (i.file() != null && !i.file().isEmpty()) {
@@ -1162,6 +1177,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                     "count", (long) result.unresolvedHpdsIds().size(),
                                     "firstOldHpdsIds", sample)));
                 }
+            } else if (result.skipped()) {
+                // A warning, not an error: the run (and the pipeline after it) carries on without it.
+                report.add(ValidationIssue.warning("STUDY_SKIPPED", result.studyId()
+                                + ": no participant files (no SSTR and no Subject.MULTI in rawData); not migrated",
+                        Map.of("studyId", result.studyId(), "reason", NO_PARTICIPANT_FILES)));
             } else {
                 String reason = usage.hasIssue("NO_PARTICIPANT_SOURCE") ? "NO_PARTICIPANT_SOURCE"
                         : usage.hasIssue("MULTI_LOAD_FAILED") ? "MULTI_LOAD_FAILED" : "OTHER";
@@ -1175,20 +1195,23 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     protected void report(Output output, JobResult.Builder builder) {
         List<StudyResult> results = output.studyResults();
         long succeeded = results.stream().filter(StudyResult::success).count();
-        long failed = results.size() - succeeded;
+        long skippedStudies = results.stream().filter(StudyResult::skipped).count();
+        long failed = results.size() - succeeded - skippedStudies;
         long skipped = results.stream().mapToLong(r -> r.unresolvedHpdsIds().size()).sum();
         // Cast so every count in this report is a long. Jackson writes int 1 and long 1
         // identically; this only matters to callers reading the metrics map in-process.
         builder.metric("readyStudies", (long) results.size())
                 .metric("succeededStudies", succeeded)
                 .metric("failedStudies", failed)
-                .metric("failedStudyIds", idsWhere(results, r -> !r.success()))
+                .metric("failedStudyIds", idsWhere(results, r -> !r.success() && !r.skipped()))
+                .metric("skippedStudies", skippedStudies)
+                .metric("skippedStudyIds", idsWhere(results, StudyResult::skipped))
                 .metric("subjectsWithoutConsent", skipped)
                 .metric("sstrStudyIds", idsWhere(results, r -> r.success() && r.source() == Source.SSTR))
                 .metric("multiStudyIds", idsWhere(results, r -> r.success() && r.source() == Source.MULTI))
                 .metric("sstrFallbackStudyIds", idsWhere(results, r -> "malformed".equals(r.usage().sstrStatus())))
-                .metric("noParticipantSourceStudyIds",
-                        idsWhere(results, r -> r.usage().hasIssue("NO_PARTICIPANT_SOURCE")))
+                .metric("noParticipantSourceStudyIds", idsWhere(results,
+                        r -> r.usage().hasIssue("NO_PARTICIPANT_SOURCE") || r.usage().hasIssue(NO_PARTICIPANT_FILES)))
                 .metric("reusedStudyIds", idsWhere(results, r -> r.usage().hasIssue(REUSED_ISSUE)));
     }
 
@@ -1314,6 +1337,18 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         static StudyResult failed(String studyId, String abv, String errorMessage, SourceUsage usage) {
             return new StudyResult(studyId, abv, Source.NONE, false, errorMessage, 0, List.of(), usage);
+        }
+
+        /** Not migrated because it has no participant files; reported, but not counted as failed. */
+        @JsonIgnore
+        boolean skipped() {
+            return !success && usage.hasIssue(NO_PARTICIPANT_FILES);
+        }
+
+        /** success, skipped or failed: the outcome column of {@value #SOURCES_REPORT}. */
+        @JsonIgnore
+        String outcome() {
+            return success ? "success" : skipped() ? "skipped" : "failed";
         }
     }
 
