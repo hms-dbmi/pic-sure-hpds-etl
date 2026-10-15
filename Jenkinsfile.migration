@@ -146,6 +146,10 @@ pipeline {
 
         stage('Build') {
             steps {
+                // The workspace persists between builds. Everything under downstream-artifacts/ must
+                // come from THIS build: the stages read it (skipped/excluded study lists, mapping
+                // CSVs) and the final migration report treats whatever is there as this run's.
+                sh 'rm -rf downstream-artifacts managed_inputs.original.csv split-mappings split-mappings.list'
                 sh './mvnw -B clean package -DskipTests'
             }
         }

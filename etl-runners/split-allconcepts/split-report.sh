@@ -130,7 +130,7 @@ jq --arg run "$RUN_ID" --arg started "${STAGE_STARTED_EPOCH:-}" --arg finished "
         poolWorkers: ($poolWorkers | num)
       },
       errorMessage: (if $bad == 0 then null
-                     else "\($broken | length) of \($all | length) studies failed for a reason other than their data and \($unstarted | length) did not start: \(($broken + $unstarted) | map(.studyId) | join(", "))" end),
+                     else "\($bad) of \($all | length) studies need a re-run (\($broken | length) failed for a reason other than their data, \($unstarted | length) did not start): \(($broken + $unstarted) | map(.studyId) | join(", "))" end),
       studies: $all
     }' "$ALL" > "$JSON.tmp" || { echo "split-report: could not build $JSON" >&2; rm -f "$JSON.tmp" "$ALL"; exit 1; }
 mv "$JSON.tmp" "$JSON"
@@ -155,7 +155,7 @@ jq -r --arg json "$(basename "$JSON")" '
       "",
       (if .status == "SUCCESS" and $m.succeededWithWarnings == 0 and ($m.excluded // 0) == 0 then "**Result: SUCCESS.** All \($m.studies) studies were split and validated."
        elif .status == "SUCCESS" then "**Result: SUCCESS WITH WARNINGS.** \($m.studies - ($m.excluded // 0)) of \($m.studies) studies were split; \($m.succeededWithWarnings) reported warnings and \($m.excluded // 0) were excluded for data problems (listed below, and left out of the later stages)."
-       else "**Result: FAILED.** \($m.failed) of \($m.studies) studies failed (\(($m.rerunStudyIds // []) | length - $m.notStarted) for a reason other than their data, so the run must be re-run for them) and \($m.notStarted) did not start. Failed studies are listed first, each with what went wrong and where to look." end),
+       else "**Result: FAILED.** \(($m.rerunStudyIds // []) | length) of \($m.studies) studies need a re-run (\($m.failed - ($m.excluded // 0)) failed for a reason other than their data, \($m.notStarted) did not start); \($m.excluded // 0) were excluded for data problems. Failed studies are listed first, each with what went wrong and where to look." end),
       "",
       "Stage ran \(.startedAt) to \(.finishedAt) (\(.durationMillis | dur)). Machine-readable version: `\($json)`.",
       "",

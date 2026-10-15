@@ -400,11 +400,17 @@ report_mixed_stage_is_failed_and_puts_each_failure_first_with_where_to_look() {
     expect_eq "$(J .metrics.succeededWithWarnings)" 1
     expect_eq "$(J '.metrics.failuresByStage | to_entries | map("\(.key)=\(.value)") | join(",")')" "preflight=1,run=1,validation=1"
     expect_eq "$(J '.inputValidation.issues | map(.location) | join(",")')" phs000005
-    expect_eq "$(J '[.outputValidation.issues[] | select(.severity == "ERROR") | .location] | join(",")')" "phs000003,phs000004,phs000006"
-    expect_eq "$(J .errorMessage)" "3 of 6 studies failed and 1 did not start: phs000003, phs000004, phs000005, phs000006"
+    # Data failures (run DATA_ERROR, failed validation, no usable input) exclude the study as a
+    # warning; only a study that did not start (or failed for another reason) fails the stage.
+    expect_eq "$(J '[.outputValidation.issues[] | select(.severity == "ERROR") | .location] | join(",")')" "phs000006"
+    expect_eq "$(J '[.outputValidation.issues[] | select(.code == "STUDY_EXCLUDED") | .location] | join(",")')" "phs000003,phs000004"
+    expect_eq "$(J '.inputValidation.issues | map(.severity) | join(",")')" WARNING
+    expect_eq "$(J '.metrics.excludedStudyIds | join(",")')" "phs000003,phs000004,phs000005"
+    expect_eq "$(J '.metrics.rerunStudyIds | join(",")')" phs000006
+    expect_eq "$(J .errorMessage)" "1 of 6 studies need a re-run (0 failed for a reason other than their data, 1 did not start): phs000006"
     local md; md=$(MDFILE)
-    expect_file_has "$md" "**Result: FAILED.** 3 of 6 studies failed and 1 did not start."
-    expect_file_has "$md" "### phs000003 (ABV): failed in run"
+    expect_file_has "$md" "**Result: FAILED.** 1 of 6 studies need a re-run (0 failed for a reason other than their data, 1 did not start); 3 were excluded for data problems."
+    expect_file_has "$md" "### phs000003 (ABV): failed in run (data problem: excluded, needs data review)"
     expect_file_has "$md" "- **Job error:** Mapping CSV at s3://b/m.csv contained no data rows"
     expect_file_has "$md" "- **Runner log:** \`s3://data/etl-runner/logs/split-allconcepts-build-1-split-phs000003.log\`"
     expect_file_has "$md" "- **Re-run only this study:** \`STUDY_FILTER=phs000003\`"
@@ -421,6 +427,27 @@ report_mixed_stage_is_failed_and_puts_each_failure_first_with_where_to_look() {
     expect_out "full report: "
     RC=0; OUT=$("$COMMON/validate-report.sh" "$T/report/split-allconcepts-report-build-1.json" 2>&1) || RC=$?
     expect_rc 1
+}
+
+report_data_failures_only_exclude_the_studies_and_succeed_with_warnings() {
+    run_pooled phs000001 ok
+    run_pooled phs000003 data
+    run_pooled phs000004 validation
+    "$SPLIT/record-study-result.sh" --out "$T/out/phs000005/study-result.json" --study phs000005 --abv E \
+        --lane preflight --stage preflight --reason "legacy allConcepts input not found" >/dev/null
+    run_report
+    expect_rc 10
+    expect_eq "$(J .status)" SUCCESS
+    expect_eq "$(J .exitCode)" SUCCESS_WITH_WARNINGS
+    expect_eq "$(J .errorMessage)" null
+    expect_eq "$(J '.metrics.excludedStudyIds | join(",")')" "phs000003,phs000004,phs000005"
+    expect_eq "$(J '.metrics.rerunStudyIds | length')" 0
+    expect_eq "$(J '[.inputValidation.issues[], .outputValidation.issues[] | select(.severity == "ERROR")] | length')" 0
+    expect_file_has "$(MDFILE)" "3 were excluded for data problems (listed below, and left out of the later stages)."
+    # No ERROR issues, so the standard report checks pass; the exclusions are listed as warnings.
+    RC=0; OUT=$("$COMMON/validate-report.sh" "$T/report/split-allconcepts-report-build-1.json" 2>&1) || RC=$?
+    expect_rc 0
+    expect_out "STUDY_EXCLUDED"
 }
 
 report_counts_an_unreadable_result_as_a_failure() {
