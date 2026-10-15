@@ -41,7 +41,7 @@ fi
 # is printed as-is (an issue message can span several lines).
 if ! LINES=$(jq -r '
   def ok(f): if (try f catch false) then "1" else "0" end;
-  def chk($label; f): "C\t\(ok(f))\t\($label)";
+  def chk($name; f): "C\t\(ok(f))\t\($name)";
   chk("report names its job";        .jobName | type == "string" and length > 0),
   chk("report carries a run id";     .runId   | type == "string" and length > 0),
   chk("status is SUCCESS";           .status == "SUCCESS"),
