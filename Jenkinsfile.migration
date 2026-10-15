@@ -275,351 +275,7 @@ pipeline {
         stage('Split AllConcepts') {
             steps {
                 script {
-                    // Catch a stale form value (e.g. the pre-fix './output' default, which
-                    // Jenkins keeps serving until the job re-processes its parameters block,
-                    // and which Rebuild copies forward) here, once, instead of scheduling
-                    // 28 downstream builds that each fail the same runner-side guard.
-                    if (!params.DATA_ROOT.trim().startsWith('s3://')) {
-                        error("DATA_ROOT must be an s3:// URI, got '${params.DATA_ROOT}'. A local path " +
-                              'resolves inside the runner container and the split results are destroyed with the instance.')
-                    }
-                    def dataRoot = params.DATA_ROOT.trim().replaceAll('/+$', '')
-                    if (!params.ALL_CONCEPTS_OUTPUT.trim().startsWith('s3://')) {
-                        error("ALL_CONCEPTS_OUTPUT must be an s3:// URI, got '${params.ALL_CONCEPTS_OUTPUT}'. " +
-                              'A local path resolves inside the runner container and is destroyed with it.')
-                    }
-                    if (!params.VCF_INDEXES_OUTPUT.trim().startsWith('s3://')) {
-                        error("VCF_INDEXES_OUTPUT must be an s3:// URI, got '${params.VCF_INDEXES_OUTPUT}'. " +
-                              'A local path resolves inside the runner container and is destroyed with it.')
-                    }
-
-                    // Resolve the study list from managed inputs so we can loop per study.
-                    def managedInputsUri = params.MANAGED_INPUTS?.trim()
-                    if (!managedInputsUri) {
-                        error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
-                    }
-
-                    def studies = []
-                    // Use an env var to avoid Groovy GString injection into the shell.
-                    env.MI_URI = managedInputsUri
-                    def lines = sh(returnStdout: true, script: '''
-                        aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
-                    ''').trim()
-
-                    if (!lines) {
-                        error("Could not read managed inputs from ${managedInputsUri}")
-                    }
-
-                    def header = null
-                    lines.readLines().each { line ->
-                        if (!line.trim()) return
-                        def cols = parseCsvLine(line)
-                        if (header == null) {
-                            header = cols
-                            return
-                        }
-                        def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
-                            ? cols[header.indexOf('Study Identifier')].trim() : ''
-                        def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
-                            ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
-                        def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
-                            ? cols[header.indexOf('Data is ready to process')].trim() : ''
-                        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
-                            studies << [studyId: studyId, abv: abv]
-                        }
-                    }
-
-                    def filterIds = params.STUDY_FILTER.split(',').collect { it.trim() }.findAll { it }
-                    if (filterIds) {
-                        studies = studies.findAll { filterIds.contains(it.studyId) }
-                        echo "STUDY_FILTER active: ${studies.size()} of the ready studies match ${filterIds}"
-                    }
-
-                    if (studies.isEmpty()) {
-                        error('No ready studies found in managed inputs for Split AllConcepts.')
-                    }
-
-                    echo "Split AllConcepts: ${studies.size()} study/studies to process"
-
-                    int concurrency      = positiveParam('SPLIT_CONCURRENCY')
-                    int largeConcurrency = positiveParam('SPLIT_LARGE_CONCURRENCY')
-                    if (!(params.SPLIT_LARGE_STUDY_GB.trim() ==~ /[0-9]+/)) {
-                        error("SPLIT_LARGE_STUDY_GB must be a whole number of GiB (0 sends every study to the pool), got '${params.SPLIT_LARGE_STUDY_GB}'.")
-                    }
-                    int largeGb = params.SPLIT_LARGE_STUDY_GB.trim() as int
-                    int poolTimeoutFloor  = positiveParam('SPLIT_POOL_TIMEOUT_SECONDS')
-                    int largeTimeoutFloor = positiveParam('SPLIT_LARGE_TIMEOUT_SECONDS')
-                    int timeoutBase       = positiveParam('SPLIT_TIMEOUT_BASE_SECONDS')
-                    int timeoutPerGb      = positiveParam('SPLIT_TIMEOUT_SECONDS_PER_GB')
-
-                    // Everything about each study lands in <resultsDir>/<study_id>/ and is consolidated into
-                    // one report at the end. A previous build's results in this workspace would otherwise
-                    // be reported as this run's.
-                    def runBase    = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
-                    def resultsDir = 'downstream-artifacts/split-allconcepts'
-                    def planDir    = 'downstream-artifacts/split-plan'
-                    sh "rm -rf '${resultsDir}' '${planDir}' downstream-artifacts/split-allconcepts-report-*"
-                    env.SPLIT_STAGE_STARTED = sh(returnStdout: true, script: 'date +%s').trim()
-
-                    def mappingTag = runBase
-                    for (study in studies) {
-                        study.mappingUri = "${dataRoot}/${study.studyId}/mappings/${mappingTag}/${study.studyId}_hpds_id_mapping.csv"
-                    }
-
-                    // --- plan: check every input in one parallel pass, size it, order largest first, pick a lane
-                    writeFile file: "${planDir}/studies.tsv",
-                              text: studies.collect { "${it.studyId}\t${it.abv.replaceAll(/[\t\r\n]/, ' ')}\t${it.mappingUri}" }.join('\n') + '\n'
-                    int planRc
-                    withEnv(["DATA_ROOT=${dataRoot}", "LARGE_STUDY_GB=${largeGb}", "PLAN_DIR=${planDir}"]) {
-                        planRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/plan-studies.sh "$PLAN_DIR/studies.tsv" "$PLAN_DIR"')
-                    }
-                    if (planRc != 0) {
-                        error("Split AllConcepts could not be planned (plan-studies.sh exit ${planRc}): some study inputs could not " +
-                              'be checked in S3 -- see the plan-studies lines above. Nothing was provisioned.')
-                    }
-                    def plan          = parseTsv(readFile("${planDir}/plan.tsv"))
-                    def missingInputs = parseTsv(readFile("${planDir}/missing.tsv"))
-                    def poolQueue  = plan.findAll { it.lane == 'pool' }
-                    def largeQueue = plan.findAll { it.lane == 'large' }
-
-                    if (params.PREFLIGHT_ONLY) {
-                        echo "Pre-flight: ${poolQueue.size()} study/studies for the runner pool, ${largeQueue.size()} large " +
-                             "(${largeGb} GiB or more) for their own instances, ${missingInputs.size()} without a usable input. " +
-                             "The plan is archived under ${planDir}/."
-                        if (missingInputs) {
-                            error("Pre-flight: no usable legacy allConcepts input for ${missingInputs*.study_id.join(', ')} -- see ${planDir}/missing.tsv.")
-                        }
-                        return
-                    }
-
-                    // Studies without a usable input fail here, each with its own result, and are not run.
-                    for (m in missingInputs) {
-                        withEnv(["R_OUT=${resultsDir}/${m.study_id}/study-result.json", "R_SID=${m.study_id}", "R_ABV=${m.abbreviation}",
-                                 "R_REASON=${m.reason}", "R_INPUT=${m.input_uri}"]) {
-                            sh '''etl-runners/split-allconcepts/record-study-result.sh --out "$R_OUT" --study "$R_SID" --abv "$R_ABV" \
-                                    --lane preflight --stage preflight --reason "$R_REASON" --input-uri "$R_INPUT" >/dev/null'''
-                        }
-                    }
-
-                    // One runner image for every split, whichever lane it runs in.
-                    if (plan) {
-                        env.RUNNER_IMAGE_TAR = "hpds-etl-runner-${runBase}.tar.gz"
-                        sh "make -C etl-runners/split-allconcepts package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
-                    }
-
-                    // Upload the planned studies' mapping CSVs before fanning out. The copied artifact is a
-                    // file in THIS workspace; the split job runs in a container on its own instance, so it
-                    // travels via the data bucket, under {root}/{study_id}/mappings/<build-tag>/. Staged as
-                    // that tree and uploaded in one recursive copy rather than one aws process per study.
-                    if (plan) {
-                        def noMapping = plan.findAll {
-                            !fileExists("downstream-artifacts/participants-migration/${it.study_id}_hpds_id_mapping.csv")
-                        }
-                        if (noMapping) {
-                            error("Mapping CSV not found under downstream-artifacts/participants-migration/ for: " +
-                                  "${noMapping*.study_id.join(', ')}. The participants-migration copyArtifacts step may have failed.")
-                        }
-                        writeFile file: 'split-mappings.list', text: plan*.study_id.join('\n') + '\n'
-                        env.MAPPING_TAG  = mappingTag
-                        env.MAPPING_ROOT = dataRoot
-                        sh '''
-                            set -eu
-                            rm -rf split-mappings
-                            while read -r sid; do
-                              [ -n "$sid" ] || continue
-                              mkdir -p "split-mappings/$sid/mappings/$MAPPING_TAG"
-                              cp "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv" \
-                                 "split-mappings/$sid/mappings/$MAPPING_TAG/"
-                            done < split-mappings.list
-                            aws s3 cp split-mappings "$MAPPING_ROOT/" --recursive --no-progress --only-show-errors
-                            echo "Uploaded $(find split-mappings -type f | wc -l | tr -d ' ') mapping CSV(s)"
-                        '''
-                    }
-
-                    // --- run ---------------------------------------------------------------------------
-                    // Two lanes, both largest first. Pool lane: SPLIT_CONCURRENCY long-lived workers, each
-                    // taking study after study (run-pooled-study.sh). Own-instance lane: large studies, and
-                    // every study when SPLIT_USE_RUNNER_POOL is off, each through a split-allconcepts build
-                    // on an instance sized for it. Taking the next study needs no lock: pipeline Groovy runs
-                    // every parallel branch on one thread and switches only at a step, and there is no step
-                    // between reading a queue's cursor and advancing it.
-                    def buildQueue = params.SPLIT_USE_RUNNER_POOL ? largeQueue : (largeQueue + poolQueue)
-                    if (!params.SPLIT_USE_RUNNER_POOL) {
-                        poolQueue = []
-                        buildQueue = largestFirst(buildQueue)
-                    }
-                    int poolWorkers  = Math.min(concurrency, poolQueue.size())
-                    int buildWorkers = Math.min(params.SPLIT_USE_RUNNER_POOL ? largeConcurrency : concurrency, buildQueue.size())
-                    if (poolWorkers > 50) {
-                        error("SPLIT_CONCURRENCY above 50 is not supported with the runner pool (got ${concurrency}).")
-                    }
-                    echo "Split AllConcepts plan: ${poolQueue.size()} study/studies on ${poolWorkers} pool worker(s), " +
-                         "${buildQueue.size()} on their own instances (at most ${buildWorkers} at a time), " +
-                         "${missingInputs.size()} without a usable input. Largest first."
-
-                    def poolInstances = poolWorkers > 0 ? startRunnerPool('split-allconcepts', poolWorkers) : []
-                    def started = [] as Set
-                    def progress = [stop: false, stopReason: '', poolNext: 0, buildNext: 0, liveWorkers: poolWorkers]
-                    def branches = [:]
-
-                    for (int w = 1; w <= poolWorkers; w++) {
-                        def poolInstance = poolInstances[w - 1]
-                        def workerName = "pool-worker-${w}"
-                        branches[workerName] = {
-                            while (!progress.stop && progress.poolNext < poolQueue.size()) {
-                                def s = poolQueue[progress.poolNext]
-                                progress.poolNext = progress.poolNext + 1
-                                started << s.study_id
-                                int rc
-                                withEnv(["STUDY_ID=${s.study_id}", "ABBREVIATION=${s.abbreviation}", "INPUT_URI=${s.input_uri}",
-                                         "INPUT_BYTES=${s.input_bytes}", "MAPPING_URI=${s.mapping_uri}", "OUTPUT_URI=${dataRoot}",
-                                         "RUN_ID=${runBase}-split-${s.study_id}", "POOL_INSTANCE=${poolInstance}",
-                                         "POOL_MAILBOX=${env.POOL_MAILBOX_URI}", "POOL_LOG_PREFIX=${env.POOL_LOG_PREFIX}",
-                                         "PIPELINE_TIMEOUT=${splitTimeoutSeconds(s.input_bytes, poolTimeoutFloor, timeoutBase, timeoutPerGb)}",
-                                         "STUDY_OUT=${resultsDir}/${s.study_id}"]) {
-                                    rc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/run-pooled-study.sh "$STUDY_OUT"')
-                                }
-                                boolean ok = rc == 0 || rc == 10
-                                if (!ok && !params.CONTINUE_ON_STUDY_FAILURE) {
-                                    progress.stop = true
-                                    progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
-                                }
-                                // A dead worker takes no more studies, nor does one retired after a timeout
-                                // (exit 2), which may still be running the timed-out job; the others carry on.
-                                if (!ok && (rc == 2 || instanceState(poolInstance) != 'running')) {
-                                    progress.liveWorkers = progress.liveWorkers - 1
-                                    def why = rc == 2 ? 'was retired after a timed-out study' : 'is no longer running'
-                                    echo "${workerName}: worker ${poolInstance} ${why}, so it takes no more studies " +
-                                         "(${progress.liveWorkers} pool worker(s) left). Worker log: ${env.POOL_LOG_PREFIX}-${poolInstance}.log"
-                                    break
-                                }
-                            }
-                        }
-                    }
-
-                    for (int w = 1; w <= buildWorkers; w++) {
-                        def workerName = "own-instance-${w}"
-                        branches[workerName] = {
-                            while (!progress.stop && progress.buildNext < buildQueue.size()) {
-                                def s = buildQueue[progress.buildNext]
-                                progress.buildNext = progress.buildNext + 1
-                                started << s.study_id
-                                boolean large = s.lane == 'large'
-                                long t0 = System.currentTimeMillis().intdiv(1000)
-                                def buildUrl = ''
-                                def buildReason = ''
-                                def studyTimeout = splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)
-                                echo "[${s.study_id}] own instance (${large ? "large, ${s.volume_gb} GiB volume, ${params.SPLIT_LARGE_INSTANCE_TYPE.trim()}" : 'default size'}; timeout ${studyTimeout}s)"
-                                try {
-                                    def downstream = build(
-                                        job: params.SPLIT_ALLCONCEPTS_JOB,
-                                        wait: true,
-                                        propagate: false,
-                                        parameters: [
-                                            string(name: 'STUDY_ID',            value: s.study_id),
-                                            string(name: 'ABBREVIATION',        value: s.abbreviation),
-                                            string(name: 'INPUT',               value: s.input_uri),
-                                            string(name: 'MAPPING',             value: s.mapping_uri),
-                                            string(name: 'OUTPUT',              value: dataRoot),
-                                            string(name: 'RUN_ID',              value: "${runBase}-split-${s.study_id}"),
-                                            string(name: 'PREBUILT_IMAGE_TAR',  value: env.RUNNER_IMAGE_TAR ?: ''),
-                                            string(name: 'INSTANCE_TYPE',       value: large ? params.SPLIT_LARGE_INSTANCE_TYPE.trim() : 'r6i.large'),
-                                            string(name: 'ROOT_VOLUME_GB',      value: large ? s.volume_gb : '50'),
-                                            string(name: 'JOB_TIMEOUT_SECONDS', value: "${splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)}"),
-                                            string(name: 'ENV',                 value: params.ENV),
-                                            booleanParam(name: 'SKIP_TESTS',     value: true),
-                                            booleanParam(name: 'PREFLIGHT_ONLY', value: false),
-                                        ])
-                                    buildUrl = downstream.absoluteUrl
-                                    buildReason = "${params.SPLIT_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result} " +
-                                                  "before its runner reported a status; see ${downstream.absoluteUrl}console"
-                                    try {
-                                        copyArtifacts(projectName: params.SPLIT_ALLCONCEPTS_JOB, selector: specific("${downstream.number}"),
-                                                      target: "${resultsDir}/${s.study_id}/build", optional: true)
-                                    } catch (err) {
-                                        echo "[${s.study_id}] could not copy the build's reports (${err.message}); they remain on ${downstream.absoluteUrl}"
-                                    }
-                                } catch (err) {
-                                    buildReason = "could not run ${params.SPLIT_ALLCONCEPTS_JOB}: ${err.message}"
-                                }
-                                // Same validation and result file as a pool-lane study, from the build's reports.
-                                int rc
-                                withEnv(["STUDY_ID=${s.study_id}", "ABBREVIATION=${s.abbreviation}", "INPUT_URI=${s.input_uri}",
-                                         "INPUT_BYTES=${s.input_bytes}", "LANE=${large ? 'large' : 'pool'}",
-                                         "RUN_ID=${runBase}-split-${s.study_id}", "STUDY_OUT=${resultsDir}/${s.study_id}",
-                                         "DOWNSTREAM_URL=${buildUrl}", "DOWNSTREAM_REASON=${buildReason}", "T0=${t0}"]) {
-                                    rc = sh(returnStatus: true, script: '''
-                                        set +ex
-                                        R="$STUDY_OUT/build/etl-runners/split-allconcepts/reports"
-                                        mkdir -p "$R"
-                                        run=""
-                                        [ -f "$R/status.json" ] && run=$(jq -r '.runId // empty' "$R/status.json")
-                                        [ -n "$run" ] || run="$RUN_ID"
-                                        case "$run" in *-r[0-9]*) attempts=2 ;; *) attempts=1 ;; esac
-                                        vrc=""
-                                        if [ -f "$R/split-allconcepts-$run.json" ]; then
-                                          etl-runners/split-allconcepts/validate.sh "$R" "$run" > "$STUDY_OUT/validation.txt" 2>&1 && vrc=0 || vrc=$?
-                                        fi
-                                        set --
-                                        [ -f "$R/status.json" ] || set -- --reason "$DOWNSTREAM_REASON"
-                                        outcome=$(etl-runners/split-allconcepts/record-study-result.sh --out "$STUDY_OUT/study-result.json" \
-                                          --study "$STUDY_ID" --abv "$ABBREVIATION" --lane "$LANE" --run-id "$run" --attempts "$attempts" \
-                                          --reports-dir "$R" --validation-rc "$vrc" --validation-file "$STUDY_OUT/validation.txt" \
-                                          --input-uri "$INPUT_URI" --input-bytes "$INPUT_BYTES" --build-url "$DOWNSTREAM_URL" \
-                                          --started-epoch "$T0" --finished-epoch "$(date +%s)" "$@") || outcome=FAILED
-                                        echo "[$STUDY_ID] $outcome$( [ "$outcome" = SUCCESS ] || [ "$outcome" = SUCCESS_WITH_WARNINGS ] || \
-                                          jq -r '": " + (.failureReason // "")' "$STUDY_OUT/study-result.json" 2>/dev/null)"
-                                        case "$outcome" in SUCCESS) exit 0 ;; SUCCESS_WITH_WARNINGS) exit 10 ;; *) exit 1 ;; esac
-                                    ''')
-                                }
-                                if (rc != 0 && rc != 10 && !params.CONTINUE_ON_STUDY_FAILURE) {
-                                    progress.stop = true
-                                    progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
-                                }
-                            }
-                        }
-                    }
-
-                    try {
-                        if (branches) {
-                            parallel branches
-                        }
-                    } finally {
-                        // Every study is done: stop paying for idle workers now, not at the end of the build.
-                        stopRunnerPool()
-                    }
-
-                    // Studies never started: the run was stopped early, or every pool worker died or was retired.
-                    for (s in plan.findAll { !(it.study_id in started) }) {
-                        def why = progress.stopReason ?: (s.lane == 'pool' && progress.liveWorkers == 0
-                                    ? 'every runner-pool worker died or was retired after a timeout before reaching it; see the worker logs'
-                                    : 'no worker was left to run it')
-                        withEnv(["R_OUT=${resultsDir}/${s.study_id}/study-result.json", "R_SID=${s.study_id}",
-                                 "R_ABV=${s.abbreviation}", "R_LANE=${s.lane}", "R_REASON=not started: ${why}",
-                                 "R_INPUT=${s.input_uri}", "R_BYTES=${s.input_bytes}"]) {
-                            sh '''etl-runners/split-allconcepts/record-study-result.sh --out "$R_OUT" --study "$R_SID" --abv "$R_ABV" \
-                                    --lane "$R_LANE" --stage not-started --reason "$R_REASON" --input-uri "$R_INPUT" \
-                                    --input-bytes "$R_BYTES" >/dev/null'''
-                        }
-                    }
-
-                    // --- one report for the whole stage ----------------------------------------------------
-                    int reportRc
-                    withEnv(["STAGE_STARTED_EPOCH=${env.SPLIT_STAGE_STARTED}", "LARGE_STUDY_GB=${largeGb}",
-                             "POOL_WORKERS=${poolWorkers}", "RESULTS_DIR=${resultsDir}", "REPORT_RUN=${runBase}"]) {
-                        reportRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/split-report.sh "$RESULTS_DIR" "$REPORT_RUN" downstream-artifacts')
-                    }
-                    def reportMd = "downstream-artifacts/split-allconcepts-report-${runBase}.md"
-                    // Archived now, so the report is on the build page while the later stages run.
-                    archiveArtifacts artifacts: "downstream-artifacts/split-allconcepts-report-*, ${resultsDir}/**, ${planDir}/**",
-                                     allowEmptyArchive: true
-                    if (reportRc == 10) {
-                        unstable("Split AllConcepts completed with warnings; see ${reportMd} (archived on this build).")
-                    } else if (reportRc != 0) {
-                        def summary = reportRc == 1 ? sh(returnStdout: true, script: "jq -r '.errorMessage // empty' 'downstream-artifacts/split-allconcepts-report-${runBase}.json' 2>/dev/null || true").trim() : ''
-                        error("Split AllConcepts failed: ${summary ?: "the report could not be written (split-report.sh exit ${reportRc})"}. " +
-                              "Each failed study's reason, logs and re-run setting are in ${reportMd} (archived on this build).")
-                    }
+                    runSplitAllConcepts()
                 }
             }
         }
@@ -1001,4 +657,355 @@ static List<String> parseCsvLine(String line) {
     }
     fields << current.toString().trim()
     return fields
+}
+
+// The Split AllConcepts stage. A function rather than inline in pipeline {}: declarative compiles
+// the whole pipeline block into one JVM method, and this body alone pushed it past the 64 KB limit
+// ("Method too large"). Keep long stage logic out here.
+def runSplitAllConcepts() {
+    // Catch a stale form value (e.g. the pre-fix './output' default, which
+    // Jenkins keeps serving until the job re-processes its parameters block,
+    // and which Rebuild copies forward) here, once, instead of scheduling
+    // 28 downstream builds that each fail the same runner-side guard.
+    if (!params.DATA_ROOT.trim().startsWith('s3://')) {
+        error("DATA_ROOT must be an s3:// URI, got '${params.DATA_ROOT}'. A local path " +
+              'resolves inside the runner container and the split results are destroyed with the instance.')
+    }
+    def dataRoot = params.DATA_ROOT.trim().replaceAll('/+$', '')
+    if (!params.ALL_CONCEPTS_OUTPUT.trim().startsWith('s3://')) {
+        error("ALL_CONCEPTS_OUTPUT must be an s3:// URI, got '${params.ALL_CONCEPTS_OUTPUT}'. " +
+              'A local path resolves inside the runner container and is destroyed with it.')
+    }
+    if (!params.VCF_INDEXES_OUTPUT.trim().startsWith('s3://')) {
+        error("VCF_INDEXES_OUTPUT must be an s3:// URI, got '${params.VCF_INDEXES_OUTPUT}'. " +
+              'A local path resolves inside the runner container and is destroyed with it.')
+    }
+
+    // Resolve the study list from managed inputs so we can loop per study.
+    def managedInputsUri = params.MANAGED_INPUTS?.trim()
+    if (!managedInputsUri) {
+        error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
+    }
+
+    def studies = []
+    // Use an env var to avoid Groovy GString injection into the shell.
+    env.MI_URI = managedInputsUri
+    def lines = sh(returnStdout: true, script: '''
+        aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
+    ''').trim()
+
+    if (!lines) {
+        error("Could not read managed inputs from ${managedInputsUri}")
+    }
+
+    def header = null
+    lines.readLines().each { line ->
+        if (!line.trim()) return
+        def cols = parseCsvLine(line)
+        if (header == null) {
+            header = cols
+            return
+        }
+        def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
+            ? cols[header.indexOf('Study Identifier')].trim() : ''
+        def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
+            ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
+        def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
+            ? cols[header.indexOf('Data is ready to process')].trim() : ''
+        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
+            studies << [studyId: studyId, abv: abv]
+        }
+    }
+
+    def filterIds = params.STUDY_FILTER.split(',').collect { it.trim() }.findAll { it }
+    if (filterIds) {
+        studies = studies.findAll { filterIds.contains(it.studyId) }
+        echo "STUDY_FILTER active: ${studies.size()} of the ready studies match ${filterIds}"
+    }
+
+    if (studies.isEmpty()) {
+        error('No ready studies found in managed inputs for Split AllConcepts.')
+    }
+
+    echo "Split AllConcepts: ${studies.size()} study/studies to process"
+
+    int concurrency      = positiveParam('SPLIT_CONCURRENCY')
+    int largeConcurrency = positiveParam('SPLIT_LARGE_CONCURRENCY')
+    if (!(params.SPLIT_LARGE_STUDY_GB.trim() ==~ /[0-9]+/)) {
+        error("SPLIT_LARGE_STUDY_GB must be a whole number of GiB (0 sends every study to the pool), got '${params.SPLIT_LARGE_STUDY_GB}'.")
+    }
+    int largeGb = params.SPLIT_LARGE_STUDY_GB.trim() as int
+    int poolTimeoutFloor  = positiveParam('SPLIT_POOL_TIMEOUT_SECONDS')
+    int largeTimeoutFloor = positiveParam('SPLIT_LARGE_TIMEOUT_SECONDS')
+    int timeoutBase       = positiveParam('SPLIT_TIMEOUT_BASE_SECONDS')
+    int timeoutPerGb      = positiveParam('SPLIT_TIMEOUT_SECONDS_PER_GB')
+
+    // Everything about each study lands in <resultsDir>/<study_id>/ and is consolidated into
+    // one report at the end. A previous build's results in this workspace would otherwise
+    // be reported as this run's.
+    def runBase    = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def resultsDir = 'downstream-artifacts/split-allconcepts'
+    def planDir    = 'downstream-artifacts/split-plan'
+    sh "rm -rf '${resultsDir}' '${planDir}' downstream-artifacts/split-allconcepts-report-*"
+    env.SPLIT_STAGE_STARTED = sh(returnStdout: true, script: 'date +%s').trim()
+
+    def mappingTag = runBase
+    for (study in studies) {
+        study.mappingUri = "${dataRoot}/${study.studyId}/mappings/${mappingTag}/${study.studyId}_hpds_id_mapping.csv"
+    }
+
+    // --- plan: check every input in one parallel pass, size it, order largest first, pick a lane
+    writeFile file: "${planDir}/studies.tsv",
+              text: studies.collect { "${it.studyId}\t${it.abv.replaceAll(/[\t\r\n]/, ' ')}\t${it.mappingUri}" }.join('\n') + '\n'
+    int planRc
+    withEnv(["DATA_ROOT=${dataRoot}", "LARGE_STUDY_GB=${largeGb}", "PLAN_DIR=${planDir}"]) {
+        planRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/plan-studies.sh "$PLAN_DIR/studies.tsv" "$PLAN_DIR"')
+    }
+    if (planRc != 0) {
+        error("Split AllConcepts could not be planned (plan-studies.sh exit ${planRc}): some study inputs could not " +
+              'be checked in S3 -- see the plan-studies lines above. Nothing was provisioned.')
+    }
+    def plan          = parseTsv(readFile("${planDir}/plan.tsv"))
+    def missingInputs = parseTsv(readFile("${planDir}/missing.tsv"))
+    def poolQueue  = plan.findAll { it.lane == 'pool' }
+    def largeQueue = plan.findAll { it.lane == 'large' }
+
+    if (params.PREFLIGHT_ONLY) {
+        echo "Pre-flight: ${poolQueue.size()} study/studies for the runner pool, ${largeQueue.size()} large " +
+             "(${largeGb} GiB or more) for their own instances, ${missingInputs.size()} without a usable input. " +
+             "The plan is archived under ${planDir}/."
+        if (missingInputs) {
+            error("Pre-flight: no usable legacy allConcepts input for ${missingInputs*.study_id.join(', ')} -- see ${planDir}/missing.tsv.")
+        }
+        return
+    }
+
+    // Studies without a usable input fail here, each with its own result, and are not run.
+    for (m in missingInputs) {
+        withEnv(["R_OUT=${resultsDir}/${m.study_id}/study-result.json", "R_SID=${m.study_id}", "R_ABV=${m.abbreviation}",
+                 "R_REASON=${m.reason}", "R_INPUT=${m.input_uri}"]) {
+            sh '''etl-runners/split-allconcepts/record-study-result.sh --out "$R_OUT" --study "$R_SID" --abv "$R_ABV" \
+                    --lane preflight --stage preflight --reason "$R_REASON" --input-uri "$R_INPUT" >/dev/null'''
+        }
+    }
+
+    // One runner image for every split, whichever lane it runs in.
+    if (plan) {
+        env.RUNNER_IMAGE_TAR = "hpds-etl-runner-${runBase}.tar.gz"
+        sh "make -C etl-runners/split-allconcepts package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
+    }
+
+    // Upload the planned studies' mapping CSVs before fanning out. The copied artifact is a
+    // file in THIS workspace; the split job runs in a container on its own instance, so it
+    // travels via the data bucket, under {root}/{study_id}/mappings/<build-tag>/. Staged as
+    // that tree and uploaded in one recursive copy rather than one aws process per study.
+    if (plan) {
+        def noMapping = plan.findAll {
+            !fileExists("downstream-artifacts/participants-migration/${it.study_id}_hpds_id_mapping.csv")
+        }
+        if (noMapping) {
+            error("Mapping CSV not found under downstream-artifacts/participants-migration/ for: " +
+                  "${noMapping*.study_id.join(', ')}. The participants-migration copyArtifacts step may have failed.")
+        }
+        writeFile file: 'split-mappings.list', text: plan*.study_id.join('\n') + '\n'
+        env.MAPPING_TAG  = mappingTag
+        env.MAPPING_ROOT = dataRoot
+        sh '''
+            set -eu
+            rm -rf split-mappings
+            while read -r sid; do
+              [ -n "$sid" ] || continue
+              mkdir -p "split-mappings/$sid/mappings/$MAPPING_TAG"
+              cp "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv" \
+                 "split-mappings/$sid/mappings/$MAPPING_TAG/"
+            done < split-mappings.list
+            aws s3 cp split-mappings "$MAPPING_ROOT/" --recursive --no-progress --only-show-errors
+            echo "Uploaded $(find split-mappings -type f | wc -l | tr -d ' ') mapping CSV(s)"
+        '''
+    }
+
+    // --- run ---------------------------------------------------------------------------
+    // Two lanes, both largest first. Pool lane: SPLIT_CONCURRENCY long-lived workers, each
+    // taking study after study (run-pooled-study.sh). Own-instance lane: large studies, and
+    // every study when SPLIT_USE_RUNNER_POOL is off, each through a split-allconcepts build
+    // on an instance sized for it. Taking the next study needs no lock: pipeline Groovy runs
+    // every parallel branch on one thread and switches only at a step, and there is no step
+    // between reading a queue's cursor and advancing it.
+    def buildQueue = params.SPLIT_USE_RUNNER_POOL ? largeQueue : (largeQueue + poolQueue)
+    if (!params.SPLIT_USE_RUNNER_POOL) {
+        poolQueue = []
+        buildQueue = largestFirst(buildQueue)
+    }
+    int poolWorkers  = Math.min(concurrency, poolQueue.size())
+    int buildWorkers = Math.min(params.SPLIT_USE_RUNNER_POOL ? largeConcurrency : concurrency, buildQueue.size())
+    if (poolWorkers > 50) {
+        error("SPLIT_CONCURRENCY above 50 is not supported with the runner pool (got ${concurrency}).")
+    }
+    echo "Split AllConcepts plan: ${poolQueue.size()} study/studies on ${poolWorkers} pool worker(s), " +
+         "${buildQueue.size()} on their own instances (at most ${buildWorkers} at a time), " +
+         "${missingInputs.size()} without a usable input. Largest first."
+
+    def poolInstances = poolWorkers > 0 ? startRunnerPool('split-allconcepts', poolWorkers) : []
+    def started = [] as Set
+    def progress = [stop: false, stopReason: '', poolNext: 0, buildNext: 0, liveWorkers: poolWorkers]
+    def branches = [:]
+
+    for (int w = 1; w <= poolWorkers; w++) {
+        def poolInstance = poolInstances[w - 1]
+        def workerName = "pool-worker-${w}"
+        branches[workerName] = {
+            while (!progress.stop && progress.poolNext < poolQueue.size()) {
+                def s = poolQueue[progress.poolNext]
+                progress.poolNext = progress.poolNext + 1
+                started << s.study_id
+                int rc
+                withEnv(["STUDY_ID=${s.study_id}", "ABBREVIATION=${s.abbreviation}", "INPUT_URI=${s.input_uri}",
+                         "INPUT_BYTES=${s.input_bytes}", "MAPPING_URI=${s.mapping_uri}", "OUTPUT_URI=${dataRoot}",
+                         "RUN_ID=${runBase}-split-${s.study_id}", "POOL_INSTANCE=${poolInstance}",
+                         "POOL_MAILBOX=${env.POOL_MAILBOX_URI}", "POOL_LOG_PREFIX=${env.POOL_LOG_PREFIX}",
+                         "PIPELINE_TIMEOUT=${splitTimeoutSeconds(s.input_bytes, poolTimeoutFloor, timeoutBase, timeoutPerGb)}",
+                         "STUDY_OUT=${resultsDir}/${s.study_id}"]) {
+                    rc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/run-pooled-study.sh "$STUDY_OUT"')
+                }
+                boolean ok = rc == 0 || rc == 10
+                if (!ok && !params.CONTINUE_ON_STUDY_FAILURE) {
+                    progress.stop = true
+                    progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
+                }
+                // A dead worker takes no more studies, nor does one retired after a timeout
+                // (exit 2), which may still be running the timed-out job; the others carry on.
+                if (!ok && (rc == 2 || instanceState(poolInstance) != 'running')) {
+                    progress.liveWorkers = progress.liveWorkers - 1
+                    def why = rc == 2 ? 'was retired after a timed-out study' : 'is no longer running'
+                    echo "${workerName}: worker ${poolInstance} ${why}, so it takes no more studies " +
+                         "(${progress.liveWorkers} pool worker(s) left). Worker log: ${env.POOL_LOG_PREFIX}-${poolInstance}.log"
+                    break
+                }
+            }
+        }
+    }
+
+    for (int w = 1; w <= buildWorkers; w++) {
+        def workerName = "own-instance-${w}"
+        branches[workerName] = {
+            while (!progress.stop && progress.buildNext < buildQueue.size()) {
+                def s = buildQueue[progress.buildNext]
+                progress.buildNext = progress.buildNext + 1
+                started << s.study_id
+                boolean large = s.lane == 'large'
+                long t0 = System.currentTimeMillis().intdiv(1000)
+                def buildUrl = ''
+                def buildReason = ''
+                def studyTimeout = splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)
+                echo "[${s.study_id}] own instance (${large ? "large, ${s.volume_gb} GiB volume, ${params.SPLIT_LARGE_INSTANCE_TYPE.trim()}" : 'default size'}; timeout ${studyTimeout}s)"
+                try {
+                    def downstream = build(
+                        job: params.SPLIT_ALLCONCEPTS_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                            string(name: 'STUDY_ID',            value: s.study_id),
+                            string(name: 'ABBREVIATION',        value: s.abbreviation),
+                            string(name: 'INPUT',               value: s.input_uri),
+                            string(name: 'MAPPING',             value: s.mapping_uri),
+                            string(name: 'OUTPUT',              value: dataRoot),
+                            string(name: 'RUN_ID',              value: "${runBase}-split-${s.study_id}"),
+                            string(name: 'PREBUILT_IMAGE_TAR',  value: env.RUNNER_IMAGE_TAR ?: ''),
+                            string(name: 'INSTANCE_TYPE',       value: large ? params.SPLIT_LARGE_INSTANCE_TYPE.trim() : 'r6i.large'),
+                            string(name: 'ROOT_VOLUME_GB',      value: large ? s.volume_gb : '50'),
+                            string(name: 'JOB_TIMEOUT_SECONDS', value: "${splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)}"),
+                            string(name: 'ENV',                 value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS',     value: true),
+                            booleanParam(name: 'PREFLIGHT_ONLY', value: false),
+                        ])
+                    buildUrl = downstream.absoluteUrl
+                    buildReason = "${params.SPLIT_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result} " +
+                                  "before its runner reported a status; see ${downstream.absoluteUrl}console"
+                    try {
+                        copyArtifacts(projectName: params.SPLIT_ALLCONCEPTS_JOB, selector: specific("${downstream.number}"),
+                                      target: "${resultsDir}/${s.study_id}/build", optional: true)
+                    } catch (err) {
+                        echo "[${s.study_id}] could not copy the build's reports (${err.message}); they remain on ${downstream.absoluteUrl}"
+                    }
+                } catch (err) {
+                    buildReason = "could not run ${params.SPLIT_ALLCONCEPTS_JOB}: ${err.message}"
+                }
+                // Same validation and result file as a pool-lane study, from the build's reports.
+                int rc
+                withEnv(["STUDY_ID=${s.study_id}", "ABBREVIATION=${s.abbreviation}", "INPUT_URI=${s.input_uri}",
+                         "INPUT_BYTES=${s.input_bytes}", "LANE=${large ? 'large' : 'pool'}",
+                         "RUN_ID=${runBase}-split-${s.study_id}", "STUDY_OUT=${resultsDir}/${s.study_id}",
+                         "DOWNSTREAM_URL=${buildUrl}", "DOWNSTREAM_REASON=${buildReason}", "T0=${t0}"]) {
+                    rc = sh(returnStatus: true, script: '''
+                        set +ex
+                        R="$STUDY_OUT/build/etl-runners/split-allconcepts/reports"
+                        mkdir -p "$R"
+                        run=""
+                        [ -f "$R/status.json" ] && run=$(jq -r '.runId // empty' "$R/status.json")
+                        [ -n "$run" ] || run="$RUN_ID"
+                        case "$run" in *-r[0-9]*) attempts=2 ;; *) attempts=1 ;; esac
+                        vrc=""
+                        if [ -f "$R/split-allconcepts-$run.json" ]; then
+                          etl-runners/split-allconcepts/validate.sh "$R" "$run" > "$STUDY_OUT/validation.txt" 2>&1 && vrc=0 || vrc=$?
+                        fi
+                        set --
+                        [ -f "$R/status.json" ] || set -- --reason "$DOWNSTREAM_REASON"
+                        outcome=$(etl-runners/split-allconcepts/record-study-result.sh --out "$STUDY_OUT/study-result.json" \
+                          --study "$STUDY_ID" --abv "$ABBREVIATION" --lane "$LANE" --run-id "$run" --attempts "$attempts" \
+                          --reports-dir "$R" --validation-rc "$vrc" --validation-file "$STUDY_OUT/validation.txt" \
+                          --input-uri "$INPUT_URI" --input-bytes "$INPUT_BYTES" --build-url "$DOWNSTREAM_URL" \
+                          --started-epoch "$T0" --finished-epoch "$(date +%s)" "$@") || outcome=FAILED
+                        echo "[$STUDY_ID] $outcome$( [ "$outcome" = SUCCESS ] || [ "$outcome" = SUCCESS_WITH_WARNINGS ] || \
+                          jq -r '": " + (.failureReason // "")' "$STUDY_OUT/study-result.json" 2>/dev/null)"
+                        case "$outcome" in SUCCESS) exit 0 ;; SUCCESS_WITH_WARNINGS) exit 10 ;; *) exit 1 ;; esac
+                    ''')
+                }
+                if (rc != 0 && rc != 10 && !params.CONTINUE_ON_STUDY_FAILURE) {
+                    progress.stop = true
+                    progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
+                }
+            }
+        }
+    }
+
+    try {
+        if (branches) {
+            parallel branches
+        }
+    } finally {
+        // Every study is done: stop paying for idle workers now, not at the end of the build.
+        stopRunnerPool()
+    }
+
+    // Studies never started: the run was stopped early, or every pool worker died or was retired.
+    for (s in plan.findAll { !(it.study_id in started) }) {
+        def why = progress.stopReason ?: (s.lane == 'pool' && progress.liveWorkers == 0
+                    ? 'every runner-pool worker died or was retired after a timeout before reaching it; see the worker logs'
+                    : 'no worker was left to run it')
+        withEnv(["R_OUT=${resultsDir}/${s.study_id}/study-result.json", "R_SID=${s.study_id}",
+                 "R_ABV=${s.abbreviation}", "R_LANE=${s.lane}", "R_REASON=not started: ${why}",
+                 "R_INPUT=${s.input_uri}", "R_BYTES=${s.input_bytes}"]) {
+            sh '''etl-runners/split-allconcepts/record-study-result.sh --out "$R_OUT" --study "$R_SID" --abv "$R_ABV" \
+                    --lane "$R_LANE" --stage not-started --reason "$R_REASON" --input-uri "$R_INPUT" \
+                    --input-bytes "$R_BYTES" >/dev/null'''
+        }
+    }
+
+    // --- one report for the whole stage ----------------------------------------------------
+    int reportRc
+    withEnv(["STAGE_STARTED_EPOCH=${env.SPLIT_STAGE_STARTED}", "LARGE_STUDY_GB=${largeGb}",
+             "POOL_WORKERS=${poolWorkers}", "RESULTS_DIR=${resultsDir}", "REPORT_RUN=${runBase}"]) {
+        reportRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/split-report.sh "$RESULTS_DIR" "$REPORT_RUN" downstream-artifacts')
+    }
+    def reportMd = "downstream-artifacts/split-allconcepts-report-${runBase}.md"
+    // Archived now, so the report is on the build page while the later stages run.
+    archiveArtifacts artifacts: "downstream-artifacts/split-allconcepts-report-*, ${resultsDir}/**, ${planDir}/**",
+                     allowEmptyArchive: true
+    if (reportRc == 10) {
+        unstable("Split AllConcepts completed with warnings; see ${reportMd} (archived on this build).")
+    } else if (reportRc != 0) {
+        def summary = reportRc == 1 ? sh(returnStdout: true, script: "jq -r '.errorMessage // empty' 'downstream-artifacts/split-allconcepts-report-${runBase}.json' 2>/dev/null || true").trim() : ''
+        error("Split AllConcepts failed: ${summary ?: "the report could not be written (split-report.sh exit ${reportRc})"}. " +
+              "Each failed study's reason, logs and re-run setting are in ${reportMd} (archived on this build).")
+    }
 }
