@@ -6,9 +6,15 @@
 # Writes, in <out-dir>:
 #   split-allconcepts-report-<run-id>.json  the stage as one JobResult-shaped report (jobName, runId,
 #        status, exitCode, inputValidation, outputValidation, metrics, errorMessage, as every job
-#        report has), plus `studies`: each study's full result. A failed or unstarted study is an
-#        ERROR issue in outputValidation, a study with warnings a WARNING issue, and a study without
-#        a usable input an ERROR in inputValidation, so ../common/validate-report.sh reads it too.
+#        report has), plus `studies`: each study's full result. Failed studies are split in two:
+#          - a DATA failure (no usable input, or the job/validation rejected the study's data) is
+#            the study's problem, not the run's: a WARNING (STUDY_INPUT_UNUSABLE in inputValidation,
+#            STUDY_EXCLUDED in outputValidation), listed in metrics.excludedStudyIds, left out of
+#            the later stages, and listed for data review. The stage still succeeds, with warnings.
+#          - any other failure (infrastructure, timeout, unknown, config) or a study that never
+#            started is the run's problem: an ERROR (STUDY_FAILED / STUDY_NOT_STARTED), listed in
+#            metrics.rerunStudyIds, and the stage fails.
+#        A study with warnings is a WARNING issue; ../common/validate-report.sh reads it too.
 #   split-allconcepts-report-<run-id>.md    the same, to read: totals, then each failed study with
 #        its reason, job error, failed checks, logs, artifacts and the re-run setting, then the
 #        studies that did not start or had warnings, then a table of every study.
@@ -21,8 +27,8 @@
 #   LARGE_STUDY_GB        recorded in the metrics
 #   POOL_WORKERS          recorded in the metrics
 #
-# Exit: 0 every study succeeded | 10 succeeded, some with warnings | 1 any study failed or did not
-#       start, or there were no results | 64 usage
+# Exit: 0 every study succeeded | 10 succeeded, some with warnings or excluded for data problems |
+#       1 any study failed for a non-data reason or did not start, or there were no results | 64 usage
 set -uo pipefail
 
 RESULTS="${1:-}"
@@ -64,27 +70,37 @@ jq --arg run "$RUN_ID" --arg started "${STAGE_STARTED_EPOCH:-}" --arg finished "
                 warning: map(select(.severity == "WARNING")) | length,
                 info: map(select(.severity == "INFO")) | length };
   def sum_metric($m): map(.job.metrics[$m] // 0 | if type == "number" then . else 0 end) | add // 0;
+  # The study'"'"'s data, not the run, is at fault: no usable input, the job rejected the data, or the
+  # job ran and its output failed validation.
+  def data_failure: .failureStage == "preflight" or .failureStage == "validation"
+                    or (.exitName == "DATA_ERROR" or .exitName == "VALIDATION_FAILED");
   . as $all
   | ($all | of("FAILED")) as $failed
   | ($all | of("NOT_STARTED")) as $unstarted
   | ($all | of("SUCCESS_WITH_WARNINGS")) as $warned
   | ($all | of("SUCCESS")) as $ok
   | ($failed | map(select(.failureStage == "preflight"))) as $preflight
+  | ($failed | map(select(data_failure))) as $excluded
+  | ($failed | map(select(data_failure | not))) as $broken
   | (($started | num) // ($all | map(.startedAt // empty | fromdateiso8601) | min) // ($finished | tonumber)) as $t0
-  | [$preflight[] | {severity: "ERROR", code: "STUDY_INPUT_UNUSABLE", message: .failureReason,
+  | [$preflight[] | {severity: "WARNING", code: "STUDY_INPUT_UNUSABLE", message: .failureReason,
                      location: .studyId, details: {inputUri: .inputUri}}] as $input_issues
-  | ( [ ($failed - $preflight)[] | {severity: "ERROR", code: "STUDY_FAILED", message: .failureReason, location: .studyId,
-                                     details: {stage: .failureStage, exitName: .exitName, runId: .runId,
-                                               runnerLog: .debug.runnerLog, artifacts: .debug.artifacts}} ]
+  | ( [ ($excluded - $preflight)[] | {severity: "WARNING", code: "STUDY_EXCLUDED", message: .failureReason, location: .studyId,
+                                       details: {stage: .failureStage, exitName: .exitName, runId: .runId,
+                                                 runnerLog: .debug.runnerLog, artifacts: .debug.artifacts}} ]
+     + [ $broken[] | {severity: "ERROR", code: "STUDY_FAILED", message: .failureReason, location: .studyId,
+                      details: {stage: .failureStage, exitName: .exitName, runId: .runId,
+                                runnerLog: .debug.runnerLog, artifacts: .debug.artifacts}} ]
      + [ $unstarted[] | {severity: "ERROR", code: "STUDY_NOT_STARTED", message: .failureReason, location: .studyId, details: {}} ]
      + [ $warned[] | {severity: "WARNING", code: "STUDY_WARNINGS", message: (.validation.warnings | join("; ")),
                       location: .studyId, details: {runId: .runId, artifacts: .debug.artifacts}} ] ) as $output_issues
-  | (($failed | length) + ($unstarted | length)) as $bad
+  | (($broken | length) + ($unstarted | length)) as $bad
   | {
       jobName: "split-allconcepts",
       jobType: "MIGRATION",
       runId: $run,
-      exitCode: (if $bad > 0 then "VALIDATION_FAILED" elif ($warned | length) > 0 then "SUCCESS_WITH_WARNINGS" else "SUCCESS" end),
+      exitCode: (if $bad > 0 then "VALIDATION_FAILED"
+                 elif ($warned | length) > 0 or ($excluded | length) > 0 then "SUCCESS_WITH_WARNINGS" else "SUCCESS" end),
       status: (if $bad > 0 then "FAILED" else "SUCCESS" end),
       startedAt: ($t0 | todate),
       finishedAt: ($finished | tonumber | todate),
@@ -97,6 +113,9 @@ jq --arg run "$RUN_ID" --arg started "${STAGE_STARTED_EPOCH:-}" --arg finished "
         succeededWithWarnings: ($warned | length),
         failed: ($failed | length),
         notStarted: ($unstarted | length),
+        excluded: ($excluded | length),
+        excludedStudyIds: ($excluded | map(.studyId)),
+        rerunStudyIds: (($broken + $unstarted) | map(.studyId) | sort),
         poolLane: ($all | map(select(.lane == "pool")) | length),
         largeLane: ($all | map(select(.lane == "large")) | length),
         retried: ($all | map(select((.attempts // 0) > 1)) | length),
@@ -111,7 +130,7 @@ jq --arg run "$RUN_ID" --arg started "${STAGE_STARTED_EPOCH:-}" --arg finished "
         poolWorkers: ($poolWorkers | num)
       },
       errorMessage: (if $bad == 0 then null
-                     else "\($failed | length) of \($all | length) studies failed and \($unstarted | length) did not start: \(($failed + $unstarted) | map(.studyId) | join(", "))" end),
+                     else "\($broken | length) of \($all | length) studies failed for a reason other than their data and \($unstarted | length) did not start: \(($broken + $unstarted) | map(.studyId) | join(", "))" end),
       studies: $all
     }' "$ALL" > "$JSON.tmp" || { echo "split-report: could not build $JSON" >&2; rm -f "$JSON.tmp" "$ALL"; exit 1; }
 mv "$JSON.tmp" "$JSON"
@@ -134,16 +153,17 @@ jq -r --arg json "$(basename "$JSON")" '
   | [
       "# Split AllConcepts report: \(.runId)",
       "",
-      (if .status == "SUCCESS" and $m.succeededWithWarnings == 0 then "**Result: SUCCESS.** All \($m.studies) studies were split and validated."
-       elif .status == "SUCCESS" then "**Result: SUCCESS WITH WARNINGS.** All \($m.studies) studies were split; \($m.succeededWithWarnings) reported warnings (listed below)."
-       else "**Result: FAILED.** \($m.failed) of \($m.studies) studies failed and \($m.notStarted) did not start. Failed studies are listed first, each with what went wrong and where to look." end),
+      (if .status == "SUCCESS" and $m.succeededWithWarnings == 0 and ($m.excluded // 0) == 0 then "**Result: SUCCESS.** All \($m.studies) studies were split and validated."
+       elif .status == "SUCCESS" then "**Result: SUCCESS WITH WARNINGS.** \($m.studies - ($m.excluded // 0)) of \($m.studies) studies were split; \($m.succeededWithWarnings) reported warnings and \($m.excluded // 0) were excluded for data problems (listed below, and left out of the later stages)."
+       else "**Result: FAILED.** \($m.failed) of \($m.studies) studies failed (\(($m.rerunStudyIds // []) | length - $m.notStarted) for a reason other than their data, so the run must be re-run for them) and \($m.notStarted) did not start. Failed studies are listed first, each with what went wrong and where to look." end),
       "",
       "Stage ran \(.startedAt) to \(.finishedAt) (\(.durationMillis | dur)). Machine-readable version: `\($json)`.",
       "",
       "| Outcome | Studies |", "|---|---|",
       "| Succeeded | \($m.succeeded) |",
       "| Succeeded with warnings | \($m.succeededWithWarnings) |",
-      "| Failed | \($m.failed) |",
+      "| Failed: data problem, excluded | \($m.excluded // 0) |",
+      "| Failed: other, re-run needed | \($m.failed - ($m.excluded // 0)) |",
       "| Did not start | \($m.notStarted) |",
       "| **Total** | **\($m.studies)** |",
       "",
@@ -156,7 +176,7 @@ jq -r --arg json "$(basename "$JSON")" '
       (if ($failed | length) > 0 then
         "## Failed studies", "",
         ($failed[] |
-          "### \(.studyId)\(if .abbreviation then " (\(.abbreviation))" else "" end): failed in \(.failureStage // "unknown")", "",
+          "### \(.studyId)\(if .abbreviation then " (\(.abbreviation))" else "" end): failed in \(.failureStage // "unknown")\(if ((.studyId) as $id | $m.excludedStudyIds // [] | index($id)) then " (data problem: excluded, needs data review)" else " (re-run needed)" end)", "",
           "- **Reason:** \(.failureReason // "unknown" | cell)",
           (if .job.errorMessage then "- **Job error:** \(.job.errorMessage | cell)" else empty end),
           (if (.job.issues // []) | length > 0 then "- **Job issues:** \(.job.issues | map("[\(.severity)] \(.code): \(.message)\(if .location then " (\(.location))" else "" end)") | join("; ") | cell)" else empty end),
@@ -191,7 +211,7 @@ jq -r '
   .metrics as $m
   | "================ Split AllConcepts summary ================",
     "  result: \(.status)\(if .exitCode == "SUCCESS_WITH_WARNINGS" then " (with warnings)" else "" end)",
-    "  \($m.succeeded) succeeded, \($m.succeededWithWarnings) with warnings, \($m.failed) failed, \($m.notStarted) did not start (of \($m.studies))",
+    "  \($m.succeeded) succeeded, \($m.succeededWithWarnings) with warnings, \($m.failed) failed (\($m.excluded // 0) excluded for data problems), \($m.notStarted) did not start (of \($m.studies))",
     (.studies[] | select(.outcome == "FAILED" or .outcome == "NOT_STARTED")
       | "  \(.studyId)  \(.outcome)  [\(.failureStage // "-")] \(.failureReason // "" | gsub("[\r\n]+"; " "))"),
     "  full report: \(input_filename | sub("\\.json$"; ".md"))",

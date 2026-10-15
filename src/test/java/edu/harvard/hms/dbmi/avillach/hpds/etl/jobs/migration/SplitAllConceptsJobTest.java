@@ -93,6 +93,10 @@ class SplitAllConceptsJobTest {
         assertThat(c2Lines).hasSize(1);
         assertThat(c2Lines.get(0)).contains(String.valueOf(id2));
         assertThat(c2Lines.get(0)).contains("55");
+
+        // c1 has two rows for one participant: rows and participants are counted separately.
+        assertThat(result.getMetrics().get("rowsPerConsent")).isEqualTo(Map.of("1", 2L, "2", 1L));
+        assertThat(result.getMetrics().get("participantsPerConsent")).isEqualTo(Map.of("1", 1L, "2", 1L));
     }
 
     @Test

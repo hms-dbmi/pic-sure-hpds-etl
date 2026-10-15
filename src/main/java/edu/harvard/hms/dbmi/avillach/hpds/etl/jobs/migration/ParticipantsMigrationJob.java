@@ -38,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -98,11 +99,13 @@ import java.util.stream.Stream;
  *
  * <p>Writes to the reports directory:
  * <ul>
- *   <li>{@code {studyid}_hpds_id_mapping.csv} per succeeded study:
- *       {@code old_hpds_id,new_hpds_id,common_dbgap_id}</li>
+ *   <li>{@code {studyid}_hpds_id_mapping.csv} per succeeded study, and a header-only one per study
+ *       marked {@value #NEEDS_DATA_REVIEW}: {@code old_hpds_id,new_hpds_id,common_dbgap_id}</li>
  *   <li>{@value #SOURCES_REPORT}: one row per ready study, saying which source it used, which
  *       files were found, and why it fell back or failed</li>
  *   <li>{@value #ISSUES_REPORT}: every problem found while discovering or reading those files</li>
+ *   <li>{@value #CONSENT_COUNTS_REPORT}: participants loaded per consent code, one row per study and
+ *       code (carried over by {@code --resume-from}, so a resumed run still has every study's)</li>
  *   <li>{@value #SUMMARY_REPORT}: the two above, for a person to read</li>
  *   <li>{@code studies/{studyid}.json} per study, written as soon as it finishes, so a run that
  *       dies part way still says which studies it completed</li>
@@ -113,7 +116,11 @@ import java.util.stream.Stream;
  *
  * <p>{@code --resume-from} names the reports directory of an earlier run of the same data folder.
  * A study that run migrated successfully is not migrated again: its result and mapping file are
- * copied into this run's reports instead. Studies it failed, or never reached, are migrated.
+ * copied into this run's reports instead. Studies it failed, skipped, or never reached are migrated,
+ * as is one it recorded as migrated with no mapping rows (from before {@value #NEEDS_DATA_REVIEW}).
+ *
+ * <p>A study whose participants load but whose patient mapping resolves to none of them is not
+ * migrated: it is skipped as {@value #NEEDS_DATA_REVIEW}, a warning, so the run goes on without it.
  *
  * <p>Studies are processed independently: a data problem in one study (bad row, unmatched
  * id, no usable source) is recorded as a failure for that study only and does not stop the
@@ -140,6 +147,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     static final String SOURCES_REPORT = "participants_migration_sources.csv";
     static final String ISSUES_REPORT = "participants_migration_file_issues.csv";
     static final String SUMMARY_REPORT = "participants_migration_file_report.md";
+    /** Participants loaded per (study, consent code), as the sub-job wrote them to RDS. */
+    static final String CONSENT_COUNTS_REPORT = "participants_migration_consent_counts.csv";
 
     private static final String SSTR_COL_SUBJECT_ID = "SUBJECT_ID";
     private static final String SSTR_COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
@@ -164,6 +173,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * but that is a gap in the data, not a broken run: it is reported as skipped and the run goes on.
      */
     static final String NO_PARTICIPANT_FILES = "NO_PARTICIPANT_FILES";
+    /**
+     * The study's participant source loaded, but not one patient mapping row resolved to a loaded
+     * subject, so its mapping file is empty. That is a mismatch between the legacy mapping and the
+     * source file to look into, not a broken run: it is reported as skipped and the run goes on.
+     */
+    static final String NEEDS_DATA_REVIEW = "NEEDS_DATA_REVIEW";
     private static final ObjectMapper RESULT_JSON = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
@@ -498,6 +513,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         if (previous.result() == null || !previous.result().success()) {
             return null;
         }
+        if (previous.result().mappingRowCount() == 0) {
+            // Recorded as migrated before a study with no mapping rows was flagged for review.
+            log.warn("Study '{}': {} migrated it with no mapping rows; migrating it again", studyId, resumeFrom);
+            return null;
+        }
         if (!baseUri.equals(previous.dataFolder())) {
             log.warn("Study '{}': {} migrated it from a different data folder ({}); migrating it again",
                     studyId, resumeFrom, previous.dataFolder());
@@ -524,7 +544,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return new StudyResult(r.studyId(), r.abv(), r.source(), true, null, r.mappingRowCount(),
                 r.unresolvedHpdsIds(), new SourceUsage(u.sstrFile(), u.sstrStatus(), u.sstrError(),
                 u.subjectMultiFile(), u.sampleMultiFile(), u.dataDictFile(), u.multiStatus(), u.consentColumn(),
-                List.copyOf(issues)));
+                u.participantsByConsent(), List.copyOf(issues)));
     }
 
     private void writeStudyRecord(JobContext ctx, String baseUri, StudyResult result) {
@@ -628,6 +648,17 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         MappingResult mapping = buildMapping(studyId, identities, patientMappings, batchSize, trace);
         writeMappingFile(ctx, studyId, mapping.mappingRows());
+        if (mapping.mappingRows().isEmpty()) {
+            String reason = "none of its " + patientMappings.size() + " patient mapping row(s) resolved to a subject "
+                    + "loaded from " + identities.file() + " (" + mapping.notInFile() + " not in the file, "
+                    + mapping.noParticipant() + " with no participant id, " + mapping.notConsented()
+                    + " consent 0); check that the file's subject ids match the legacy patient mapping";
+            trace.issue(Severity.WARNING, NEEDS_DATA_REVIEW, identities.file(), reason + "; not migrated",
+                    mapping.unresolvedHpdsIds().stream().limit(MAX_EXAMPLES).toList());
+            log.warn("Study '{}' needs data review: {}", studyId, reason);
+            return StudyResult.needsReview(studyId, row.abv(), trace.source, studyId + " needs data review: " + reason,
+                    mapping.unresolvedHpdsIds(), trace.snapshot());
+        }
         if (!mapping.unresolvedHpdsIds().isEmpty()) {
             log.warn("Study '{}': {} of {} patient mapping row(s) could not be resolved via {}",
                     studyId, mapping.unresolvedHpdsIds().size(), patientMappings.size(), identities.file());
@@ -663,6 +694,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
         trace.sstrStatus = "used";
         trace.source = Source.SSTR;
+        trace.participantsByConsent = countsByConsent(result);
         return readSstrIdentities(sstrPath, trace.sstrFile);
     }
 
@@ -712,6 +744,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         trace.multiStatus = "used";
         trace.source = Source.MULTI;
         trace.consentColumn = String.valueOf(result.getMetrics().get("consentColumn"));
+        trace.participantsByConsent = countsByConsent(result);
 
         SubjectTable subjects = multiReader.readSubjects(localSubject.toString());
         Map<String, String> subjectIdToDbgapId = new HashMap<>();
@@ -725,6 +758,15 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         notConsentedIds.addAll(subjects.notConsentedSubjectIds());
         return new SubjectIdentities(files.subjectMulti(), new LinkedHashSet<>(subjects.consented().keySet()),
                 subjectIdToDbgapId, notConsentedIds);
+    }
+
+    /** A populate sub-job's {@code countsByConsentGroup} metric: participants written per consent code. */
+    private static Map<String, Long> countsByConsent(JobResult result) {
+        Map<String, Long> counts = new LinkedHashMap<>();
+        if (result.getMetrics().get("countsByConsentGroup") instanceof Map<?, ?> m) {
+            m.forEach((code, n) -> counts.put(String.valueOf(code), ((Number) n).longValue()));
+        }
+        return Collections.unmodifiableMap(counts);
     }
 
     /** Sub-job exit codes that mean "this study's files are bad": the only ones handled per study. */
@@ -863,7 +905,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     notFound.size() + " patient mapping row(s) could not be resolved to a loaded subject (old hpds ids)",
                     notFound);
         }
-        return new MappingResult(rows, unresolved);
+        return new MappingResult(rows, unresolved, notInFile, noParticipant, notConsented.size());
     }
 
     private List<PatientMappingRow> readPatientMapping(String path) {
@@ -894,14 +936,17 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         writeReport(ctx, mappingFileName(studyId), csv.toString());
     }
 
-    /** Writes {@value #SOURCES_REPORT}, {@value #ISSUES_REPORT} and {@value #SUMMARY_REPORT}. */
+    /** Writes {@value #SOURCES_REPORT}, {@value #ISSUES_REPORT}, {@value #CONSENT_COUNTS_REPORT} and {@value #SUMMARY_REPORT}. */
     private void writeSourceReports(JobContext ctx, List<StudyResult> results) {
         StringBuilder sources = new StringBuilder("study_id,abv,outcome,source,sstr_file,sstr_status,"
                 + "subject_multi_file,sample_multi_file,data_dict_file,multi_status,consent_column,"
                 + "mapping_rows,unresolved_mapping_rows,error\n");
         StringBuilder issues = new StringBuilder("study_id,severity,code,file,count,message,examples\n");
+        StringBuilder consentCounts = new StringBuilder("study_id,abv,outcome,source,consent_code,participants_loaded\n");
         for (StudyResult r : results) {
             SourceUsage u = r.usage();
+            u.participantsByConsent().forEach((code, n) -> consentCounts.append(csvRow(r.studyId(), r.abv(),
+                    r.outcome(), r.source().label(), code, String.valueOf(n))));
             sources.append(csvRow(r.studyId(), r.abv(), r.outcome(), r.source().label(),
                     u.sstrFile(), u.sstrStatus(), u.subjectMultiFile(), u.sampleMultiFile(), u.dataDictFile(),
                     u.multiStatus(), u.consentColumn(), String.valueOf(r.mappingRowCount()),
@@ -913,6 +958,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
         writeReport(ctx, SOURCES_REPORT, sources.toString());
         writeReport(ctx, ISSUES_REPORT, issues.toString());
+        writeReport(ctx, CONSENT_COUNTS_REPORT, consentCounts.toString());
         writeReport(ctx, SUMMARY_REPORT, summaryMarkdown(ctx, results));
     }
 
@@ -920,7 +966,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         StringBuilder md = new StringBuilder("# Participants migration: participant sources (run ")
                 .append(ctx.runId()).append(")\n\n")
                 .append("Each study uses its SSTR when it has a usable one, otherwise its Subject/Sample MULTI files; ")
-                .append("a study with neither file is skipped; one whose files are unusable fails.\n\n");
+                .append("a study with neither file is skipped; one whose files are unusable fails; one whose patient ")
+                .append("mapping resolves to none of its subjects is skipped and needs data review.\n\n");
 
         Map<String, List<StudyResult>> groups = new LinkedHashMap<>();
         groups.put("Loaded from SSTR", results.stream().filter(r -> r.success() && r.source() == Source.SSTR).toList());
@@ -928,7 +975,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 .filter(r -> r.success() && r.source() == Source.MULTI && r.usage().sstrFile() == null).toList());
         groups.put("Loaded from MULTI (SSTR malformed)", results.stream()
                 .filter(r -> r.success() && r.source() == Source.MULTI && r.usage().sstrFile() != null).toList());
-        groups.put("Skipped: no participant files", results.stream().filter(StudyResult::skipped).toList());
+        groups.put("Skipped: no participant files", results.stream()
+                .filter(r -> r.skipped() && !r.needsReview()).toList());
+        groups.put("Skipped: needs data review (no patient mapping row resolved)", results.stream()
+                .filter(StudyResult::needsReview).toList());
         groups.put("Failed: no usable participant source", results.stream()
                 .filter(r -> !r.success() && r.usage().hasIssue("NO_PARTICIPANT_SOURCE")).toList());
         groups.put("Failed: MULTI files unusable", results.stream()
@@ -1177,6 +1227,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                     "count", (long) result.unresolvedHpdsIds().size(),
                                     "firstOldHpdsIds", sample)));
                 }
+            } else if (result.needsReview()) {
+                // A warning, not an error: the run (and the pipeline after it) carries on without it.
+                report.add(ValidationIssue.warning("STUDY_NEEDS_DATA_REVIEW", result.errorMessage()
+                                + "; not migrated, and its mapping file has no rows",
+                        Map.of("studyId", result.studyId(), "reason", NEEDS_DATA_REVIEW,
+                                "path", result.source().label(),
+                                "count", (long) result.unresolvedHpdsIds().size())));
             } else if (result.skipped()) {
                 // A warning, not an error: the run (and the pipeline after it) carries on without it.
                 report.add(ValidationIssue.warning("STUDY_SKIPPED", result.studyId()
@@ -1206,6 +1263,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 .metric("failedStudyIds", idsWhere(results, r -> !r.success() && !r.skipped()))
                 .metric("skippedStudies", skippedStudies)
                 .metric("skippedStudyIds", idsWhere(results, StudyResult::skipped))
+                .metric("needsReviewStudyIds", idsWhere(results, StudyResult::needsReview))
                 .metric("subjectsWithoutConsent", skipped)
                 .metric("sstrStudyIds", idsWhere(results, r -> r.success() && r.source() == Source.SSTR))
                 .metric("multiStudyIds", idsWhere(results, r -> r.success() && r.source() == Source.MULTI))
@@ -1242,7 +1300,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /** What a study's source discovery found and did; one row of {@value #SOURCES_REPORT}. */
     public record SourceUsage(String sstrFile, String sstrStatus, String sstrError, String subjectMultiFile,
                               String sampleMultiFile, String dataDictFile, String multiStatus, String consentColumn,
-                              List<FileIssue> issues) {
+                              Map<String, Long> participantsByConsent, List<FileIssue> issues) {
+        public SourceUsage {
+            // Absent from study records written before it existed.
+            participantsByConsent = participantsByConsent == null ? Map.of() : participantsByConsent;
+        }
+
         boolean hasIssue(String code) {
             return issues.stream().anyMatch(i -> i.code().equals(code));
         }
@@ -1260,6 +1323,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         String dataDictFile;
         String multiStatus = "not attempted";
         String consentColumn;
+        Map<String, Long> participantsByConsent = Map.of();
         Source source = Source.NONE;
 
         SourceTrace(String studyId) {
@@ -1288,7 +1352,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         SourceUsage snapshot() {
             return new SourceUsage(sstrFile, sstrStatus, sstrError, subjectMultiFile, sampleMultiFile, dataDictFile,
-                    multiStatus, consentColumn, List.copyOf(issues));
+                    multiStatus, consentColumn, participantsByConsent, List.copyOf(issues));
         }
     }
 
@@ -1318,7 +1382,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                      Set<String> notConsentedIds) {
     }
 
-    private record MappingResult(List<MappingRow> mappingRows, List<String> unresolvedHpdsIds) {
+    private record MappingResult(List<MappingRow> mappingRows, List<String> unresolvedHpdsIds,
+                                 int notInFile, int noParticipant, int notConsented) {
     }
 
     private record PatientMappingRow(String id, String oldHpdsId) {
@@ -1339,16 +1404,30 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             return new StudyResult(studyId, abv, Source.NONE, false, errorMessage, 0, List.of(), usage);
         }
 
-        /** Not migrated because it has no participant files; reported, but not counted as failed. */
-        @JsonIgnore
-        boolean skipped() {
-            return !success && usage.hasIssue(NO_PARTICIPANT_FILES);
+        static StudyResult needsReview(String studyId, String abv, Source source, String errorMessage,
+                                       List<String> unresolvedHpdsIds, SourceUsage usage) {
+            return new StudyResult(studyId, abv, source, false, errorMessage, 0, unresolvedHpdsIds, usage);
         }
 
-        /** success, skipped or failed: the outcome column of {@value #SOURCES_REPORT}. */
+        /**
+         * Not migrated because it has no participant files, or needs data review; reported, but not
+         * counted as failed.
+         */
+        @JsonIgnore
+        boolean skipped() {
+            return !success && (usage.hasIssue(NO_PARTICIPANT_FILES) || usage.hasIssue(NEEDS_DATA_REVIEW));
+        }
+
+        /** Skipped because no patient mapping row resolved to a loaded subject. */
+        @JsonIgnore
+        boolean needsReview() {
+            return !success && usage.hasIssue(NEEDS_DATA_REVIEW);
+        }
+
+        /** success, skipped, needs_review or failed: the outcome column of {@value #SOURCES_REPORT}. */
         @JsonIgnore
         String outcome() {
-            return success ? "success" : skipped() ? "skipped" : "failed";
+            return success ? "success" : needsReview() ? "needs_review" : skipped() ? "skipped" : "failed";
         }
     }
 

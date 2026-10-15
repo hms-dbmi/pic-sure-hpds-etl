@@ -9,6 +9,7 @@
 //   - this file
 //   - etl-runners/participants-migration/                (runner, Terraform, validation)
 //   - etl-runners/split-allconcepts/                     (runner, Terraform, validation)
+//   - etl-runners/migration-report/                      (the final cross-stage report)
 //   - src/.../jobs/migration/ParticipantsMigrationJob    (and its tests)
 //   - src/.../jobs/migration/SplitAllConceptsJob         (and its tests)
 //   - the etl.pipelines.migrate-all entry in application.yml
@@ -460,14 +461,11 @@ pipeline {
     post {
         always {
             script {
+                // First: a failed backup fails the build loudly, and the report must exist regardless.
+                writeMigrationReport()
                 backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
                 stopRunnerPool()
                 removeRunnerImage()
-                if (env.SKIPPED_PARTICIPANT_STUDIES) {
-                    echo "NOT MIGRATED -- no participant files (no SSTR and no Subject.MULTI in rawData): " +
-                         "${env.SKIPPED_PARTICIPANT_STUDIES.split(',').join(', ')}. The stages after participants-migration " +
-                         'left them out; see participants_migration_file_report.md under downstream-artifacts/participants-migration/.'
-                }
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
@@ -477,11 +475,42 @@ pipeline {
                  "whether this was validation (2), data (3), infrastructure (4, retryable), or config (5)."
         }
         unstable {
-            echo 'Migration pipeline completed WITH WARNINGS. Rows were skipped or a study reported ' +
-                 'something unexpected — review the archived reports before treating the migration as done.'
+            echo 'Migration pipeline completed WITH WARNINGS. Studies were excluded for data problems, rows were ' +
+                 'skipped, or a study reported something unexpected. downstream-artifacts/migration-report/' +
+                 'migration-report.md lists every study needing follow-up and why; review it before treating ' +
+                 'the migration as done.'
         }
         success {
             echo 'Migration pipeline completed. Every migration stage passed its own output validation.'
+        }
+    }
+}
+
+// The run's final report (etl-runners/migration-report/migration-report.py), written whatever stage
+// the build stopped at: participants per consent group to compare against production, each ready
+// study's status, and every study needing follow-up with why. Lands in downstream-artifacts/
+// migration-report/ (archived on this build) and in S3 under
+// etl-runner/reports/migration-pipeline/<build-tag>/migration-report/, for QA jobs to read. A failure
+// here is reported but never changes the build's result.
+def writeMigrationReport() {
+    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def root = params.DATA_ROOT?.trim() ?: ''
+    def dest = root ==~ /^s3:\/\/[^\/]+.*/
+        ? "s3://${root.substring('s3://'.length()).split('/')[0]}/etl-runner/reports/migration-pipeline/${tag}/migration-report/"
+        : ''
+    withEnv(["MR_RUN=${tag}", "MR_RESULT=${currentBuild.currentResult}", "MR_DEST=${dest}"]) {
+        int rc = sh(returnStatus: true, script: '''
+            python3 etl-runners/migration-report/migration-report.py downstream-artifacts "$MR_RUN" \
+                downstream-artifacts/migration-report "$MR_RESULT" || exit 1
+            if [ -n "$MR_DEST" ]; then
+              aws s3 cp downstream-artifacts/migration-report "$MR_DEST" --recursive --no-progress --only-show-errors || exit 2
+              echo "Migration report uploaded to $MR_DEST"
+            fi
+        ''')
+        if (rc == 1) {
+            echo 'WARNING: the migration report could not be written; each stage\'s own report is still archived.'
+        } else if (rc != 0) {
+            echo "WARNING: the migration report was written (downstream-artifacts/migration-report/) but not uploaded to ${dest}."
         }
     }
 }
@@ -664,28 +693,38 @@ static List<String> parseCsvLine(String line) {
     return fields
 }
 
-// The managed-inputs URI for every stage after participants-migration. participants-migration
-// skips (and reports) a ready study that has no participant files at all; every later stage reads
-// its ready list from managed inputs on its own, and would then fail on that study instead --
-// Split AllConcepts finds no mapping CSV for it, the manifest no consent folders. So when studies
-// were skipped, the later stages get a copy of managed inputs with them marked not ready, written
-// once under this run's report prefix. Without skipped studies this is MANAGED_INPUTS unchanged.
+// The managed-inputs URI for every stage after Split AllConcepts. A study is excluded from the run,
+// without failing it, when its data is the problem:
+//   - participants-migration skips it (metrics.skippedStudyIds): no participant files at all, or a
+//     patient mapping that resolved to none of its subjects (STUDY_NEEDS_DATA_REVIEW);
+//   - Split AllConcepts excludes it (metrics.excludedStudyIds): no usable legacy allConcepts input,
+//     or its data was rejected by the split job or its validation.
+// Every later stage reads its ready list from managed inputs on its own, and would then fail on that
+// study instead -- the manifest finds no consent folders for it. So when studies were excluded, the
+// later stages get a copy of managed inputs with them marked not ready, written once under this
+// run's report prefix. Without exclusions this is MANAGED_INPUTS unchanged. Every excluded study is
+// listed, with why, in the final migration report (migration-report.sh).
 def laterStageManagedInputs() {
     def original = params.MANAGED_INPUTS?.trim() ?: ''
     if (env.LATER_STAGE_MANAGED_INPUTS) {
         return env.LATER_STAGE_MANAGED_INPUTS
     }
     def skipped = sh(returnStdout: true, script: '''
-        for f in downstream-artifacts/participants-migration/participants-migration-*.json; do
-          [ -f "$f" ] && jq -r '(.metrics.skippedStudyIds // [])[]' "$f"
-        done | sort -u
+        {
+          for f in downstream-artifacts/participants-migration/participants-migration-*.json; do
+            [ -f "$f" ] && jq -r '(.metrics.skippedStudyIds // [])[]' "$f"
+          done
+          for f in downstream-artifacts/split-allconcepts-report-*.json; do
+            [ -f "$f" ] && jq -r '(.metrics.excludedStudyIds // [])[]' "$f"
+          done
+        } | sort -u
     ''').trim()
     if (!skipped || !(original ==~ /^s3:\/\/[^\/]+\/.+/)) {
         env.LATER_STAGE_MANAGED_INPUTS = original
         return original
     }
 
-    env.SKIPPED_PARTICIPANT_STUDIES = skipped.readLines().join(',')
+    env.EXCLUDED_STUDIES = skipped.readLines().join(',')
     def bucket = original.substring('s3://'.length()).split('/')[0]
     def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
     def effective = "s3://${bucket}/etl-runner/reports/migration-pipeline/${tag}/managed_inputs.csv"
@@ -696,7 +735,7 @@ def laterStageManagedInputs() {
             mkdir -p downstream-artifacts
             aws s3 cp "$MI_SRC" managed_inputs.original.csv --only-show-errors
             python3 - managed_inputs.original.csv downstream-artifacts/managed_inputs.later-stages.csv \
-                "$SKIPPED_PARTICIPANT_STUDIES" <<'PY'
+                "$EXCLUDED_STUDIES" <<'PY'
 import csv, sys
 src, dst, skipped = sys.argv[1], sys.argv[2], set(sys.argv[3].split(","))
 with open(src, newline="", encoding="utf-8-sig") as fh:
@@ -711,8 +750,8 @@ PY
             aws s3 cp downstream-artifacts/managed_inputs.later-stages.csv "$MI_DST" --only-show-errors
         '''
     }
-    echo "participants-migration skipped ${skipped.readLines().size()} study/studies with no participant files " +
-         "(${env.SKIPPED_PARTICIPANT_STUDIES}). The stages after it use ${effective}, which marks them not ready."
+    echo "${skipped.readLines().size()} study/studies excluded for data problems by participants-migration or Split AllConcepts " +
+         "(${env.EXCLUDED_STUDIES}). The stages after them use ${effective}, which marks them not ready."
     env.LATER_STAGE_MANAGED_INPUTS = effective
     return effective
 }
@@ -740,7 +779,7 @@ def runSplitAllConcepts() {
     }
 
     // Resolve the study list from managed inputs so we can loop per study. Studies participants-migration
-    // skipped for lack of participant files are marked not ready in this copy (see laterStageManagedInputs).
+    // skipped are marked not ready in this copy (see laterStageManagedInputs).
     def managedInputsUri = params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : null
     if (!managedInputsUri) {
         error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
@@ -1057,6 +1096,9 @@ def runSplitAllConcepts() {
         reportRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/split-report.sh "$RESULTS_DIR" "$REPORT_RUN" downstream-artifacts')
     }
     def reportMd = "downstream-artifacts/split-allconcepts-report-${runBase}.md"
+    // Worked out above from participants-migration alone; the stages after this one must also leave
+    // out the studies this stage excluded for data problems, so it is worked out again on next use.
+    env.LATER_STAGE_MANAGED_INPUTS = ''
     // Archived now, so the report is on the build page while the later stages run.
     archiveArtifacts artifacts: "downstream-artifacts/split-allconcepts-report-*, ${resultsDir}/**, ${planDir}/**",
                      allowEmptyArchive: true

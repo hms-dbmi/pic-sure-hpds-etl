@@ -344,6 +344,9 @@ class ParticipantsMigrationJobTest {
         // This run's record carries the reuse forward, so a later run can resume from it in turn.
         assertThat(report(ParticipantsMigrationJob.STUDY_RESULTS_DIR + "/phs000001.json"))
                 .contains(ParticipantsMigrationJob.REUSED_ISSUE);
+        // Per-consent counts come from the earlier run's record, since no sub-job ran for it here.
+        assertThat(report(ParticipantsMigrationJob.CONSENT_COUNTS_REPORT)).isEqualTo(
+                "study_id,abv,outcome,source,consent_code,participants_loaded\nphs000001,A,success,sstr,1,1\n");
     }
 
     @Test
@@ -354,6 +357,25 @@ class ParticipantsMigrationJobTest {
         String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + "A,phs000001,Yes\n");
         executor.run(newJob(managed), Map.of("data-folder", baseUri(files)), "unit-first");
         Path previous = moveReportsAside();
+
+        JobResult result = executor.run(newJob(managed),
+                Map.of("data-folder", baseUri(files), "resume-from", previous.toString()), "unit-resumed");
+
+        assertThat(store.purgedStudies).containsExactly("phs000001", "phs000001");
+        assertThat(result.getMetrics()).containsEntry("reusedStudyIds", List.of());
+    }
+
+    @Test
+    void resume_migrates_again_a_study_the_earlier_run_migrated_with_no_mapping_rows() throws IOException {
+        Map<String, String> files = Map.of(
+                "phs000001/rawData/sstr_phs000001.v1.txt", SSTR,
+                "phs000001/legacy/data/A_PatientMapping.v2.csv", "1001,A,9001\n");
+        String managed = tempFile("managed_inputs.csv", MANAGED_HEADER + "A,phs000001,Yes\n");
+        executor.run(newJob(managed), Map.of("data-folder", baseUri(files)), "unit-first");
+        Path previous = moveReportsAside();
+        // As a run from before NEEDS_DATA_REVIEW recorded it: migrated, with an empty mapping file.
+        Path record = previous.resolve(ParticipantsMigrationJob.STUDY_RESULTS_DIR + "/phs000001.json");
+        Files.writeString(record, Files.readString(record).replace("\"mappingRowCount\":1", "\"mappingRowCount\":0"));
 
         JobResult result = executor.run(newJob(managed),
                 Map.of("data-folder", baseUri(files), "resume-from", previous.toString()), "unit-resumed");
@@ -752,6 +774,45 @@ class ParticipantsMigrationJobTest {
         assertThat(issueRow(STUDY, "PATIENT_MAPPING_UNRESOLVED"))
                 .containsEntry("severity", "WARNING").containsEntry("count", "1").containsEntry("examples", "9999");
         assertThat(sourcesRow(STUDY)).containsEntry("unresolved_mapping_rows", "3");
+    }
+
+    @Test
+    void a_study_whose_patient_mapping_resolves_no_subject_is_skipped_for_data_review() {
+        JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI), "NOPE,FHS,9998\nGONE,FHS,9999\n");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics())
+                .containsEntry("succeededStudies", 0L)
+                .containsEntry("failedStudies", 0L)
+                .containsEntry("skippedStudies", 1L)
+                .containsEntry("skippedStudyIds", List.of(STUDY))
+                .containsEntry("needsReviewStudyIds", List.of(STUDY))
+                .containsEntry("multiStudyIds", List.of());
+        assertThat(result.getOutputValidation().getIssues())
+                .noneMatch(i -> i.code().equals("STUDY_MIGRATED") || i.code().equals("STUDY_FAILED")
+                        || i.code().equals("STUDY_SKIPPED"));
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("STUDY_NEEDS_DATA_REVIEW"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.severity()).isEqualTo(Severity.WARNING);
+                    assertThat(i.message()).contains("needs data review").contains("2 not in the file")
+                            .contains(SUBJECT_MULTI_NAME);
+                    assertThat(i.context()).containsEntry("studyId", STUDY)
+                            .containsEntry("reason", "NEEDS_DATA_REVIEW").containsEntry("count", 2L);
+                });
+        assertThat(report(STUDY + "_hpds_id_mapping.csv")).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n");
+        assertThat(sourcesRow(STUDY)).containsEntry("outcome", "needs_review").containsEntry("source", "multi")
+                .containsEntry("mapping_rows", "0");
+        assertThat(issueRow(STUDY, "NEEDS_DATA_REVIEW")).containsEntry("severity", "WARNING")
+                .containsEntry("examples", "9998 9999");
+        // Participants were loaded, though none mapped: the counts say what the file held.
+        assertThat(report(ParticipantsMigrationJob.CONSENT_COUNTS_REPORT)).isEqualTo(
+                "study_id,abv,outcome,source,consent_code,participants_loaded\n"
+                        + STUDY + ",FHS,needs_review,multi,1,1\n" + STUDY + ",FHS,needs_review,multi,2,1\n");
+        assertThat(report(ParticipantsMigrationJob.SUMMARY_REPORT))
+                .contains("| Skipped: needs data review (no patient mapping row resolved) | 1 |")
+                .contains("| Skipped: no participant files | 0 |");
     }
 
     @Test

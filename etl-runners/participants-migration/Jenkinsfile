@@ -31,7 +31,8 @@
 //   participants-migration-<runId>.json                       the JobResult
 //   sstr-populate-rds-participants-<runId>-<study>-sstr.json   per study with an SSTR
 //   multi-populate-rds-participants-<runId>-<study>-multi.json per study that fell back to MULTI
-//   <studyId>_hpds_id_mapping.csv                             per succeeded study
+//   <studyId>_hpds_id_mapping.csv                             per succeeded study (header-only
+//                                                             for one flagged STUDY_NEEDS_DATA_REVIEW)
 //   participants_migration_sources.csv / _file_issues.csv / _file_report.md
 //                                                             which source each study used, and
 //                                                             every problem found in those files

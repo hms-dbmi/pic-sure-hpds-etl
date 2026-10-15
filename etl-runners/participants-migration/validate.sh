@@ -7,7 +7,9 @@
 #   participants-migration-<runId>.json                       the JobResult
 #   sstr-populate-rds-participants-<runId>-<study>-sstr.json   one per study with an SSTR
 #   multi-populate-rds-participants-<runId>-<study>-multi.json one per study that fell back to MULTI
-#   <studyId>_hpds_id_mapping.csv                              one per SUCCEEDED study
+#   <studyId>_hpds_id_mapping.csv                              one per SUCCEEDED study, and a
+#                                                              header-only one per study flagged
+#                                                              STUDY_NEEDS_DATA_REVIEW
 #   participants_migration_sources.csv                         one row per ready study: source used
 #   participants_migration_file_issues.csv                     problems found in the source files
 #   participants_migration_file_report.md                      the two above, human-readable
@@ -71,11 +73,26 @@ echo "  Studies: $READY ready, $OK succeeded, $SKIPPED skipped, $BAD failed"
 check "at least one ready study was processed"   test "$READY" -gt 0
 check "no study failed"                          test "$BAD" -eq 0
 check "succeeded + skipped + failed accounts for every ready study" test "$((OK + SKIPPED + BAD))" -eq "$READY"
-# A study with no participant files at all is not migrated, but it does not fail the run: it is
-# a warning (UNSTABLE), so the pipeline carries on and the study is listed for follow-up.
-soft "no ready study was skipped for lack of participant files" test "$SKIPPED" -eq 0
-if [[ "$SKIPPED" != "0" ]]; then
-  note "skipped, not migrated (no SSTR and no Subject.MULTI in rawData): $(jq -r '(.metrics.skippedStudyIds // []) | join(", ")' "$REPORT")"
+# A skipped study is not migrated, but it does not fail the run: it is a warning (UNSTABLE), so
+# the pipeline carries on without it and the study is listed for follow-up. Two reasons:
+#  - no participant files at all (STUDY_SKIPPED);
+#  - its participants loaded but not one patient mapping row resolved to them, so its mapping
+#    file is empty (STUDY_NEEDS_DATA_REVIEW). Read from the report's issues, not inferred from
+#    the CSV, so an empty mapping file is only accepted for a study the job flagged.
+REVIEW_IDS=$(jq -r '[(.outputValidation.issues // [])[] | select(.code == "STUDY_NEEDS_DATA_REVIEW")
+    | .context.studyId] | join(",")' "$REPORT")
+REVIEW=0
+[[ -n "$REVIEW_IDS" ]] && REVIEW=$(echo "$REVIEW_IDS" | tr ',' '\n' | wc -l | tr -d ' ')
+check "every study flagged for data review is counted as skipped ($REVIEW <= $SKIPPED)" test "$REVIEW" -le "$SKIPPED"
+soft "no ready study was skipped for lack of participant files" test "$((SKIPPED - REVIEW))" -eq 0
+if [[ "$((SKIPPED - REVIEW))" != "0" ]]; then
+  note "skipped, not migrated (no SSTR and no Subject.MULTI in rawData): $(jq -r --arg r ",$REVIEW_IDS," \
+    '[(.metrics.skippedStudyIds // [])[] | . as $id | select($r | contains("," + $id + ",") | not)] | join(", ")' "$REPORT")"
+fi
+soft "no ready study needs data review" test "$REVIEW" -eq 0
+if [[ "$REVIEW" != "0" ]]; then
+  note "skipped, not migrated, needs data review (no patient mapping row resolved):"
+  jq -r '(.outputValidation.issues // [])[] | select(.code == "STUDY_NEEDS_DATA_REVIEW") | "         " + .message' "$REPORT"
 fi
 
 if [[ "$BAD" != "0" ]]; then
@@ -126,7 +143,8 @@ MAPPINGS=()
 while IFS= read -r f; do
   [[ -n "$f" ]] && MAPPINGS+=("$f")
 done < <(find "$REPORTS" -maxdepth 1 -name '*_hpds_id_mapping.csv' | sort)
-check "one mapping CSV per succeeded study (found ${#MAPPINGS[@]})" test "${#MAPPINGS[@]}" -eq "$OK"
+check "one mapping CSV per succeeded or needs-review study (found ${#MAPPINGS[@]})" \
+  test "${#MAPPINGS[@]}" -eq "$((OK + REVIEW))"
 
 # Every CSV is measured in ONE awk pass: with ~500 studies, the dozen processes per file this
 # used to start were most of validation's run time. Per file, awk prints (\037-separated, so an
@@ -137,7 +155,12 @@ US=$'\037'
 while IFS="$US" read -r study header rows bad_ids dupes dupe_examples blank; do
   check "$study: header is old_hpds_id,new_hpds_id,common_dbgap_id" \
     test "$header" = "old_hpds_id,new_hpds_id,common_dbgap_id"
-  check "$study: has at least one mapping row" test "$rows" -gt 0
+  if [[ ",$REVIEW_IDS," == *",$study,"* ]]; then
+    # Flagged STUDY_NEEDS_DATA_REVIEW above: no row resolved, so an empty file is the expected one.
+    check "$study: no mapping rows, as expected for a study needing data review" test "$rows" -eq 0
+  else
+    check "$study: has at least one mapping row" test "$rows" -gt 0
+  fi
 
   check "$study: every new_hpds_id is an integer ($rows row(s))" test "$bad_ids" -eq 0
   [[ "$bad_ids" != "0" ]] && note "$bad_ids row(s) with a malformed hpds_id"
@@ -215,7 +238,9 @@ for sub in ${SUBREPORTS[@]+"${SUBREPORTS[@]}"}; do
   # (several legacy ids per subject) -- but falling short of it is the visible symptom of
   # patients silently dropped from the migration.
   csv="$REPORTS/${study}_hpds_id_mapping.csv"
-  if [[ -f "$csv" ]]; then
+  if [[ ",$REVIEW_IDS," == *",$study,"* ]]; then
+    note "$study: no mapping rows (needs data review, reported above)"
+  elif [[ -f "$csv" ]]; then
     mapped=$(($(wc -l < "$csv") - 1))
     soft "$study: mapping rows ($mapped) cover the $subjects sstr subject(s)" test "$mapped" -ge "$subjects"
     (( mapped < subjects )) && note "$((subjects - mapped)) fewer mapping row(s) than sstr subjects -- check the log for 'not found in sstr file' / 'no participant id found' warnings"

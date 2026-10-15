@@ -241,11 +241,13 @@ per-study data problem as a study-level failure and continues, and skips unmatch
 log warning. Neither is visible in the exit status.
 
 - `readyStudies > 0`, `failedStudies == 0`, `succeeded + skipped + failed == ready`
-- `skippedStudies == 0` is a warning, not a failure: a study with no participant files is
-  listed and left out of the later stages, and the build is UNSTABLE
+- `skippedStudies == 0` is a warning, not a failure: a study with no participant files, or one
+  flagged `STUDY_NEEDS_DATA_REVIEW` (its patient mapping resolved to none of its loaded
+  subjects), is listed and left out of the later stages, and the build is UNSTABLE
 - one `STUDY_MIGRATED` record per success
-- one `*_hpds_id_mapping.csv` per succeeded study
-- per mapping file: exact header (`old_hpds_id,new_hpds_id,common_dbgap_id`), at least one row,
+- one `*_hpds_id_mapping.csv` per succeeded or needs-review study
+- per mapping file: exact header (`old_hpds_id,new_hpds_id,common_dbgap_id`), at least one row
+  (exactly zero for a study flagged `STUDY_NEEDS_DATA_REVIEW` in the report),
   integer HPDS ids, no blank ids, and no duplicated `old_hpds_id` (one legacy patient mapped to two
   new ids is the corruption this migration exists to avoid)
 - each sstr sub-report validated; a mapping file with fewer rows than its study's sstr subject
@@ -584,6 +586,14 @@ report, `downstream-artifacts/split-allconcepts-report-<build-tag>.md` (see
 [MIGRATION_PIPELINE.md](MIGRATION_PIPELINE.md#stage-4-split-allconcepts)). The DB's
 `max_connections` (300) is far above that concurrency.
 
+A study whose **data** is the problem (no participant files, a patient mapping that matches none of
+its subjects, a missing or rejected allConcepts input) is excluded and the run carries on UNSTABLE;
+only a non-data failure (infrastructure, timeout) fails a stage. Whatever the result, the build ends
+with `downstream-artifacts/migration-report/` (also in S3 under
+`etl-runner/reports/migration-pipeline/<build-tag>/migration-report/`): participant counts per consent
+group, each study's status, and every study needing follow-up with why (see
+[MIGRATION_PIPELINE.md](MIGRATION_PIPELINE.md#post-migration-report)).
+
 ---
 
 ## Directory Layout
@@ -610,6 +620,7 @@ etl-runners/
 │  └─ test/                     run-tests.sh + stub docker/aws
 ├─ participants-migration/            TEMPORARY
 ├─ split-allconcepts/                 TEMPORARY
+├─ migration-report/                  TEMPORARY: the migration orchestrator's final report (no runner)
 ├─ sstr-populate-rds-participants/    PERMANENT
 ├─ generate-global-all-concepts/      PERMANENT
 ├─ create-vcf-indexes/                PERMANENT

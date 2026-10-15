@@ -25,10 +25,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -124,6 +126,9 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         Map<String, Path> tmpByConsent = new LinkedHashMap<>();
         Map<String, BufferedWriter> writerByConsent = new LinkedHashMap<>();
         Map<String, Long> rowsPerConsent = new LinkedHashMap<>();
+        // Distinct new hpds ids written to each consent partition: the participant count that is
+        // compared against production's, per consent group.
+        Map<String, Set<String>> participantsByConsent = new HashMap<>();
         long totalRows = 0;
         long unmappedIds = 0;
         long noConsentRows = 0;
@@ -172,6 +177,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                     writer.write(line);
                     writer.write('\n');
                     rowsPerConsent.merge(consentCode, 1L, Long::sum);
+                    participantsByConsent.computeIfAbsent(consentCode, c -> new HashSet<>()).add(newHpdsId);
                 }
             }
             for (BufferedWriter writer : writerByConsent.values()) {
@@ -187,6 +193,10 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 log.warn("Sample unmapped hpds ids (up to 10): {}", unmappedSample);
             }
 
+            Map<String, Long> participantsPerConsent = new LinkedHashMap<>();
+            rowsPerConsent.keySet().forEach(code ->
+                    participantsPerConsent.put(code, (long) participantsByConsent.get(code).size()));
+
             Map<String, String> outputPaths = new LinkedHashMap<>();
 
             for (Map.Entry<String, Path> entry : tmpByConsent.entrySet()) {
@@ -199,12 +209,13 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                         studyId + "_allConcepts_" + consentLabel + ".csv");
 
                 io.writeOutputFile(outputUri, tmp);
-                log.info("Wrote {} row(s) ({} bytes) to {}", rowsPerConsent.get(code), Files.size(tmp), outputUri);
+                log.info("Wrote {} row(s) for {} participant(s) ({} bytes) to {}", rowsPerConsent.get(code),
+                        participantsPerConsent.get(code), Files.size(tmp), outputUri);
                 outputPaths.put(code, outputUri);
             }
 
             return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows, malformedRows,
-                    List.copyOf(unmappedSample), rowsPerConsent, outputPaths);
+                    List.copyOf(unmappedSample), rowsPerConsent, participantsPerConsent, outputPaths);
         } catch (IOException e) {
             throw new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException(
                     "Failed spooling split output for study " + studyId, e);
@@ -298,7 +309,8 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                     output.noConsentRows() + " row(s) had hpds IDs with no consent assignment in the database");
         }
         output.rowsPerConsent().forEach((code, count) ->
-                report.info("CONSENT_ROWS", "c" + code + ": " + count + " row(s)"));
+                report.info("CONSENT_ROWS", "c" + code + ": " + count + " row(s), "
+                        + output.participantsPerConsent().get(code) + " participant(s)"));
     }
 
     @Override
@@ -310,6 +322,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 .metric("noConsentRows", output.noConsentRows())
                 .metric("malformedRows", output.malformedRows())
                 .metric("rowsPerConsent", output.rowsPerConsent())
+                .metric("participantsPerConsent", output.participantsPerConsent())
                 .metric("outputPaths", output.outputPaths());
     }
 
@@ -322,6 +335,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             long malformedRows,
             List<String> unmappedSample,
             Map<String, Long> rowsPerConsent,
+            Map<String, Long> participantsPerConsent,
             Map<String, String> outputPaths
     ) {
     }

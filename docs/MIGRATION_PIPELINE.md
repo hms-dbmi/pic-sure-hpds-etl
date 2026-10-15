@@ -33,7 +33,8 @@ derived artifacts from newly migrated data.
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Merge AllConcepts](#stage-7-merge-allconcepts)
 - [Stage 8: AllConcepts Manifest](#stage-8-allconcepts-manifest)
-- [Post: Stop Participant DB](#post-stop-participant-db)
+- [Post: Migration Report](#post-migration-report)
+- [Post: Back Up Participant DB](#post-back-up-participant-db)
 - [Data Flow Summary](#data-flow-summary)
 - [Parameters](#parameters)
 - [Exit Codes](#exit-codes)
@@ -209,6 +210,8 @@ For each ready study:
 Read {ABV}_PatientMapping.v2.csv; join its id against the source's dbGaP subject id
 or the study's own subject id (SSTR SUBJECT_ID / MULTI SUBJECT_ID or SUBJID)
         │
+        ├─── no row resolves ──▶ study SKIPPED (NEEDS_DATA_REVIEW): a warning, its mapping file is
+        │                        header-only, and later stages leave it out as above
         ▼
 Write {studyid}_hpds_id_mapping.csv and studies/{studyid}.json, then (once, for the run)
 the source and issue reports
@@ -258,13 +261,16 @@ malformed SSTR or its MULTI files had problems.
   malformed, the consent column read, mapping and unresolved row counts, and the error if it failed
 - `participants_migration_file_issues.csv`: every problem found in those files, one row per
   study and issue code, with severity, file, count and the first few examples
+- `participants_migration_consent_counts.csv`: participants loaded per consent code
+  (`study_id,abv,outcome,source,consent_code,participants_loaded`), from the SSTR/MULTI sub-job;
+  a `--resume-from` run carries a reused study's counts over from the earlier run
 - `participants_migration_file_report.md`: both of the above for a person to read, studies
   grouped by source and outcome
 - `studies/{studyid}.json`: each study's result and the data folder it came from, written as
   the study finishes; what a resumed run reads back
 - Metrics `sstrStudyIds`, `multiStudyIds`, `sstrFallbackStudyIds`, `noParticipantSourceStudyIds`,
-  `reusedStudyIds`, `skippedStudies`/`skippedStudyIds` (no participant files; not counted in
-  `failedStudies`)
+  `reusedStudyIds`, `skippedStudies`/`skippedStudyIds` (no participant files or needing data
+  review; not counted in `failedStudies`), `needsReviewStudyIds`
 
 Issue codes in the file issues report:
 
@@ -272,6 +278,7 @@ Issue codes in the file issues report:
 |------|----------|---------|
 | `SSTR_MALFORMED` | warning | The SSTR sub-job failed on its data; the study fell back to MULTI |
 | `NO_PARTICIPANT_FILES` | warning | No SSTR and no Subject.MULTI at all; the study was skipped (not migrated), and the run and pipeline carried on |
+| `NEEDS_DATA_REVIEW` | warning | The source loaded, but no patient mapping row resolved to a loaded subject (counts given: not in the file, no participant id, consent 0); the study was skipped, its mapping file is header-only, and a resumed run migrates it again |
 | `NO_PARTICIPANT_SOURCE` | error | The SSTR is malformed and there is no Subject.MULTI to fall back to; the study failed |
 | `MULTI_LOAD_FAILED` | error | The MULTI sub-job failed (e.g. no consent column, no consented subject); the study failed |
 | `MULTIPLE_SSTR_CANDIDATES`, `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named |
@@ -377,11 +384,18 @@ These are consolidated into **`downstream-artifacts/split-allconcepts-report-<bu
 
 - **`.json`** has the shape of every job report (`jobName`, `runId`, `status`, `exitCode`,
   `inputValidation`, `outputValidation`, `metrics`, `errorMessage`) plus `studies`, each study's full
-  result. A failed or unstarted study is an `ERROR` issue in `outputValidation` (one with no usable
-  input, in `inputValidation`) and a study with warnings a `WARNING`, so
-  `etl-runners/common/validate-report.sh` checks it like any job report. `metrics` totals the
-  studies by outcome, lane, failure stage and exit code, plus rows, unmapped ids, rows without a
-  consent and retried studies.
+  result. A failed study is one of two kinds:
+  - a **data failure** -- no usable input (preflight), the job rejected the study's data
+    (`DATA_ERROR`/`VALIDATION_FAILED`), or its output failed `validate.sh` -- is a `WARNING`
+    (`STUDY_INPUT_UNUSABLE` / `STUDY_EXCLUDED`), listed in `metrics.excludedStudyIds`, and left out
+    of every later stage (see `laterStageManagedInputs`);
+  - **any other failure** (infrastructure, timeout, unknown) or a study that did not start is an
+    `ERROR` (`STUDY_FAILED` / `STUDY_NOT_STARTED`), listed in `metrics.rerunStudyIds`.
+
+  A study with warnings is a `WARNING`, so `etl-runners/common/validate-report.sh` checks it like
+  any job report. `metrics` totals the studies by outcome, lane, failure stage and exit code, plus
+  rows, unmapped ids, rows without a consent and retried studies. Each study's job metrics include
+  `rowsPerConsent` and `participantsPerConsent` (distinct participants written to each partition).
 - **`.md`** is the version to read: the result and totals first, then **each failed study** with its
   reason, the job's error, the failed checks, the runner exit code and attempts, the runner and worker
   logs or build, its artifacts folder and the `STUDY_FILTER` value to re-run it, then the studies that
@@ -389,7 +403,8 @@ These are consolidated into **`downstream-artifacts/split-allconcepts-report-<bu
 
 The console shows one `[<study_id>]` line per step for each study (the last 40 lines of the monitor
 output when an attempt fails), and the report's summary at the end. The stage fails if any study
-failed or did not start, and is unstable if any had warnings.
+failed for a non-data reason or did not start, and is unstable if any was excluded for its data or
+had warnings.
 
 #### Debugging one study
 
@@ -507,6 +522,32 @@ versioned `allConcepts_manifest.csv` at the root of `MERGE_ALLCONCEPTS_INPUT` (b
 `DATA_ROOT`): `partition, s3_uri, version_id, last_updated, md5`, with a `global` row for the
 global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consent group. If any check fails, no manifest is written and the build fails. See
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-9-allconcepts-manifest).
+
+---
+
+## Post: Migration Report
+
+**Script:** `etl-runners/migration-report/migration-report.py`, first in `post { always }`, so it is
+written whatever stage the build stopped at (a stage that did not run is reported as such, and the
+studies it would have handled as `NOT_REACHED`). It reads only what the stages left under
+`downstream-artifacts/` and never changes the build's result. Output in
+`downstream-artifacts/migration-report/` (archived) and
+`s3://<DATA_ROOT bucket>/etl-runner/reports/migration-pipeline/<build-tag>/migration-report/`:
+
+| File | One row per | What it is for |
+|---|---|---|
+| `migration_consent_counts.csv` | study and consent code | comparing against production: `participants_loaded` (written to the participant DB), `participants_split` (distinct participants in the split partition -- what HPDS will hold), `split_rows`, `in_manifest`, `manifest_version_id`, `study_status` |
+| `migration_study_outcomes.csv` | ready study | its `status` and each stage's outcome and counts |
+| `migration_review.csv` | problem | every study needing follow-up: `stage`, `category`, `code`, `detail`, `action` |
+| `migration-report.json` | -- | all of the above, plus each stage's result, under one schema (`reportVersion` 1) for QA jobs |
+| `migration-report.md` | -- | the same, to read: totals, stages, the follow-up list grouped by status, then the counts |
+
+Study `status`, most severe first: `NOT_MIGRATED` (its data is missing, malformed or does not match
+the patient mapping -- fix the data), `RERUN_NEEDED` (a stage failed for a non-data reason, or an
+output is missing -- re-run it with `STUDY_FILTER`), `NOT_REACHED` (the pipeline stopped first),
+`MIGRATED_WITH_GAPS` (migrated, but patients, rows or outputs were dropped -- review before
+sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DATA_MISMATCH`,
+`PARTIAL_DATA`, `PIPELINE_FAILURE`, `OUTPUT_WARNING`.
 
 ---
 
