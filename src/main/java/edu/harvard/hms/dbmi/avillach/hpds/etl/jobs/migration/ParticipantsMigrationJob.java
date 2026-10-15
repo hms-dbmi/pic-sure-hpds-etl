@@ -138,6 +138,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * {@code spring.datasource.hikari.maximum-pool-size}.
      */
     private static final int MAX_PARALLELISM = 8;
+    /** Unresolved patient-mapping ids named in the per-study log summary; the report lists them all. */
+    private static final int UNRESOLVED_LOG_SAMPLE = 5;
     private static final int MAX_EXAMPLES = 10;
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
     private static final Pattern TABLE_ACCESSION = Pattern.compile("pht\\d+");
@@ -653,6 +655,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         List<MappingRow> rows = new ArrayList<>();
         List<String> unresolved = new ArrayList<>();
         List<String> notConsented = new ArrayList<>();
+        // Unresolved rows are summarised per study rather than logged one by one: a study can have
+        // tens of thousands, and every id is already listed in the report's PATIENT_MAPPING_UNRESOLVED issue.
+        List<String> notFound = new ArrayList<>();
+        List<String> notInFileSample = new ArrayList<>();
+        List<String> noParticipantSample = new ArrayList<>();
+        int notInFile = 0;
+        int noParticipant = 0;
         for (PatientMappingRow pm : patientMappings) {
             String dbgapId = identities.dbgapIds().contains(pm.id())
                     ? pm.id() : identities.subjectIdToDbgapId().get(pm.id());
@@ -662,31 +671,42 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 continue;
             }
             if (dbgapId == null) {
-                log.warn("Study '{}': patient mapping id '{}' (old hpds id {}) not found in {}; skipping",
-                        studyId, pm.id(), pm.oldHpdsId(), identities.file());
+                if (notInFile++ < UNRESOLVED_LOG_SAMPLE) {
+                    notInFileSample.add("'" + pm.id() + "' (old hpds id " + pm.oldHpdsId() + ")");
+                }
+                notFound.add(pm.oldHpdsId());
                 unresolved.add(pm.oldHpdsId());
                 continue;
             }
             Long hpdsId = idByDbgapId.get(dbgapId);
             if (hpdsId == null) {
-                log.warn("Study '{}': no participant id found for dbgap id '{}' (old hpds id {}); skipping",
-                        studyId, dbgapId, pm.oldHpdsId());
+                if (noParticipant++ < UNRESOLVED_LOG_SAMPLE) {
+                    noParticipantSample.add("'" + dbgapId + "' (old hpds id " + pm.oldHpdsId() + ")");
+                }
+                notFound.add(pm.oldHpdsId());
                 unresolved.add(pm.oldHpdsId());
                 continue;
             }
             rows.add(new MappingRow(pm.oldHpdsId(), hpdsId, dbgapId));
         }
 
+        if (notInFile > 0) {
+            log.warn("Study '{}': {} of {} patient mapping id(s) not found in {}; skipped. First: {}",
+                    studyId, notInFile, patientMappings.size(), identities.file(), String.join(", ", notInFileSample));
+        }
+        if (noParticipant > 0) {
+            log.warn("Study '{}': {} of {} dbgap id(s) have no participant id; skipped. First: {}",
+                    studyId, noParticipant, patientMappings.size(), String.join(", ", noParticipantSample));
+        }
         if (!notConsented.isEmpty()) {
             trace.issue(Severity.INFO, "PATIENT_MAPPING_NOT_CONSENTED", identities.file(),
                     notConsented.size() + " patient mapping row(s) name a consent-0 subject and were not mapped "
                             + "(old hpds ids)", notConsented);
         }
-        int notFound = unresolved.size() - notConsented.size();
-        if (notFound > 0) {
-            List<String> ids = unresolved.stream().filter(id -> !notConsented.contains(id)).toList();
+        if (!notFound.isEmpty()) {
             trace.issue(Severity.WARNING, "PATIENT_MAPPING_UNRESOLVED", identities.file(),
-                    notFound + " patient mapping row(s) could not be resolved to a loaded subject (old hpds ids)", ids);
+                    notFound.size() + " patient mapping row(s) could not be resolved to a loaded subject (old hpds ids)",
+                    notFound);
         }
         return new MappingResult(rows, unresolved);
     }

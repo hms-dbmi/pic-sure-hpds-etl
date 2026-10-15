@@ -74,6 +74,8 @@ pipeline {
                description: 'Rows per batch insert, passed to every migration job')
         string(name: 'PARTICIPANTS_PARALLELISM', defaultValue: '4',
                description: 'participants-migration --parallelism: studies migrated at once, 1-8')
+        string(name: 'PARTICIPANTS_TIMEOUT_SECONDS', defaultValue: '43200',
+               description: 'How long participants-migration waits for its runner before giving up (exit 124). Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: 'Comma-separated study ids; blank runs every ready study. Applies to the participants and split stages only -- the global AllConcepts and VCF stages always cover ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
@@ -222,6 +224,7 @@ pipeline {
                             string(name: 'DATA_FOLDER',    value: params.DATA_ROOT),
                             string(name: 'BATCH_SIZE',     value: params.BATCH_SIZE),
                             string(name: 'PARALLELISM',    value: params.PARTICIPANTS_PARALLELISM),
+                            string(name: 'JOB_TIMEOUT_SECONDS', value: params.PARTICIPANTS_TIMEOUT_SECONDS ?: '43200'),
                             string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
                             string(name: 'ENV',            value: params.ENV),
