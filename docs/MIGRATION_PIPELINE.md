@@ -505,7 +505,8 @@ For every study marked ready in `MANAGED_INPUTS`, keeps one
 `{study_id}_c{code}_allConcepts_MERGED.csv` per `{study_id}/allConcepts/c{code}/` folder under
 `MERGE_ALLCONCEPTS_INPUT` (blank = `DATA_ROOT`): merges a folder that has none, re-merges one whose
 `*_allConcepts_*` files were added, overwritten or deleted since (detected from S3 version ids, so
-the bucket must be versioned), and skips the rest. See
+the bucket must be versioned), and skips the rest. Folders are merged
+`MERGE_ALLCONCEPTS_PARALLELISM` at a time (default 8). See
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-8-merge-allconcepts).
 
 ---
@@ -619,6 +620,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `VCF_INDEXES_OUTPUT` | `…/__migration__/vcf_indexes/` | Output for VCF indexes (must be `s3://`) |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
+| `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |

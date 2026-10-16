@@ -236,11 +236,13 @@ public class IoResolver {
     }
 
     // A single PutObject caps at 5 GiB; above the threshold we go multipart. 4 GiB leaves
-    // comfortable margin under the cap. 512 MiB parts keep the part count tiny (a 34 GiB
-    // consent file is 68 parts; S3 allows 10,000) while each part stays a modest request.
+    // comfortable margin under the cap. Each upload in flight holds one part in memory, so
+    // 64 MiB parts let several run at once on a small runner (merge-allconcepts uploads up to
+    // --parallelism files concurrently) while keeping the count well inside S3's 10,000 parts
+    // (a 34 GiB consent file is 544; the cap is 625 GiB).
     // Non-final so the LocalStack IT can lower them and exercise multipart with small files.
     private long multipartThresholdBytes = 4L * 1024 * 1024 * 1024;
-    private int multipartPartSizeBytes = 512 * 1024 * 1024;
+    private int multipartPartSizeBytes = 64 * 1024 * 1024;
 
     void setMultipartThresholdBytes(long bytes) {
         this.multipartThresholdBytes = bytes;

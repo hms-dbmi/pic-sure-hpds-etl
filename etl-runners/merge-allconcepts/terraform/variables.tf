@@ -97,6 +97,12 @@ variable "study_ids" {
   description = "--study-ids: comma-separated study ids to merge instead of every ready study. Blank merges the ready ones."
 }
 
+variable "parallelism" {
+  type        = string
+  default     = "8"
+  description = "--parallelism: consent folders merged at once (1-16)"
+}
+
 variable "managed_inputs_uri" {
   type        = string
   default     = ""

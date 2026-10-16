@@ -430,4 +430,70 @@ class MergeAllConceptsJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(s3.exists(MERGED_C1)).isFalse();
     }
+
+    // ---- parallelism -----------------------------------------------------------
+
+    @Test
+    void merges_many_folders_concurrently_with_each_from_its_own_sources() {
+        StringBuilder csv = new StringBuilder(MANAGED_HEADER);
+        for (int study = 1; study <= 6; study++) {
+            String id = "phs00010" + study;
+            csv.append(id).append(',').append(id).append(",Yes\n");
+            for (int c = 1; c <= 4; c++) {
+                String dir = "root/" + id + "/allConcepts/c" + c + "/";
+                s3.put(dir + id + "_allConcepts_c" + c + "_a.csv", id + " c" + c + " a\n");
+                s3.put(dir + id + "_allConcepts_c" + c + "_b.csv", id + " c" + c + " b");
+            }
+        }
+        managedInputs = csv.toString();
+
+        JobResult result = executor.run(job(), Map.of("input", ROOT, "parallelism", "4"), "unit");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("foldersMerged", 24L);
+        for (int study = 1; study <= 6; study++) {
+            String id = "phs00010" + study;
+            for (int c = 1; c <= 4; c++) {
+                assertThat(s3.content("root/" + id + "/allConcepts/c" + c + "/" + id + "_c" + c + "_allConcepts_MERGED.csv"))
+                        .isEqualTo(id + " c" + c + " a\n" + id + " c" + c + " b\n");
+            }
+        }
+        // Reported in study and consent order, whatever order the folders finished in.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> actions = (Map<String, Object>) result.getMetrics().get("actions");
+        assertThat(actions.keySet()).startsWith("phs000101/allConcepts/c1", "phs000101/allConcepts/c2");
+    }
+
+    @Test
+    void a_failing_folder_does_not_stop_the_others_but_fails_the_run() {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        s3.put(C2 + "phs000001_allConcepts_c2.csv", "b\n");
+        when(s3.client.getObject(any(GetObjectRequest.class))).thenAnswer(inv -> {
+            GetObjectRequest req = inv.getArgument(0);
+            if (req.key().startsWith(C1)) {
+                throw new RuntimeException("connection reset");
+            }
+            return new software.amazon.awssdk.core.ResponseInputStream<>(
+                    software.amazon.awssdk.services.s3.model.GetObjectResponse.builder().build(),
+                    software.amazon.awssdk.http.AbortableInputStream.create(
+                            new java.io.ByteArrayInputStream("b\n".getBytes(StandardCharsets.UTF_8))));
+        });
+
+        JobResult result = run();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(result.getErrorMessage()).contains("Failed to read source");
+        assertThat(s3.exists(MERGED_C1)).isFalse();
+        assertThat(s3.content(MERGED_C2)).isEqualTo("b\n");
+    }
+
+    @Test
+    void rejects_parallelism_out_of_range() {
+        for (String bad : List.of("0", "17", "many")) {
+            JobResult result = executor.run(job(), Map.of("input", ROOT, "parallelism", bad), "unit");
+
+            assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+            assertThat(result.getInputValidation().getIssues()).anyMatch(i -> i.code().equals("BAD_PARALLELISM"));
+        }
+    }
 }

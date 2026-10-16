@@ -87,6 +87,8 @@ pipeline {
                description: 'File, relative to {DATA_ROOT}/{study_id}/, holding a study\'s concept mapping')
         booleanParam(name: 'SKIP_ANALYSIS', defaultValue: false,
                description: 'Pass --skip-analysis to the generator: use the mapping file\'s data types as-is instead of re-analysing the decoded data')
+        string(name: 'MERGE_ALLCONCEPTS_PARALLELISM', defaultValue: '8',
+               description: 'merge-allconcepts --parallelism: consent folders merged at once, 1-16')
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
         string(name: 'ALLCONCEPTS_MANIFEST_JOB', defaultValue: 'generate-allconcepts-manifest',
@@ -588,6 +590,7 @@ pipeline {
                             string(name: 'INPUT', value: params.DATA_ROOT.trim()),
                             string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS.trim()),
                             string(name: 'STUDY_IDS', value: mergeStudyIds),
+                            string(name: 'PARALLELISM', value: params.MERGE_ALLCONCEPTS_PARALLELISM),
                             string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
                             string(name: 'ENV',    value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS', value: true),

@@ -14,6 +14,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts.AllConceptsFolder
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts.AllConceptsFolders.FileVersion;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
+import org.slf4j.MDC;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -26,12 +27,20 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
  * PERMANENT. Keeps one {@code {study_id}_c{code}_allConcepts_MERGED.csv} per consent folder
@@ -56,10 +65,23 @@ import java.util.Set;
  *
  * <p>Sources are concatenated in name order, each ending with a newline, so a source missing its
  * final newline cannot run its last row into the next file's first.
+ *
+ * <p>Folders are checked and merged {@code --parallelism} at a time (default
+ * {@value #DEFAULT_PARALLELISM}), largest first, so the biggest are not left running alone at the
+ * end. Folders are independent, so one that fails does not stop the others: every folder is
+ * attempted, the ones that merged stay merged (and are up to date on a retry), and the first
+ * failure, in folder order, fails the run with the rest attached as suppressed.
  */
 @Component
 @ConditionalOnProperty(name = "etl.jobs.merge-allconcepts.enabled", havingValue = "true")
 public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output> {
+
+    static final int DEFAULT_PARALLELISM = 8;
+    /**
+     * Each merge in flight holds up to two S3 connections (a source read and the upload; the SDK
+     * pools 50) and, above the multipart threshold, one upload part in memory (see IoResolver).
+     */
+    static final int MAX_PARALLELISM = 16;
 
     private final IoResolver io;
     private final S3Client s3;
@@ -92,7 +114,11 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
                                 "s3://bucket/output/"),
                         ParamSpec.optional("study-ids",
                                 "Comma-separated study ids to check instead of every study marked ready in managed inputs",
-                                "")),
+                                ""),
+                        ParamSpec.optional("parallelism",
+                                "Consent folders merged at once (1-" + MAX_PARALLELISM + "; default "
+                                        + DEFAULT_PARALLELISM + ")",
+                                String.valueOf(DEFAULT_PARALLELISM))),
                 List.of("One up-to-date {study_id}_c{code}_allConcepts_MERGED.csv per consent folder of each ready study"));
     }
 
@@ -102,6 +128,17 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
         if (!io.isS3(input)) {
             report.error("S3_REQUIRED", "input must be an s3:// URI for versioning support", "--input");
         }
+        ctx.get("parallelism").ifPresent(p -> {
+            try {
+                int n = Integer.parseInt(p);
+                if (n < 1 || n > MAX_PARALLELISM) {
+                    report.error("BAD_PARALLELISM", "parallelism must be between 1 and " + MAX_PARALLELISM
+                            + ", got: " + p, "--parallelism");
+                }
+            } catch (NumberFormatException e) {
+                report.error("BAD_PARALLELISM", "parallelism must be an integer, got: " + p, "--parallelism");
+            }
+        });
     }
 
     @Override
@@ -125,23 +162,113 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
                     .forEach(r -> ready.add(r.studyId()));
             studyIds.stream().filter(id -> !ready.contains(id)).forEach(notReady::add);
         }
-        log.info("Checking {} {} stud{} under {}", studyIds.size(), filter.isEmpty() ? "ready" : "requested",
-                studyIds.size() == 1 ? "y" : "ies", base);
+        int parallelism = Integer.parseInt(ctx.get("parallelism", String.valueOf(DEFAULT_PARALLELISM)));
+        log.info("Checking {} {} stud{} under {}, {} folder(s) at a time", studyIds.size(),
+                filter.isEmpty() ? "ready" : "requested", studyIds.size() == 1 ? "y" : "ies", base, parallelism);
 
-        Map<String, FolderResult> results = new LinkedHashMap<>();
-        List<String> studiesWithoutFolders = new ArrayList<>();
-        for (String studyId : studyIds) {
-            Map<String, ConsentFolder> studyFolders = folders.scanStudy(base, studyId);
-            if (studyFolders.isEmpty()) {
-                log.warn("Study {} has no consent folders under {}{}/{}/", studyId, base, studyId,
-                        AllConceptsFolders.ALL_CONCEPTS_DIR);
-                studiesWithoutFolders.add(studyId);
+        try (ExecutorService pool = Executors.newFixedThreadPool(parallelism,
+                Thread.ofPlatform().name("merge-", 1).factory())) {
+            List<Map<String, ConsentFolder>> scanned = runAll(studyIds,
+                    studyId -> folders.scanStudy(base, studyId), studyId -> studyId, pool);
+
+            List<ConsentFolder> all = new ArrayList<>();
+            List<String> studiesWithoutFolders = new ArrayList<>();
+            for (int i = 0; i < studyIds.size(); i++) {
+                if (scanned.get(i).isEmpty()) {
+                    log.warn("Study {} has no consent folders under {}{}/{}/", studyIds.get(i), base,
+                            studyIds.get(i), AllConceptsFolders.ALL_CONCEPTS_DIR);
+                    studiesWithoutFolders.add(studyIds.get(i));
+                }
+                all.addAll(scanned.get(i).values());
             }
-            for (ConsentFolder folder : studyFolders.values()) {
-                results.put(folder.label(), process(folder));
+            log.info("Found {} consent folder(s)", all.size());
+
+            AtomicInteger finished = new AtomicInteger();
+            List<FolderResult> processed = runAll(all, folder -> {
+                FolderResult r = process(folder);
+                log.info("{}: {} ({}/{} folders done)", folder.label(), r.action(), finished.incrementAndGet(),
+                        all.size());
+                return r;
+            }, ConsentFolder::label, pool, largestFirst(all));
+
+            Map<String, FolderResult> results = new LinkedHashMap<>();
+            for (int i = 0; i < all.size(); i++) {
+                results.put(all.get(i).label(), processed.get(i));
+            }
+            return new Output(studyIds, studiesWithoutFolders, notReady, results);
+        }
+    }
+
+    private <T, R> List<R> runAll(List<T> items, Function<T, R> task,
+                                  Function<T, String> label, ExecutorService pool) {
+        return runAll(items, task, label, pool, items);
+    }
+
+    /**
+     * Runs {@code task} on every item on {@code pool}, submitted in {@code submitOrder}, and returns
+     * the results in {@code items} order. Every item is attempted even after one fails; then the
+     * first failure in {@code items} order is rethrown, the others attached as suppressed.
+     */
+    private <T, R> List<R> runAll(List<T> items, Function<T, R> task,
+                                  Function<T, String> label, ExecutorService pool,
+                                  List<T> submitOrder) {
+        Map<String, String> mdc = MDC.getCopyOfContextMap();
+        Map<T, Future<R>> futures = new IdentityHashMap<>();
+        for (T item : submitOrder) {
+            futures.put(item, pool.submit(() -> {
+                if (mdc != null) {
+                    MDC.setContextMap(mdc);
+                }
+                try {
+                    return task.apply(item);
+                } catch (RuntimeException e) {
+                    log.error("{} failed; carrying on with the rest", label.apply(item), e);
+                    throw e;
+                } finally {
+                    MDC.clear();
+                }
+            }));
+        }
+
+        List<R> results = new ArrayList<>();
+        RuntimeException failure = null;
+        int failed = 0;
+        for (T item : items) {
+            try {
+                results.add(futures.get(item).get());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                futures.values().forEach(f -> f.cancel(true));
+                throw new InfrastructureException("Interrupted while waiting for merges to finish", e);
+            } catch (ExecutionException e) {
+                if (!(e.getCause() instanceof RuntimeException cause)) {
+                    throw new IllegalStateException("A merge worker failed", e.getCause());
+                }
+                failed++;
+                results.add(null);
+                if (failure == null) {
+                    failure = cause;
+                } else {
+                    failure.addSuppressed(cause);
+                }
             }
         }
-        return new Output(studyIds, studiesWithoutFolders, notReady, results);
+        if (failure != null) {
+            log.error("{} of {} failed; the first is reported", failed, items.size());
+            throw failure;
+        }
+        return results;
+    }
+
+    /** By total source bytes, largest first: a cheap stand-in for how long each takes to merge. */
+    private static List<ConsentFolder> largestFirst(List<ConsentFolder> all) {
+        return all.stream()
+                .sorted(Comparator.comparingLong(MergeAllConceptsJob::sourceBytes).reversed())
+                .toList();
+    }
+
+    private static long sourceBytes(ConsentFolder folder) {
+        return folder.sources().stream().mapToLong(f -> f.size() == null ? 0 : f.size()).sum();
     }
 
     private FolderResult process(ConsentFolder folder) {

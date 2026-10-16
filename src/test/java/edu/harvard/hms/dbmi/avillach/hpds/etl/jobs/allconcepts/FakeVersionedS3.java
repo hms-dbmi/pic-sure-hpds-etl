@@ -41,6 +41,7 @@ import static org.mockito.Mockito.when;
  * version (a delete adds a delete marker), version listings page through every key's history, and
  * reads honour a requested version id. Enough S3 for the merge and manifest jobs to run end to
  * end through the real {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver}.
+ * Thread-safe, since the merge job reads and writes folders concurrently.
  */
 final class FakeVersionedS3 {
 
@@ -51,7 +52,7 @@ final class FakeVersionedS3 {
     /** When set, {@code putObject} returns no version id, as an unversioned bucket would. */
     boolean omitVersionIds;
     /** Every {@code getObject} request, in order. */
-    final List<GetObjectRequest> reads = new ArrayList<>();
+    final List<GetObjectRequest> reads = java.util.Collections.synchronizedList(new ArrayList<>());
 
     private final Map<String, List<Version>> keys = new TreeMap<>();
     private long clock = Instant.parse("2026-01-01T00:00:00Z").getEpochSecond();
@@ -128,7 +129,7 @@ final class FakeVersionedS3 {
     }
 
     /** Number of versions (delete markers included) ever written to the key. */
-    int versionCount(String key) {
+    synchronized int versionCount(String key) {
         return keys.getOrDefault(key, List.of()).size();
     }
 
@@ -137,19 +138,19 @@ final class FakeVersionedS3 {
         return v != null && !v.deleteMarker();
     }
 
-    private Version add(String key, byte[] content, Map<String, String> metadata, boolean deleteMarker) {
+    private synchronized Version add(String key, byte[] content, Map<String, String> metadata, boolean deleteMarker) {
         Version v = new Version("v" + nextVersion++, content, Map.copyOf(metadata), Instant.ofEpochSecond(clock += 60),
                 deleteMarker);
         keys.computeIfAbsent(key, k -> new ArrayList<>()).add(v);
         return v;
     }
 
-    private Version latest(String key) {
+    private synchronized Version latest(String key) {
         List<Version> history = keys.get(key);
         return history == null || history.isEmpty() ? null : history.get(history.size() - 1);
     }
 
-    private Version find(String key, String versionId) {
+    private synchronized Version find(String key, String versionId) {
         List<Version> history = keys.getOrDefault(key, List.of());
         if (versionId == null) {
             Version v = latest(key);
@@ -163,7 +164,7 @@ final class FakeVersionedS3 {
     }
 
     /** Pages through every version under the prefix, newest first within a key, as S3 does. */
-    private ListObjectVersionsResponse list(ListObjectVersionsRequest req) {
+    private synchronized ListObjectVersionsResponse list(ListObjectVersionsRequest req) {
         record Entry(String key, Version version, boolean latest) {
         }
         List<Entry> all = new ArrayList<>();

@@ -33,7 +33,7 @@ module "etl_runner" {
   # the participant database is up.
 
   job_params = merge(
-    { input = var.input_uri },
+    { input = var.input_uri, parallelism = var.parallelism },
     var.study_ids != "" ? { study_ids = var.study_ids } : {},
     var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {}
   )

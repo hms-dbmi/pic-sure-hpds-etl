@@ -433,6 +433,14 @@ second streams them to the MERGED key (multipart above 4 GiB) with that metadata
 the old object; S3 keeps the previous version. If the second read hashes differently, the
 upload is aborted and no new version is written.
 
+**Parallelism.** Folders are checked and merged `--parallelism` at a time (Jenkins
+`PARALLELISM`, orchestrator `MERGE_ALLCONCEPTS_PARALLELISM`; default 8, at most 16), largest
+total source size first so the biggest aren't left running alone at the end. Each merge in
+flight holds up to two S3 connections and, above the multipart threshold, one 64 MiB upload part
+in memory. Folders are independent, so a failing folder doesn't stop the others. Every folder is
+attempted, the ones that merged stay merged (and show up to date on a retry), and the run then
+fails with the first failure in folder order.
+
 ### Output
 
 An up-to-date `{study_id}_c{code}_allConcepts_MERGED.csv` in each consent folder of every ready
@@ -560,6 +568,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `CONCEPT_MAPPING_FILE` | `mappings/mapping2.csv` | Concept mapping file, relative to `{DATA_ROOT}/{study_id}/` |
 | `SKIP_ANALYSIS` | `false` | Use the mapping's data types as-is instead of re-analysing |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
+| `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
