@@ -9,8 +9,10 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 /**
  * Persists a {@link JobResult} as a JSON report artifact. Jenkins archives the reports
@@ -38,16 +40,32 @@ public class ReportWriter {
      * @return the path written, or null if writing failed
      */
     public Path write(Path reportsDir, JobResult result) {
+        Path target = reportsDir.resolve(result.getJobName() + "-" + result.getRunId() + ".json");
+        // Written aside and renamed: the runner uploads the reports directory while the job is
+        // still running, and must never pick up half a report.
+        Path partial = reportsDir.resolve(target.getFileName() + ".partial");
         try {
             Files.createDirectories(reportsDir);
-            Path target = reportsDir.resolve(result.getJobName() + "-" + result.getRunId() + ".json");
-            mapper.writeValue(target.toFile(), result);
+            mapper.writeValue(partial.toFile(), result);
+            try {
+                Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Some filesystems (certain mounts) cannot rename atomically. A plain move is still
+                // better than losing the report; the upload may at worst see it mid-copy once.
+                Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING);
+            }
             log.info("Wrote report {}", target.toAbsolutePath());
             return target;
         } catch (IOException e) {
-            // Record the failure without failing the run.
+            // Record the failure without failing the run, and leave no half-written report behind
+            // for the runner to upload.
             log.error("Failed to write report for job '{}' run '{}': {}",
                     result.getJobName(), result.getRunId(), e.getMessage(), e);
+            try {
+                Files.deleteIfExists(partial);
+            } catch (IOException cleanup) {
+                log.warn("Could not delete partial report {}: {}", partial, cleanup.getMessage());
+            }
             return null;
         }
     }

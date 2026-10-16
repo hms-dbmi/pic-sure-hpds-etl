@@ -25,7 +25,7 @@ public enum ExitCode {
     /** The input data was reachable but malformed/inconsistent (bad rows, bad types). */
     DATA_ERROR(3),
 
-    /** An external dependency failed: RDS, S3, network, filesystem. Usually retryable. */
+    /** An external dependency failed: database, S3, network, filesystem. Usually retryable. */
     INFRASTRUCTURE_ERROR(4),
 
     /** The job was misconfigured: a required parameter/credential was missing or invalid. */

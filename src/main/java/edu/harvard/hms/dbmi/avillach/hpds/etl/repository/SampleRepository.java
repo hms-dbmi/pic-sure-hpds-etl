@@ -5,9 +5,9 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 import org.springframework.stereotype.Repository;
 
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -17,11 +17,17 @@ import java.util.List;
 @Repository
 public class SampleRepository {
 
-    private static final String UPSERT = """
-            INSERT INTO samples (hpds_id, source_sample_id, sample_source)
-            VALUES (:hpdsId, :sourceSampleId, :sampleSource)
-            ON CONFLICT (hpds_id, source_sample_id, sample_source) DO NOTHING
-            """;
+    private static final String INSERT_INTO = "INSERT INTO samples (hpds_id, source_sample_id, sample_source)";
+    private static final String ON_CONFLICT = "ON CONFLICT (hpds_id, source_sample_id, sample_source) DO NOTHING";
+
+    /**
+     * The conflict key's order; pass it to {@code BatchOps.upsertInChunks}. The key has no
+     * study_id, so two studies' loads sharing a participant can write the same rows; written in
+     * one shared order they wait on each other's uncommitted rows rather than deadlock.
+     */
+    public static final Comparator<Sample> KEY_ORDER = Comparator.comparingLong(Sample::hpdsId)
+            .thenComparing(Sample::sourceSampleId)
+            .thenComparing(Sample::sampleSource);
 
     private final NamedParameterJdbcTemplate jdbc;
 
@@ -33,19 +39,9 @@ public class SampleRepository {
         if (samples.isEmpty()) {
             return 0;
         }
-        SqlParameterSource[] batch = samples.stream()
-                .map(s -> new MapSqlParameterSource()
-                        .addValue("hpdsId", s.hpdsId())
-                        .addValue("sourceSampleId", s.sourceSampleId())
-                        .addValue("sampleSource", s.sampleSource()))
-                .toArray(SqlParameterSource[]::new);
         try {
-            int[] counts = jdbc.batchUpdate(UPSERT, batch);
-            int inserted = 0;
-            for (int c : counts) {
-                inserted += Math.max(c, 0);
-            }
-            return inserted;
+            return MultiRowInsert.execute(jdbc.getJdbcTemplate(), INSERT_INTO, ON_CONFLICT, 3, samples,
+                    s -> new Object[]{s.hpdsId(), s.sourceSampleId(), s.sampleSource()});
         } catch (DataAccessException e) {
             throw new InfrastructureException("Batch upsert into samples failed", e);
         }
