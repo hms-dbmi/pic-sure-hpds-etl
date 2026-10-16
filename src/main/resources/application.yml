@@ -51,7 +51,11 @@ etl:
     create-vcf-indexes:
       enabled: ${ETL_JOB_CREATE_VCF_INDEXES_ENABLED:true}
 
-    # PERMANENT: validate the PSAMA fence_mapping.json (schema + uniqueness checks).
+    # PERMANENT: split the one merged allConcepts (with global variables) into per-consent
+    # partitions for the partitioned HPDS loader, and validate the PSAMA fence_mapping.json
+    # that must grant those partitions.
+    split-allconcepts-by-consent:
+      enabled: ${ETL_JOB_SPLIT_ALLCONCEPTS_BY_CONSENT_ENABLED:true}
     validate-fence-mapping:
       enabled: ${ETL_JOB_VALIDATE_FENCE_MAPPING_ENABLED:true}
 

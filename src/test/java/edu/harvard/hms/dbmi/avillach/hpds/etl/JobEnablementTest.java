@@ -46,6 +46,14 @@ class JobEnablementTest {
     }
 
     @Test
+    void the_consent_split_and_fence_mapping_jobs_are_registered_by_default() {
+        // Neither is overridden above, so this proves application.yml enables them and that the
+        // FenceMappingValidator they share (schema loaded from the classpath) wires into the context.
+        assertThat(registry.contains("split-allconcepts-by-consent")).isTrue();
+        assertThat(registry.contains("validate-fence-mapping")).isTrue();
+    }
+
+    @Test
     void a_disabled_job_is_not_registered() {
         assertThat(registry.contains("sstr-populate-rds-participants")).isFalse();
         assertThat(registry.contains("single-consent-data-populate-rds-participants")).isFalse();

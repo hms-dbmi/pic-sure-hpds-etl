@@ -1,0 +1,46 @@
+{
+  "$schema": "https://datapackage.org/profiles/2.0/tableschema.json",
+  "name": "allconcepts",
+  "title": "HPDS allConcepts CSV (CSVLoader input)",
+  "description": "Five-column, headerless CSV read by the HPDS CSVLoader (pic-sure-hpds etl/phenotype/csv/CSVLoader.java): patient_num is parsed with Integer.parseInt, nval with Double.parseDouble when non-empty, timestamp with Long.parseLong when non-empty. A row that violates these aborts the load. The split-allconcepts-by-consent job enforces the same rules in code (SplitMergedAllConceptsJob). The 'dialect' member is a non-standard annotation here (Table Schema itself has no dialect; in a Data Package it belongs on the resource): the file has no header row.",
+  "missingValues": [""],
+  "fields": [
+    {
+      "name": "patient_num",
+      "type": "integer",
+      "description": "HPDS patient number (32-bit signed integer).",
+      "constraints": { "required": true }
+    },
+    {
+      "name": "concept_path",
+      "type": "string",
+      "description": "Concept path, backslash- or mu-delimited. Mu to backslash conversion happens in the load runner, not in the split.",
+      "constraints": { "required": true, "minLength": 1 }
+    },
+    {
+      "name": "nval",
+      "type": "number",
+      "description": "Numeric value; empty for categorical rows."
+    },
+    {
+      "name": "tval",
+      "type": "string",
+      "description": "Text value; empty for numeric rows."
+    },
+    {
+      "name": "timestamp",
+      "type": "string",
+      "description": "Epoch milliseconds (CSVLoader: new Date(Long.parseLong(..))), or empty. Values of 0 and values below 1e11 (likely epoch seconds) are reported by the split job, not rejected.",
+      "constraints": { "pattern": "^-?[0-9]*$" }
+    }
+  ],
+  "dialect": {
+    "csv": {
+      "header": false,
+      "delimiter": ",",
+      "quoteChar": "\"",
+      "doubleQuote": true,
+      "lineTerminator": "\n"
+    }
+  }
+}
