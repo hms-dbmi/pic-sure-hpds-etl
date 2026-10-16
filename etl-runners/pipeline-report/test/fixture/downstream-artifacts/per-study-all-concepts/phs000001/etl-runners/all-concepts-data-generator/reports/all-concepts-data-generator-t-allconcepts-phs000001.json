@@ -1,0 +1,33 @@
+{
+  "jobName": "all-concepts-data-generator",
+  "jobType": "PERMANENT",
+  "runId": "t-allconcepts-phs000001",
+  "exitCode": "SUCCESS",
+  "status": "SUCCESS",
+  "startedAt": "2026-10-16T00:00:00Z",
+  "finishedAt": "2026-10-16T00:10:00Z",
+  "durationMillis": 600000,
+  "inputValidation": {
+    "phase": "input",
+    "issues": [],
+    "counts": {
+      "error": 0,
+      "warning": 0,
+      "info": 0
+    }
+  },
+  "outputValidation": {
+    "phase": "output",
+    "issues": [],
+    "counts": {
+      "error": 0,
+      "warning": 0,
+      "info": 0
+    }
+  },
+  "metrics": {
+    "consentGroups": 2,
+    "rowsProcessed": 9000
+  },
+  "errorMessage": null
+}
