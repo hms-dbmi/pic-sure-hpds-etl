@@ -10,6 +10,9 @@ import java.util.regex.Pattern;
  */
 public final class AllConceptsLayout {
 
+    /** Per-study subfolder holding the per-consent folders ({@code legacy/allConcepts/} is a different tree). */
+    public static final String ALL_CONCEPTS_DIR = "allConcepts";
+
     /** A consent-group folder name under a study's allConcepts folder: {@code c} plus the code. */
     public static final Pattern CONSENT_FOLDER_PATTERN = Pattern.compile("c[^/]+");
 
@@ -23,7 +26,7 @@ public final class AllConceptsLayout {
 
     /** {@code {root}/{study_id}/allConcepts/}; {@code root} must end with {@code /}. */
     public static String studyAllConceptsDir(String root, String studyId) {
-        return root + studyId + "/allConcepts/";
+        return root + studyId + "/" + ALL_CONCEPTS_DIR + "/";
     }
 
     /** {@code {study_id}_allConcepts_{consentLabel}.csv}. */
