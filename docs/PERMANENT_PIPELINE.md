@@ -569,6 +569,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `SKIP_ANALYSIS` | `false` | Use the mapping's data types as-is instead of re-analysing |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
+| `MERGE_ALLCONCEPTS_TIMEOUT_SECONDS` | `14400` | How long the merge may run before it is failed as stuck (exit 124) |
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |

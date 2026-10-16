@@ -22,8 +22,8 @@ variable "ami_name_pattern" {
 
 variable "instance_type" {
   type        = string
-  default     = "t3.medium"
-  description = "Instance type. The merge is I/O-bound (streaming S3 objects), not memory-bound."
+  default     = "c5.xlarge"
+  description = "Instance type. The merge streams every changed folder's sources twice and uploads it, so it is bound by sustained network and MD5 throughput: a t3's baseline network, once its burst credits run out, made a full migration merge (~71 GB) outlast an hour."
 }
 
 variable "aws_account_id" {

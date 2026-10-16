@@ -38,7 +38,7 @@ pipeline {
         copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
-        timeout(time: 2, unit: 'HOURS')
+        timeout(time: 6, unit: 'HOURS')
     }
 
     parameters {
@@ -52,9 +52,9 @@ pipeline {
                description: '--parallelism: consent folders merged at once, 1-16.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
-        string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
+        string(name: 'INSTANCE_TYPE', defaultValue: 'c5.xlarge',
                description: 'Runner instance type.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '14400',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
