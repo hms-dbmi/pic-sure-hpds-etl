@@ -87,6 +87,83 @@ public class IoResolver {
         }
     }
 
+    /**
+     * Identity of an input object at one moment: enough to detect that it was replaced between two
+     * reads. For S3, {@code versionId} (null on a never-versioned bucket) and {@code eTag}; for local
+     * files both are null and {@code size}/{@code lastModifiedMillis} carry the identity.
+     */
+    public record ObjectInfo(String versionId, String eTag, long size, long lastModifiedMillis) {
+    }
+
+    /** Reads an object's identity without reading its content. */
+    public ObjectInfo head(String uri) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            try {
+                var r = s3.headObject(HeadObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build());
+                return new ObjectInfo(r.versionId(), r.eTag(),
+                        r.contentLength() == null ? -1 : r.contentLength(),
+                        r.lastModified() == null ? -1 : r.lastModified().toEpochMilli());
+            } catch (NoSuchKeyException e) {
+                throw new ConfigException("S3 object not found: " + uri, e);
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to read S3 object metadata: " + uri, e);
+            }
+        }
+        Path path = toLocalPath(uri);
+        if (!Files.exists(path)) {
+            throw new ConfigException("Input file not found: " + path.toAbsolutePath());
+        }
+        try {
+            return new ObjectInfo(null, null, Files.size(path), Files.getLastModifiedTime(path).toMillis());
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to stat local input: " + path, e);
+        }
+    }
+
+    /**
+     * Opens the exact object described by {@code pin}: S3 reads use the recorded {@code versionId}
+     * when there is one, else {@code If-Match: eTag}, so a replaced object fails the read instead of
+     * silently feeding a second pass different bytes. Local files are re-stat'ed against the pin.
+     *
+     * @throws InfrastructureException if the object no longer matches the pin
+     */
+    public InputStream openInput(String uri, ObjectInfo pin) {
+        if (isS3(uri)) {
+            S3Uri s3Uri = S3Uri.parse(uri);
+            GetObjectRequest.Builder req = GetObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key());
+            if (pin.versionId() != null) {
+                req.versionId(pin.versionId());
+            } else if (pin.eTag() != null) {
+                req.ifMatch(pin.eTag());
+            }
+            try {
+                ResponseInputStream<?> in = s3.getObject(req.build());
+                log.info("Opened pinned S3 input {} (versionId={}, eTag={})", uri, pin.versionId(), pin.eTag());
+                return in;
+            } catch (S3Exception e) {
+                if (e.statusCode() == 412 || e.statusCode() == 404) {
+                    throw new InfrastructureException("Input changed since it was first read (" + e.statusCode()
+                            + "): " + uri + " no longer matches versionId=" + pin.versionId() + " eTag=" + pin.eTag(), e);
+                }
+                throw new InfrastructureException("Failed to read from S3: " + uri, e);
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to read from S3: " + uri, e);
+            }
+        }
+        verifyUnchanged(uri, pin);
+        return openInput(uri);
+    }
+
+    /** Fails if the object's current identity differs from {@code pin}. */
+    public void verifyUnchanged(String uri, ObjectInfo pin) {
+        ObjectInfo now = head(uri);
+        if (!now.equals(pin)) {
+            throw new InfrastructureException("Input changed since it was first read: " + uri + " was " + pin
+                    + " and is now " + now);
+        }
+    }
+
     /** Checks whether a location exists, without reading its content. */
     public boolean exists(String uri) {
         if (isS3(uri)) {

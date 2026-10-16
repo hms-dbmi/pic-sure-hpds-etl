@@ -82,8 +82,6 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
 
     private static final Pattern TIMESTAMP = Pattern.compile("-?[0-9]*");
     private static final Pattern STUDY_ID = Pattern.compile("phs[0-9]{6}");
-    private static final Pattern NUMBER =
-            Pattern.compile("[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?");
     private static final int MAX_OPEN_WRITERS = 128;
     private static final int MAX_SAMPLES = 5;
     private static final long SECONDS_CEILING = 100_000_000_000L; // 1e11 ms is 1973; epoch seconds stay below this until the year 5138
@@ -211,8 +209,14 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         String consentsPath = normalize(ctx.get("consents-path", DEFAULT_CONSENTS_PATH));
         String fenceUri = ctx.get("fence-mapping", DEFAULT_FENCE_MAPPING);
 
+        // Both passes must read the same bytes. Pin the object now; every later open and the checks
+        // after each pass fail if it was replaced, and nothing has been uploaded by then.
+        IoResolver.ObjectInfo pin = io.head(inputUri);
+        log.info("Input pinned: versionId={} eTag={} size={}", pin.versionId(), pin.eTag(), pin.size());
+
         Findings errors = new Findings();
-        Pass1 p1 = pass1(inputUri, consentsPath, errors);
+        Pass1 p1 = pass1(inputUri, pin, consentsPath, errors);
+        io.verifyUnchanged(inputUri, pin);
         validatePartitionNames(p1, errors);
 
         Map<String, PartitionInfo> partitions = new TreeMap<>();
@@ -220,7 +224,8 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         if (errors.isEmpty()) {
             Spool spool = new Spool();
             try {
-                pass2(inputUri, depth, GLOBALS_BY_PATIENT.equals(globals), p1, p2, spool, errors);
+                pass2(inputUri, pin, depth, GLOBALS_BY_PATIENT.equals(globals), p1, p2, spool, errors);
+                io.verifyUnchanged(inputUri, pin);
                 if (errors.isEmpty()) {
                     spool.closeAll();
                     for (Map.Entry<String, PartitionStats> e : new TreeMap<>(p2.partitions).entrySet()) {
@@ -231,7 +236,8 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                         partitions.put(name, new PartitionInfo(name, s.kind, s.rows, s.patients.cardinality(), file));
                     }
                 }
-            } catch (IOException e) {
+            } catch (IOException | UncheckedIOException e) {
+                // UncheckedIOException comes from closing an evicted writer inside the LRU map.
                 throw new InfrastructureException("Failed spooling split output", e);
             } finally {
                 spool.cleanUp();
@@ -245,7 +251,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 p2.studyRows, p2.globalRows, p2.droppedStudyNoConsent, p2.droppedGlobalNoConsent,
                 p1.timestampZero, p1.timestampSeconds, p1.consentRows, p1.consentsByPatient.size(),
                 new ArrayList<>(partitions.values()), errors.messages(), new ArrayList<>(p2.notes),
-                new ArrayList<>(p1.notes), fence, null);
+                new ArrayList<>(p1.notes), List.copyOf(p2.studyNodesWithoutConsents), pin, fence, null);
 
         if (errors.isEmpty()) {
             String manifestUri = joinPath(outputUri, MANIFEST_NAME);
@@ -257,10 +263,10 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
 
     // ---------------------------------------------------------------- pass 1
 
-    private Pass1 pass1(String inputUri, String consentsPath, Findings errors) {
+    private Pass1 pass1(String inputUri, IoResolver.ObjectInfo pin, String consentsPath, Findings errors) {
         Pass1 p = new Pass1();
         long rowNum = 0;
-        try (Stream<List<String>> rows = delimitedReader.streamRows(io.openInput(inputUri), DelimitedReader.COMMA)) {
+        try (Stream<List<String>> rows = delimitedReader.streamRows(io.openInput(inputUri, pin), DelimitedReader.COMMA)) {
             for (List<String> row : (Iterable<List<String>>) rows::iterator) {
                 if (isBlankLine(row)) {
                     p.blankRows++;
@@ -310,8 +316,9 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
             ok = false;
         }
         String nval = row.get(2);
-        if (!nval.isEmpty() && !NUMBER.matcher(nval).matches()) {
-            errors.add("BAD_NVAL", rowNum, "nval is not a number: '" + abbreviate(nval) + "'");
+        if (!nval.isEmpty() && !parsesAsDouble(nval)) {
+            errors.add("BAD_NVAL", rowNum, "nval is not a number (CSVLoader aborts on Double.parseDouble): '"
+                    + abbreviate(nval) + "'");
             ok = false;
         }
         String ts = row.get(4);
@@ -349,12 +356,11 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
 
     // ---------------------------------------------------------------- pass 2
 
-    private void pass2(String inputUri, int depth, boolean byPatient, Pass1 p1, Pass2 p2, Spool spool,
+    private void pass2(String inputUri, IoResolver.ObjectInfo pin, int depth, boolean byPatient, Pass1 p1, Pass2 p2, Spool spool,
                        Findings errors) throws IOException {
         long rowNum = 0;
         Map<String, String> globalNameToNode = new HashMap<>();
-        Set<String> studiesWithoutConsentsWarned = new TreeSet<>();
-        try (Stream<List<String>> rows = delimitedReader.streamRows(io.openInput(inputUri), DelimitedReader.COMMA)) {
+        try (Stream<List<String>> rows = delimitedReader.streamRows(io.openInput(inputUri, pin), DelimitedReader.COMMA)) {
             for (List<String> row : (Iterable<List<String>>) rows::iterator) {
                 if (isBlankLine(row)) {
                     continue;
@@ -381,6 +387,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                         p2.studyRows++;
                     }
                 } else if (byPatient) {
+                    noteStudyLookingNode(node, p2);
                     if (consents.isEmpty()) {
                         p2.droppedGlobalNoConsent++;
                         continue;
@@ -408,15 +415,16 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                     if (emit(name, "global", patient, line, p2, spool, errors, rowNum) > 0) {
                         p2.globalRows++;
                     }
-                    if (node.length() == 9 && STUDY_ID.matcher(node).matches()) {
-                        studiesWithoutConsentsWarned.add(node);
-                    }
+                    noteStudyLookingNode(node, p2);
                 }
             }
         }
-        if (!studiesWithoutConsentsWarned.isEmpty()) {
-            p2.notes.add("study-looking node(s) with no consent in " + p1.consentRows + " consent row(s) were treated as global variables: "
-                    + studiesWithoutConsentsWarned);
+    }
+
+    /** A phsNNNNNN node that is not a study in _consents is handled as a global; surface it. */
+    private static void noteStudyLookingNode(String node, Pass2 p2) {
+        if (node.length() == 9 && STUDY_ID.matcher(node).matches()) {
+            p2.studyNodesWithoutConsents.add(node);
         }
     }
 
@@ -474,7 +482,12 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         m.put("generatedAt", Instant.now().toString());
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("uri", o.inputUri());
-        // IoResolver does not expose S3 VersionId/ETag; the URI plus the row count identify the input.
+        // Both passes read exactly this object (see execute); versionId is null on a never-versioned bucket
+        // and both ids are null for a local file, where size and lastModified identify it.
+        input.put("versionId", o.inputInfo().versionId());
+        input.put("eTag", o.inputInfo().eTag());
+        input.put("size", o.inputInfo().size());
+        input.put("lastModifiedMillis", o.inputInfo().lastModifiedMillis());
         m.put("input", input);
         m.put("output", o.outputUri());
         m.put("depth", o.depth());
@@ -499,6 +512,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         ts.put("likelySeconds", o.timestampSeconds());
         m.put("timestamps", ts);
         m.put("patientsWithConsents", o.patientsWithConsents());
+        m.put("studyNodesWithoutConsents", o.studyNodesWithoutConsents());
         m.put("partitions", o.partitions());
         try {
             byte[] bytes = objectMapper.copy().enable(SerializationFeature.INDENT_OUTPUT).writeValueAsBytes(m);
@@ -545,6 +559,12 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         }
         o.inputNotes().forEach(n -> report.warning("INPUT_NOTE", n));
         o.splitNotes().forEach(n -> report.warning("SPLIT_NOTE", n));
+        if (!o.studyNodesWithoutConsents().isEmpty()) {
+            report.warning("STUDY_NODE_WITHOUT_CONSENTS", o.studyNodesWithoutConsents().size()
+                    + " study-looking node(s) (phsNNNNNN) have no entry in " + o.consentsPath()
+                    + " and were handled as global variables (globals=" + o.globals() + "): "
+                    + sample(o.studyNodesWithoutConsents()));
+        }
         report.info("PARTITIONS", o.partitions().size() + " partition(s), " + o.partitionLines() + " line(s) written, "
                 + o.patientsWithConsents() + " patient(s) with consents");
         fenceReport(o, report);
@@ -611,6 +631,9 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 .metric("studyPartitions", o.partitions().stream().filter(p -> p.kind().equals("study")).count())
                 .metric("globalPartitions", o.partitions().stream().filter(p -> p.kind().equals("global")).count())
                 .metric("patientsWithConsents", o.patientsWithConsents())
+                .metric("studyNodesWithoutConsents", o.studyNodesWithoutConsents().size())
+                .metric("inputVersionId", o.inputInfo().versionId())
+                .metric("inputETag", o.inputInfo().eTag())
                 .metric("timestampZero", o.timestampZero())
                 .metric("timestampLikelySeconds", o.timestampSeconds())
                 .metric("manifestUri", o.manifestUri());
@@ -685,6 +708,16 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
             row.set(0, first.substring(1));
         }
         return parseInt(row.getFirst()) == null;
+    }
+
+    /** Same test CSVLoader applies: {@code Double.parseDouble} (which trims, and accepts NaN/Infinity). */
+    static boolean parsesAsDouble(String s) {
+        try {
+            Double.parseDouble(s.trim());
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     private static Integer parseInt(String s) {
@@ -769,6 +802,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         long partitionLines;
         final Map<String, PartitionStats> partitions = new HashMap<>();
         final Set<String> notes = new LinkedHashSet<>();
+        final Set<String> studyNodesWithoutConsents = new TreeSet<>();
     }
 
     private static final class PartitionStats {
@@ -910,6 +944,8 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
             Map<String, String> errors,
             List<String> splitNotes,
             List<String> inputNotes,
+            List<String> studyNodesWithoutConsents,
+            IoResolver.ObjectInfo inputInfo,
             FenceCheck fence,
             String manifestUri) {
 
@@ -934,7 +970,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
             return new Output(inputUri, outputUri, depth, globals, consentsPath, headerText, inputRows, blankRows,
                     studyRows, globalRows, droppedStudyNoConsent, droppedGlobalNoConsent, timestampZero,
                     timestampSeconds, consentRows, patientsWithConsents, partitions, errors, splitNotes,
-                    inputNotes, fence, uri);
+                    inputNotes, studyNodesWithoutConsents, inputInfo, fence, uri);
         }
     }
 }

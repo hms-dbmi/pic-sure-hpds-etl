@@ -17,6 +17,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -291,9 +292,27 @@ class SplitMergedAllConceptsJobTest {
         JobResult r = run(in);
 
         assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(r.getOutputValidation().getIssues()).anyMatch(i -> i.code().equals("SPLIT_NOTE")
+        assertThat(r.getOutputValidation().getIssues()).anyMatch(i -> i.code().equals("STUDY_NODE_WITHOUT_CONSENTS")
                 && i.message().contains("phs999999"));
         assertThat(lines("phs999999")).hasSize(1);
+        assertThat(manifest().get("studyNodesWithoutConsents")).extracting(JsonNode::asText).containsExactly("phs999999");
+    }
+
+    @Test
+    void a_study_looking_node_without_consents_is_flagged_in_by_patient_mode_too() throws Exception {
+        Path in = input(
+                consent(1, "phs123456.c1"),
+                row(1, "\\phs123456\\a\\", "1", "", ""),
+                row(1, "\\phs999999\\a\\", "2", "", ""));
+
+        JobResult r = run(in, "globals", "by-patient");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(r.getOutputValidation().getIssues()).anyMatch(i -> i.code().equals("STUDY_NODE_WITHOUT_CONSENTS")
+                && i.message().contains("phs999999") && i.message().contains("by-patient"));
+        assertThat(manifest().get("studyNodesWithoutConsents")).extracting(JsonNode::asText).containsExactly("phs999999");
+        // handled as a global: copied into the patient's partition
+        assertThat(lines("phs123456.c1")).contains(row(1, "\\phs999999\\a\\", "2", "", ""));
     }
 
     // ------------------------------------------------------------ CSVLoader contract
@@ -355,6 +374,18 @@ class SplitMergedAllConceptsJobTest {
                 row(1, "\\phs123456\\a\\", "1", "", "-5"), row(1, "\\phs123456\\b\\", "1", "", ""));
 
         assertThat(run(in).getExitCode()).isEqualTo(ExitCode.SUCCESS);
+    }
+
+    @Test
+    void nval_follows_csvloader_so_padded_nan_and_infinity_pass() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, "\\phs123456\\a\\", " 5 ", "", ""),
+                row(1, "\\phs123456\\b\\", "NaN", "", ""),
+                row(1, "\\phs123456\\c\\", "Infinity", "", ""),
+                row(1, "\\phs123456\\d\\", "-1.5e3", "", ""));
+
+        assertThat(run(in).getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(lines("phs123456.c1")).hasSize(4);
     }
 
     @Test
@@ -542,6 +573,90 @@ class SplitMergedAllConceptsJobTest {
         assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(hasIssue(r.getOutputValidation().getIssues(), "FENCE_MAPPING_UNREADABLE")).isTrue();
         assertThat(out.resolve("split_manifest.json")).exists();
+    }
+
+    // ------------------------------------------------------------ many partitions / pinning
+
+    @Test
+    void two_hundred_interleaved_partitions_keep_row_order_despite_writer_eviction() throws Exception {
+        int partitions = 200;
+        int rounds = 5;
+        List<String> lines = new ArrayList<>();
+        for (int p = 1; p <= partitions; p++) {
+            lines.add(consent(p, "phs123456.c" + p));
+        }
+        for (int r = 1; r <= rounds; r++) {
+            for (int p = 1; p <= partitions; p++) {
+                lines.add(row(p, "\\phs123456\\v" + r + "\\", String.valueOf(r), "", ""));
+            }
+        }
+
+        JobResult result = run(input(lines.toArray(String[]::new)));
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        for (int p = 1; p <= partitions; p++) {
+            List<String> expected = new ArrayList<>();
+            for (int r = 1; r <= rounds; r++) {
+                expected.add(row(p, "\\phs123456\\v" + r + "\\", String.valueOf(r), "", ""));
+            }
+            assertThat(lines("phs123456.c" + p)).as("partition c%d", p).containsExactlyElementsOf(expected);
+        }
+        assertThat(manifest().get("partitions")).hasSize(partitions + 1); // + the _consents global
+        assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
+    }
+
+    @Test
+    void the_manifest_records_the_pinned_local_input_identity() throws Exception {
+        Path in = standardInput();
+
+        run(in);
+
+        JsonNode input = manifest().get("input");
+        assertThat(input.get("size").asLong()).isEqualTo(Files.size(in));
+        assertThat(input.get("lastModifiedMillis").asLong()).isEqualTo(Files.getLastModifiedTime(in).toMillis());
+        assertThat(input.get("versionId").isNull()).isTrue();
+    }
+
+    /** An IoResolver that rewrites the input just before a chosen read, as a concurrent upload would. */
+    private static final class ChangingIo extends IoResolver {
+        private final int changeBeforeRead;
+        private final Path file;
+        private int reads;
+
+        ChangingIo(Path file, int changeBeforeRead) {
+            super(null);
+            this.file = file;
+            this.changeBeforeRead = changeBeforeRead;
+        }
+
+        @Override
+        public InputStream openInput(String uri, ObjectInfo pin) {
+            if (++reads == changeBeforeRead) {
+                try {
+                    Files.writeString(file, Files.readString(file) + "\"9\",\"\\x\\\",\"\",\"\",\"\"\n");
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+            return super.openInput(uri, pin);
+        }
+    }
+
+    @Test
+    void an_input_replaced_before_either_pass_fails_with_nothing_uploaded() throws Exception {
+        for (int pass : new int[] {1, 2}) {
+            Path in = standardInput();
+            Path o = tempDir.resolve("pinned-out-" + pass);
+            SplitMergedAllConceptsJob changing = new SplitMergedAllConceptsJob(new ChangingIo(in, pass),
+                    new DelimitedReader(), new FenceMappingValidator(mapper), mapper);
+
+            JobResult r = executor.run(changing, Map.of("input", in.toString(), "output", o.toString(),
+                    "fence-mapping", "none"), "t");
+
+            assertThat(r.getExitCode()).as("changed before read %d", pass).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+            assertThat(r.getErrorMessage()).contains("Input changed");
+            assertThat(o).as("nothing uploaded").doesNotExist();
+        }
     }
 
     // ------------------------------------------------------------ helpers under test

@@ -20,7 +20,7 @@
     {
       "name": "nval",
       "type": "number",
-      "description": "Numeric value; empty for categorical rows."
+      "description": "Numeric value; empty for categorical rows. CSVLoader uses Double.parseDouble(nval.trim()), which also accepts NaN and Infinity; the split job checks exactly that."
     },
     {
       "name": "tval",
