@@ -94,4 +94,62 @@ class ConceptMappingTest {
 
         assertThat(mappings.get(0).dataType()).isEqualTo(ConceptMapping.DataType.TEXT);
     }
+
+    @Test
+    void counts_the_rows_it_drops() {
+        String csv = "\"file.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv\",\"µStudyµNoIndexµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:x\",\"µStudyµBadIndexµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:2\",\"\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:3\",\"µStudyµShortµ\"\n";
+
+        ConceptMapping.Parsed parsed = ConceptMapping.parseWithStats(
+                new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)), reader);
+
+        assertThat(parsed.mappings()).hasSize(1);
+        assertThat(parsed.droppedRows()).isEqualTo(4);
+    }
+
+    @Test
+    void does_not_count_a_header_row_or_blank_lines_as_dropped() {
+        String csv = "KEY,ROOT_NODE,SUP_PATH,DATA_TYPE,OPTIONS\n"
+                + "\n"
+                + "\"file.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"\",\"\",\"\",\"\",\"\"\n"
+                + "\n"
+                + "\"file.csv:x\",\"µStudyµBadIndexµ\",\"\",\"TEXT\",\"\"\n";
+
+        ConceptMapping.Parsed parsed = ConceptMapping.parseWithStats(
+                new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)), reader);
+
+        assertThat(parsed.mappings()).hasSize(1);
+        // Only the bad index after the header counts; the header and the blank lines do not.
+        assertThat(parsed.droppedRows()).isEqualTo(1);
+    }
+
+    @Test
+    void a_mistyped_first_row_is_counted_not_taken_for_a_header() {
+        String csv = "\"file.csv:x\",\"µStudyµBadIndexµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n";
+
+        ConceptMapping.Parsed parsed = ConceptMapping.parseWithStats(
+                new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)), reader);
+
+        assertThat(parsed.mappings()).hasSize(1);
+        assertThat(parsed.droppedRows()).isEqualTo(1);
+    }
+
+    @Test
+    void a_bad_key_after_the_first_row_is_still_counted() {
+        String csv = "\"file.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
+                + "KEY,ROOT_NODE,SUP_PATH,DATA_TYPE,OPTIONS\n"
+                + "\":2\",\"µStudyµNoFileµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"file.csv:-1\",\"µStudyµNegativeµ\",\"\",\"TEXT\",\"\"\n";
+
+        ConceptMapping.Parsed parsed = ConceptMapping.parseWithStats(
+                new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)), reader);
+
+        assertThat(parsed.mappings()).hasSize(1);
+        assertThat(parsed.droppedRows()).isEqualTo(3);
+    }
 }

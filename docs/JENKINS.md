@@ -362,7 +362,6 @@ an environment may run.
 |-------------------------------------------------|---------|-----------------------------------------------------------------|
 | `template`                                      | `false` | `ETL_JOB_TEMPLATE_ENABLED`                                      |
 | `sstr-populate-rds-participants`                | `true`  | `ETL_JOB_SSTR_POPULATE_RDS_PARTICIPANTS_ENABLED`                |
-| `single-consent-data-populate-rds-participants` | `true`  | `ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED` |
 | `participants-migration`                        | `true`  | `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED`                        |
 
 Running a disabled job exits `5` (`CONFIG_ERROR`) with a message naming the flag.

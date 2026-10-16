@@ -103,8 +103,6 @@ etl/
    ├─ template/TemplateJob                            COPY-ME plug-and-play example
    ├─ participants/
    │  ├─ SstrPopulateRdsParticipantsJob                permanent: dbGaP SSTR TSV → RDS
-   │  ├─ SingleConsentDataPopulateRdsParticipantsJob   permanent: subject-id CSV → RDS,
-   │  │                                                one uniform consent per run
    │  └─ Telemetry                                     SSTR row (dbgap ids, consent)
    └─ migration/ParticipantsMigrationJob               temporary: orchestrates the above
                                                         two + direct population, per study

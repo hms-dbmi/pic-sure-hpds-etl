@@ -137,12 +137,6 @@ All within one transaction per study
 Populated RDS tables: `participants`, `consents`, `samples`. A JSON report with row/insert
 counts.
 
-### Alternative: Single-Consent Studies
-
-Studies without an SSTR file use `single-consent-data-populate-rds-participants` instead.
-This job reads a simple CSV of subject IDs and applies a uniform consent (either GRU for
-"single" consent type or blank for "public").
-
 ---
 
 ## Stage 4: Generate Global AllConcepts

@@ -108,7 +108,7 @@ variable "mapping_uri" {
 
 variable "output_uri" {
   type        = string
-  description = "--output: output directory for per-consent allConcepts files"
+  description = "--output: s3:// prefix (versioned bucket) the {study_id}/allConcepts/c{code}/ files are written under"
 }
 
 variable "skip_analysis" {

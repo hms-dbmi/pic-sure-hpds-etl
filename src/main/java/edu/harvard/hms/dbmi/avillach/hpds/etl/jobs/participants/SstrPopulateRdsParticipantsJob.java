@@ -200,25 +200,28 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                     row.consent(), row.consentAbbreviation()));
             countsByConsentGroup.merge(row.consent(), 1L, Long::sum);
         }
-        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize);
+        long consentsWritten = BatchOps.upsertInChunks(consents::batchUpsert, consentRows, batchSize,
+                ConsentRepository.KEY_ORDER);
 
         List<Sample> sampleRows = samplePairs.stream()
                 .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE))
                 .toList();
-        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize);
+        long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize,
+                SampleRepository.KEY_ORDER);
 
         List<Sample> submittedSampleRows = submittedSamplePairs.stream()
                 .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
                 .toList();
         long submittedSamplesInserted =
-                BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize);
+                BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize,
+                SampleRepository.KEY_ORDER);
 
         log.info("Read {} row(s) for {} participant(s); {} new participant(s), {} consent row(s), "
                         + "{} dbGaP sample row(s) and {} submitted sample row(s) inserted",
                 rowsRead, subjectIds.size(), participantsInserted, consentsWritten,
                 samplesInserted, submittedSamplesInserted);
-        return new Output(rowsRead, subjectIds.size(), participantsInserted, consentsWritten, samplesInserted,
-                submittedSamplesInserted, countsByConsentGroup);
+        return new Output(rowsRead, subjectIds.size(), participantsInserted, consentsWritten,
+                samplePairs.size(), samplesInserted, submittedSamplesInserted, countsByConsentGroup);
     }
 
     private void requireColumns(Map<String, String> firstRow) {
@@ -236,11 +239,10 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
 
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
-        if (output.rowsRead() == 0) {
-            report.error("EMPTY_INPUT", "Input contained no data rows");
-        }
+        // An empty input never gets here: load() throws before the purge, so the study's existing
+        // consents are never deleted.
         output.countsByConsentGroup().forEach((group, count) ->
-                report.info("consent_code_COUNT", group + ": " + count + " participant(s)"));
+                report.info("CONSENT_CODE_COUNT", group + ": " + count + " participant(s)"));
     }
 
     @Override
@@ -249,6 +251,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 .metric("distinctParticipants", output.distinctParticipants())
                 .metric("participantsInserted", output.participantsInserted())
                 .metric("consentsWritten", output.consentsWritten())
+                .metric("samplesSeen", output.samplesSeen())
                 .metric("samplesInserted", output.samplesInserted())
                 .metric("submittedSamplesInserted", output.submittedSamplesInserted())
                 .metric("countsByConsentGroup", output.countsByConsentGroup());
@@ -259,6 +262,9 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                           long distinctParticipants,
                           long participantsInserted,
                           long consentsWritten,
+                          // input rows with a non-blank dbgap_sample_id; samplesInserted is fewer
+                          // on a reload, since samples are inserted with ON CONFLICT DO NOTHING
+                          long samplesSeen,
                           long samplesInserted,
                           long submittedSamplesInserted,
                           Map<String, Long> countsByConsentGroup) {

@@ -43,8 +43,6 @@ etl:
     # PERMANENT ingestion.
     sstr-populate-rds-participants:
       enabled: ${ETL_JOB_SSTR_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
-    single-consent-data-populate-rds-participants:
-      enabled: ${ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
 
     generate-global-all-concepts:
       enabled: ${ETL_JOB_GENERATE_GLOBAL_ALL_CONCEPTS_ENABLED:true}
