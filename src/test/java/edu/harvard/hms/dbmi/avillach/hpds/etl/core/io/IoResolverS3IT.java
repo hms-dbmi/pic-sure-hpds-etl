@@ -121,4 +121,51 @@ class IoResolverS3IT extends AbstractIntegrationTest {
             java.nio.file.Files.deleteIfExists(small);
         }
     }
+
+    /** Streamed uploads never touch local disk; both paths carry metadata and the exact bytes. */
+    @Test
+    void streams_without_spooling_on_single_and_multipart_uploads() throws Exception {
+        byte[] small = "streamed\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String smallUri = "s3://" + BUCKET + "/stream/small.txt";
+        io.writeOutputStream(smallUri, small.length, java.util.Map.of("content-md5", "s"),
+                () -> new java.io.ByteArrayInputStream(small));
+        try (InputStream in = io.openInput(smallUri)) {
+            assertThat(in.readAllBytes()).isEqualTo(small);
+        }
+        assertThat(s3.headObject(b -> b.bucket(BUCKET).key("stream/small.txt")).metadata())
+                .containsEntry("content-md5", "s");
+
+        io.setMultipartThresholdBytes(6L * 1024 * 1024);
+        io.setMultipartPartSizeBytes(5 * 1024 * 1024);
+        try {
+            byte[] big = new byte[11 * 1024 * 1024 + 7];
+            for (int i = 0; i < big.length; i++) {
+                big[i] = (byte) (i % 251);
+            }
+            String bigUri = "s3://" + BUCKET + "/stream/big.bin";
+            io.writeOutputStream(bigUri, big.length, java.util.Map.of("content-md5", "b"),
+                    () -> new java.io.ByteArrayInputStream(big));
+            try (InputStream in = io.openInput(bigUri)) {
+                assertThat(in.readAllBytes()).isEqualTo(big);
+            }
+            assertThat(s3.headObject(b -> b.bucket(BUCKET).key("stream/big.bin")).metadata())
+                    .containsEntry("content-md5", "b");
+
+            // A stream that fails part-way aborts the upload rather than leaving a partial object.
+            String failedUri = "s3://" + BUCKET + "/stream/failed.bin";
+            assertThatThrownBy(() -> io.writeOutputStream(failedUri, big.length, java.util.Map.of(),
+                    () -> new java.io.SequenceInputStream(new java.io.ByteArrayInputStream(big, 0, 6 * 1024 * 1024),
+                            new InputStream() {
+                                @Override
+                                public int read() throws java.io.IOException {
+                                    throw new java.io.IOException("source went away");
+                                }
+                            })))
+                    .isInstanceOf(edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException.class);
+            assertThat(io.exists(failedUri)).isFalse();
+        } finally {
+            io.setMultipartThresholdBytes(4L * 1024 * 1024 * 1024);
+            io.setMultipartPartSizeBytes(512 * 1024 * 1024);
+        }
+    }
 }

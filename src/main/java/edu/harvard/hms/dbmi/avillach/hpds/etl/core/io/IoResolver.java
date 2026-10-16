@@ -28,6 +28,7 @@ import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -265,7 +266,58 @@ public class IoResolver {
             return versionIdOf(s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).metadata(metadata).build(),
                     RequestBody.fromFile(file)));
         }
+        return uploadMultipart(bucket, key, size, metadata, () -> Files.newInputStream(file));
+    }
 
+    /**
+     * Uploads {@code length} bytes read from {@code content} to S3 with user metadata, without
+     * spooling to local disk, and returns the version id S3 assigned (null on an unversioned
+     * bucket). For content too large for the runner's disk: the length must be known up front
+     * (S3 needs it for a single PutObject), and {@code content} may be opened more than once
+     * (the SDK re-reads a single-put body to retry it), so each open must yield the same bytes.
+     * An {@link IOException} from the stream aborts the upload, leaving no object behind. S3 only.
+     */
+    public String writeOutputStream(String uri, long length, Map<String, String> metadata, ContentSource content) {
+        if (!isS3(uri)) {
+            throw new ConfigException("Streamed output needs an s3:// target, got: " + uri);
+        }
+        S3Uri s3Uri = S3Uri.parse(uri);
+        try {
+            String versionId;
+            if (length < multipartThresholdBytes) {
+                versionId = versionIdOf(s3.putObject(
+                        PutObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).metadata(metadata).build(),
+                        RequestBody.fromContentProvider(() -> {
+                            try {
+                                return content.open();
+                            } catch (IOException e) {
+                                throw new UncheckedIOException(e);
+                            }
+                        }, length, "application/octet-stream")));
+            } else {
+                versionId = uploadMultipart(s3Uri.bucket(), s3Uri.key(), length, metadata, content);
+            }
+            log.info("Uploaded {} bytes to S3 {} (version {})", length, uri, versionId);
+            return versionId;
+        } catch (IOException | UncheckedIOException e) {
+            throw new InfrastructureException("Failed to write to S3: " + uri, e);
+        } catch (RuntimeException e) {
+            throw classifyS3WriteFailure(uri, e);
+        }
+    }
+
+    /** Opens the content of a streamed upload; see {@link #writeOutputStream}. */
+    @FunctionalInterface
+    public interface ContentSource {
+        InputStream open() throws IOException;
+    }
+
+    /**
+     * Multipart upload of {@code size} bytes read from {@code content}. Parts are read
+     * sequentially through one reused buffer, so memory stays at one part regardless of size.
+     */
+    private String uploadMultipart(String bucket, String key, long size, Map<String, String> metadata,
+                                   ContentSource content) throws IOException {
         String uploadId = s3.createMultipartUpload(
                 CreateMultipartUploadRequest.builder().bucket(bucket).key(key).metadata(metadata).build()).uploadId();
         log.info("Multipart upload {} started for s3://{}/{} ({} bytes, {} byte parts)",
@@ -274,7 +326,8 @@ public class IoResolver {
             List<CompletedPart> parts = new ArrayList<>();
             byte[] buffer = new byte[multipartPartSizeBytes];
             int partNumber = 1;
-            try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
+            long total = 0;
+            try (InputStream in = new BufferedInputStream(content.open())) {
                 while (true) {
                     int filled = 0;
                     while (filled < buffer.length) {
@@ -297,10 +350,14 @@ public class IoResolver {
                             .eTag();
                     parts.add(CompletedPart.builder().partNumber(partNumber).eTag(etag).build());
                     partNumber++;
+                    total += filled;
                     if (filled < buffer.length) {
                         break;
                     }
                 }
+            }
+            if (total != size) {
+                throw new IOException("Expected " + size + " bytes for s3://" + bucket + "/" + key + " but read " + total);
             }
             var completed = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket).key(key).uploadId(uploadId)

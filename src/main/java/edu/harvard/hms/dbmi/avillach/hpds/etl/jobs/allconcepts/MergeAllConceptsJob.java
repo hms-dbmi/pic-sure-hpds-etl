@@ -19,13 +19,10 @@ import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 
-import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.DigestOutputStream;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -183,58 +180,154 @@ public class MergeAllConceptsJob extends AbstractJob<MergeAllConceptsJob.Output>
         return new FolderResult(action, folder.sources().size(), merged.versionId(), merged.md5(), folder.ignored());
     }
 
-    /** Concatenates the sources at their listed versions into a temp file, then uploads it with its metadata. */
+    /**
+     * Streams the sources at their listed versions straight to S3, with no local copy: a merged
+     * consent file can outgrow the runner's disk (WHI's c1 did). S3 only takes metadata when an
+     * object is created, so the MD5 and length come from a first read; the second read uploads,
+     * and fails the upload (leaving no object) if its bytes hash differently from the first.
+     */
     private Merged merge(ConsentFolder folder, String fingerprint, String mergedUri) {
-        Path tmp = null;
         try {
-            tmp = Files.createTempFile("allconcepts-merge-", ".csv");
-            MessageDigest md5 = MessageDigest.getInstance("MD5");
-            try (OutputStream out = new DigestOutputStream(new BufferedOutputStream(Files.newOutputStream(tmp)), md5)) {
-                for (FileVersion source : folder.sources()) {
-                    appendSource(folder.bucket(), source, out);
-                }
+            MessageDigest md5 = md5();
+            long length;
+            try (InputStream in = new DigestInputStream(new SourcesStream(folder), md5)) {
+                length = in.transferTo(OutputStream.nullOutputStream());
             }
             String md5Hex = HexFormat.of().formatHex(md5.digest());
             Map<String, String> metadata = Map.of(
                     AllConceptsFolders.META_FINGERPRINT, fingerprint,
                     AllConceptsFolders.META_SOURCE_COUNT, String.valueOf(folder.sources().size()),
                     AllConceptsFolders.META_MD5, md5Hex);
-            String versionId = io.writeOutputFile(mergedUri, tmp, metadata);
+            String versionId = io.writeOutputStream(mergedUri, length, metadata,
+                    () -> new VerifyingStream(new SourcesStream(folder), md5Hex, folder.label()));
             log.info("Wrote {} from {} source(s) (md5 {}, version {})", mergedUri, folder.sources().size(),
                     md5Hex, versionId);
             return new Merged(versionId, md5Hex);
         } catch (IOException e) {
             throw new InfrastructureException("Failed to merge " + folder.label(), e);
+        }
+    }
+
+    private static MessageDigest md5() {
+        try {
+            return MessageDigest.getInstance("MD5");
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 unavailable", e);
-        } finally {
-            if (tmp != null) {
-                try {
-                    Files.deleteIfExists(tmp);
-                } catch (IOException e) {
-                    log.warn("Could not delete temp file {}: {}", tmp, e.getMessage());
+        }
+    }
+
+    /**
+     * The folder's sources at their listed versions, concatenated in order, each ending with a
+     * newline (one is added to a source missing its final newline). Opens one source at a time.
+     */
+    private final class SourcesStream extends InputStream {
+        private final ConsentFolder folder;
+        private int next;
+        private InputStream current;
+        private int last = -1;
+        private boolean pendingNewline;
+
+        SourcesStream(ConsentFolder folder) {
+            this.folder = folder;
+        }
+
+        @Override
+        public int read() throws IOException {
+            byte[] one = new byte[1];
+            int n = read(one, 0, 1);
+            return n < 0 ? -1 : one[0] & 0xff;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            if (len == 0) {
+                return 0;
+            }
+            while (true) {
+                if (pendingNewline) {
+                    pendingNewline = false;
+                    b[off] = '\n';
+                    return 1;
                 }
+                if (current == null) {
+                    if (next >= folder.sources().size()) {
+                        return -1;
+                    }
+                    current = open(folder.sources().get(next++));
+                    last = -1;
+                }
+                int n = current.read(b, off, len);
+                if (n > 0) {
+                    last = b[off + n - 1];
+                    return n;
+                }
+                if (n < 0) {
+                    current.close();
+                    current = null;
+                    pendingNewline = last != -1 && last != '\n';
+                }
+            }
+        }
+
+        private InputStream open(FileVersion source) {
+            try {
+                return s3.getObject(GetObjectRequest.builder()
+                        .bucket(folder.bucket()).key(source.key()).versionId(source.versionId()).build());
+            } catch (RuntimeException e) {
+                throw new InfrastructureException("Failed to read source s3://" + folder.bucket() + "/" + source.key()
+                        + " (version " + source.versionId() + ")", e);
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (current != null) {
+                current.close();
+                current = null;
             }
         }
     }
 
-    /** Copies one source version, adding a final newline if it lacks one. */
-    private void appendSource(String bucket, FileVersion source, OutputStream out) throws IOException {
-        byte[] buffer = new byte[64 * 1024];
-        int last = -1;
-        try (InputStream in = s3.getObject(GetObjectRequest.builder()
-                .bucket(bucket).key(source.key()).versionId(source.versionId()).build())) {
-            int n;
-            while ((n = in.read(buffer)) > 0) {
-                out.write(buffer, 0, n);
-                last = buffer[n - 1];
-            }
-        } catch (RuntimeException e) {
-            throw new InfrastructureException("Failed to read source s3://" + bucket + "/" + source.key()
-                    + " (version " + source.versionId() + ")", e);
+    /** Fails at end of stream if the bytes read do not hash to the MD5 the metadata records. */
+    private static final class VerifyingStream extends DigestInputStream {
+        private final String expectedMd5;
+        private final String label;
+        private boolean verified;
+
+        VerifyingStream(InputStream in, String expectedMd5, String label) {
+            super(in, md5());
+            this.expectedMd5 = expectedMd5;
+            this.label = label;
         }
-        if (last != -1 && last != '\n') {
-            out.write('\n');
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b < 0) {
+                verify();
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n < 0) {
+                verify();
+            }
+            return n;
+        }
+
+        private void verify() throws IOException {
+            if (verified) {
+                return;
+            }
+            verified = true;
+            String actual = HexFormat.of().formatHex(getMessageDigest().digest());
+            if (!actual.equals(expectedMd5)) {
+                throw new IOException(label + ": sources read back with md5 " + actual + ", not " + expectedMd5
+                        + " as first read; upload abandoned");
+            }
         }
     }
 

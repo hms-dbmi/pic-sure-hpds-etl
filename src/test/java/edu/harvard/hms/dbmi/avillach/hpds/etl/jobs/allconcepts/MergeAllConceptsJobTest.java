@@ -274,7 +274,8 @@ class MergeAllConceptsJobTest {
 
         run();
 
-        assertThat(s3.reads).extracting(GetObjectRequest::versionId).containsExactly(v);
+        // Read twice (hash, then upload), both times at that version.
+        assertThat(s3.reads).extracting(GetObjectRequest::versionId).containsExactly(v, v);
     }
 
     @Test
@@ -396,6 +397,37 @@ class MergeAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(result.getErrorMessage()).contains("Failed to read source");
+        assertThat(s3.exists(MERGED_C1)).isFalse();
+    }
+
+    @Test
+    void streams_the_merge_without_a_local_temp_file_and_reads_each_source_twice() throws Exception {
+        s3.put(C1 + "phs000001_allConcepts_c1_a.csv", "a1");
+        s3.put(C1 + "phs000001_allConcepts_c1_b.csv", "b1\n");
+
+        JobResult result = run();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(s3.content(MERGED_C1)).isEqualTo("a1\nb1\n");
+        assertThat(s3.metadata(MERGED_C1)).containsEntry("content-md5", md5("a1\nb1\n"));
+        assertThat(s3.reads).hasSize(4);
+    }
+
+    @Test
+    void abandons_the_upload_when_the_sources_read_back_differently() {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        when(s3.client.getObject(any(GetObjectRequest.class))).thenAnswer(inv -> {
+            String body = reads.getAndIncrement() == 0 ? "a\n" : "z\n";
+            return new software.amazon.awssdk.core.ResponseInputStream<>(
+                    software.amazon.awssdk.services.s3.model.GetObjectResponse.builder().build(),
+                    software.amazon.awssdk.http.AbortableInputStream.create(
+                            new java.io.ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8))));
+        });
+
+        JobResult result = run();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(s3.exists(MERGED_C1)).isFalse();
     }
 }

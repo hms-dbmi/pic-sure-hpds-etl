@@ -425,9 +425,13 @@ current sources' fingerprint, so the folder is re-merged. No timestamps or delet
 involved, so a file written while a merge runs can't be missed.
 
 **Merging.** Sources are read at exactly the versions fingerprinted and concatenated in name
-order into a temp file. Each source is ended with a newline, so one missing its final newline
-can't run its last row into the next file's first row. The result is uploaded with its
-metadata, overwriting the MERGED key; S3 keeps the previous version.
+order. Each source is ended with a newline, so one missing its final newline can't run its
+last row into the next file's first row. Nothing is written to local disk, since a merged
+consent file can be larger than the runner's root volume. S3 only takes metadata when an object
+is created, so the sources are read twice. The first read computes the MD5 and length. The
+second streams them to the MERGED key (multipart above 4 GiB) with that metadata, overwriting
+the old object; S3 keeps the previous version. If the second read hashes differently, the
+upload is aborted and no new version is written.
 
 ### Output
 
