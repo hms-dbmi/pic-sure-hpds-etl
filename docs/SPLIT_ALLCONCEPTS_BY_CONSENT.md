@@ -28,8 +28,9 @@ Both `\` and the legacy `µ` delimiters are accepted.
 ## What it does
 
 0. **Pin the input.** The job reads the input's identity first (S3 `versionId` and `eTag`; for a local
-   file, size and mtime) and opens both passes against exactly that object: `GetObject` with the
-   `versionId` when the bucket is versioned, otherwise `If-Match: eTag`. After each pass it checks the
+   file, size and mtime) and opens both passes against exactly that object: `GetObject` with
+   `If-Match: eTag` (needs only `s3:GetObject`; `versionId` is recorded for provenance but not used,
+   since a versioned read would need `s3:GetObjectVersion`). After each pass it checks the
    identity again. If the object was replaced in between, the run fails with `INFRASTRUCTURE_ERROR`
    (exit 4, "Input changed since it was first read") before anything is uploaded.
 1. **Pass 1** streams the input. Every row is checked against the CSVLoader contract (below), and for

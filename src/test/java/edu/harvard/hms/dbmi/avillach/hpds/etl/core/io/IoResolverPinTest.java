@@ -45,7 +45,7 @@ class IoResolverPinTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void a_pinned_s3_read_uses_the_version_id_when_there_is_one() {
+    void a_pinned_s3_read_always_uses_if_match_even_on_a_versioned_object() {
         S3Client s3 = mock(S3Client.class);
         when(s3.getObject(any(GetObjectRequest.class))).thenReturn(mock(ResponseInputStream.class));
 
@@ -53,13 +53,13 @@ class IoResolverPinTest {
 
         ArgumentCaptor<GetObjectRequest> req = ArgumentCaptor.forClass(GetObjectRequest.class);
         verify(s3).getObject(req.capture());
-        assertThat(req.getValue().versionId()).isEqualTo("v1");
-        assertThat(req.getValue().ifMatch()).isNull();
+        assertThat(req.getValue().versionId()).isNull(); // GetObjectVersion permission is not required
+        assertThat(req.getValue().ifMatch()).isEqualTo("\"abc\"");
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void a_pinned_s3_read_falls_back_to_if_match_on_an_unversioned_bucket() {
+    void a_pinned_s3_read_uses_if_match_on_an_unversioned_bucket() {
         S3Client s3 = mock(S3Client.class);
         when(s3.getObject(any(GetObjectRequest.class))).thenReturn(mock(ResponseInputStream.class));
 

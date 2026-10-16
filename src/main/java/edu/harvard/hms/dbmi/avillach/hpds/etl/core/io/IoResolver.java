@@ -122,9 +122,11 @@ public class IoResolver {
     }
 
     /**
-     * Opens the exact object described by {@code pin}: S3 reads use the recorded {@code versionId}
-     * when there is one, else {@code If-Match: eTag}, so a replaced object fails the read instead of
-     * silently feeding a second pass different bytes. Local files are re-stat'ed against the pin.
+     * Opens the exact object described by {@code pin}: S3 reads always send {@code If-Match: eTag}, so
+     * a replaced object fails the read instead of silently feeding a second pass different bytes. This
+     * needs only {@code s3:GetObject}; a versioned GetObject would need {@code s3:GetObjectVersion},
+     * which the runner role may lack, so {@code versionId} is kept in the pin for provenance only.
+     * Local files are re-stat'ed against the pin.
      *
      * @throws InfrastructureException if the object no longer matches the pin
      */
@@ -132,9 +134,7 @@ public class IoResolver {
         if (isS3(uri)) {
             S3Uri s3Uri = S3Uri.parse(uri);
             GetObjectRequest.Builder req = GetObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key());
-            if (pin.versionId() != null) {
-                req.versionId(pin.versionId());
-            } else if (pin.eTag() != null) {
+            if (pin.eTag() != null) {
                 req.ifMatch(pin.eTag());
             }
             try {
