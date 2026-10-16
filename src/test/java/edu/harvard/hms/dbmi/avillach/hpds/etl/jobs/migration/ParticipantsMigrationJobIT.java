@@ -17,6 +17,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -25,13 +26,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Integration tests for {@link ParticipantsMigrationJob} against a real Postgres.
  * Covers the sstr-driven path (delegating to {@link
  * edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob}),
- * the direct-population path (patient-mapping/consents.csv join), the
- * open_access-1000Genomes samples exception, skipping not-ready studies, and per-study
- * failure isolation.
+ * the MULTI fallback (delegating to {@link MultiPopulateRdsParticipantsJob}) both without an SSTR
+ * and after a malformed one is rolled back, a study with no source, skipping not-ready studies,
+ * and per-study failure isolation.
  *
- * <p>Failure modes that don't need a live database (managed-inputs/consents.csv missing,
- * the database being unreachable) are covered by {@link ParticipantsMigrationJobTest}
- * instead.
+ * <p>The finer source-selection and reporting cases, and failures that don't need a live
+ * database, are covered by {@link ParticipantsMigrationJobTest} instead.
  */
 class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
@@ -60,7 +60,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
             try (var files = Files.list(reportsDir)) {
                 for (Path p : files.filter(p -> {
                     String name = p.getFileName().toString();
-                    return name.endsWith("_hpds_id_mapping.csv") || name.endsWith("_unmatched_mappings.csv");
+                    return name.endsWith("_hpds_id_mapping.csv") || name.startsWith("participants_migration_");
                 }).toList()) {
                     Files.deleteIfExists(p);
                 }
@@ -80,8 +80,8 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     /**
      * Creates a base URI directory with the subfolder convention:
-     * {@code general/completed/} for allConcepts, {@code {abvLower}/data/} for patient mapping,
-     * {@code {abvLower}/rawData/} for SSTR files. Keys are relative paths from the base.
+     * {@code {studyId}/legacy/data/} for patient mapping, {@code {studyId}/rawData/} for SSTR and
+     * MULTI files. Keys are relative paths from the base.
      */
     private static String baseUri(Map<String, String> filesByRelativePath) {
         try {
@@ -112,76 +112,24 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         return n == null ? 0 : n;
     }
 
+    private long hpdsId(String dbgapId) {
+        return jdbc.queryForObject("SELECT hpds_id FROM participants WHERE source_id = ? AND source = 'DBGap'",
+                Long.class, dbgapId);
+    }
+
     private String readMappingFile(String studyId) throws IOException {
         return Files.readString(reportsDir.resolve(studyId + "_hpds_id_mapping.csv"));
-    }
-
-    /**
-     * An open-access study's consent value is the bare study id, with no {@code .c<code>} suffix.
-     * Under a strict {@code ^.+\.c(\w+)$} match those rows were skipped, costing the study every
-     * consent row and every mapping row while the run still reported success.
-     */
-    @Test
-    void open_access_study_with_no_consent_suffix_migrates_as_public() throws IOException {
-        managedInputs("OPENSTUDY,open-study-01,Yes");
-        String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "\"3001\",\"µ_consentsµ\",\"\",\"open-study-01\",\"0\"\n",
-                "openstudy/data/OPENSTUDY_PatientMapping.v2.csv", "SUBJ1,OPENSTUDY,3001\n"));
-
-        JobResult result = executor.run(job,
-                Map.of("data-folder", base), "it-open-access");
-
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(result.getMetrics())
-                .containsEntry("succeededStudies", 1L)
-                .containsEntry("failedStudies", 0L)
-                .containsEntry("openAccessConsentRows", 1L)
-                .containsEntry("unparseableConsentRows", 0L)
-                // The subject was migrated, not skipped.
-                .containsEntry("subjectsWithoutConsent", 0L);
-
-        assertThat(countWhere("consents", "study_id = ? AND consent_code = 'public'", "open-study-01"))
-                .isEqualTo(1);
-        assertThat(readMappingFile("open-study-01")).contains("3001,");
-    }
-
-    /**
-     * A consent value carrying a {@code .c} marker with no usable code is a defect, not open access.
-     * Reading it as public would grant an unconsented participant an open-access consent, so it
-     * stays skipped — but the run reports how many were dropped rather than only logging it.
-     */
-    @Test
-    void a_malformed_consent_value_is_reported_rather_than_read_as_public() throws IOException {
-        managedInputs("BADSTUDY,bad-study-01,Yes");
-        String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "\"4001\",\"µ_consentsµ\",\"\",\"bad-study-01.c\",\"0\"\n",
-                "badstudy/data/BADSTUDY_PatientMapping.v2.csv", "SUBJ1,BADSTUDY,4001\n"));
-
-        JobResult result = executor.run(job,
-                Map.of("data-folder", base), "it-bad-consent");
-
-        // The study still succeeds; the warnings carry the problem, so they must be in the report.
-        assertThat(result.getMetrics())
-                .containsEntry("unparseableConsentRows", 1L)
-                .containsEntry("openAccessConsentRows", 0L)
-                .containsEntry("subjectsWithoutConsent", 1L);
-        assertThat(result.getOutputValidation().getIssues())
-                .anyMatch(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
-                .anyMatch(i -> i.code().equals("UNPARSEABLE_CONSENT_VALUES"));
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(countWhere("consents", "study_id = ?", "bad-study-01")).isZero();
     }
 
     @Test
     void sstr_driven_study_populates_rds_and_writes_mapping_file() throws IOException {
         managedInputs("GRU,phs001412,Yes");
         String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "",
-                "gru/rawData/SSTR_dbGaP_phs001412.txt", """
+                "phs001412/rawData/SSTR_dbGaP_phs001412.txt", """
                 SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
                 SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
                 """,
-                "gru/data/GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
+                "phs001412/legacy/data/GRU_PatientMapping.v2.csv", "phs001412.v1.p1.c1,GRU,1001\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-sstr");
@@ -199,81 +147,125 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         assertThat(mapping).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n1001," + newHpdsId + ",phs001412.v1.p1.c1\n");
     }
 
+    /**
+     * On the sstr path a subject is lost because its patient-mapping id is not in the sstr file; the
+     * warning must say so.
+     */
     @Test
-    void non_sstr_study_populates_directly_with_abbreviation_from_all_concepts() throws IOException {
-        managedInputs("OTHER,other-study-01,Yes");
-        String allConcepts = "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n"
-                + "\"2002\",\"µ_studies_consentsµother-study-01µ\",\"\",\"TRUE\",\"0\"\n"
-                + "\"2002\",\"µ_studies_consentsµother-study-01µGRU-IRBµ\",\"\",\"TRUE\",\"0\"\n";
+    void sstr_study_reports_ids_missing_from_the_sstr_file_as_such() throws IOException {
+        managedInputs("GRU,phs001412,Yes");
         String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", allConcepts,
-                "other/data/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+                "phs001412/rawData/sstr_phs001412.v1.txt", """
+                SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
+                SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
+                """,
+                "phs001412/legacy/data/GRU_PatientMapping.v2.csv",
+                "phs001412.v1.p1.c1,GRU,1001\n" + "NOT_IN_SSTR,GRU,1002\n"));
 
         JobResult result = executor.run(job,
-                Map.of("data-folder", base), "it-direct");
+                Map.of("data-folder", base), "it-sstr-unresolved");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(participants.count()).isEqualTo(1);
-        long newHpdsId = jdbc.queryForObject(
-                "SELECT hpds_id FROM participants WHERE source_id = ? AND source = ?",
-                Long.class, "SUBJ42", "other-study-01");
-        assertThat(countWhere("consents",
-                "study_id = ? AND consent_code = '1' AND consent_abbreviation = 'GRU-IRB'", "other-study-01")).isEqualTo(1);
-        assertThat(countWhere("samples", "sample_source = ?", "other-study-01")).isZero();
-
-        String mapping = readMappingFile("other-study-01");
-        assertThat(mapping).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n2002," + newHpdsId + ",SUBJ42\n");
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 1L);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.message()).contains("could not be resolved via the sstr file");
+                    assertThat(i.context())
+                            .containsEntry("studyId", "phs001412")
+                            .containsEntry("path", "sstr")
+                            .containsEntry("count", 1L)
+                            .containsEntry("firstOldHpdsIds", List.of("1002"));
+                });
     }
 
     @Test
-    void open_access_1000_genomes_also_populates_samples() {
-        managedInputs("open_access-1000Genomes,tg-study-01,Yes");
+    void study_without_sstr_is_loaded_from_its_multi_files() throws IOException {
+        managedInputs("FHS,phs000007,Yes");
         String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "\"3003\",\"µ_consentsµ\",\"\",\"tg-study-01.c1\",\"0\"\n",
-                "open_access-1000genomes/data/OPEN_ACCESS-1000GENOMES_PatientMapping.v2.csv", "SUBJ99,open_access-1000Genomes,3003\n"));
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.SAMPLE_MULTI_NAME, ParticipantsMigrationJobTest.SAMPLE_MULTI,
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\nS2,FHS,9002\n"));
 
-        JobResult result = executor.run(job,
-                Map.of("data-folder", base), "it-1000genomes");
+        JobResult result = executor.run(job, Map.of("data-folder", base), "it-multi");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(countWhere("samples", "source_sample_id = ? AND sample_source = ?",
-                "SUBJ99", "tg-study-01")).isEqualTo(1);
+        assertThat(result.getMetrics()).containsEntry("multiStudyIds", List.of("phs000007"));
+        assertThat(participants.count()).isEqualTo(2);
+        long p1 = hpdsId("1001");
+        long p2 = hpdsId("1002");
+        assertThat(countWhere("consents", "study_id = ? AND consent_code = '1' AND consent_abbreviation = 'HMB-IRB-MDS'",
+                "phs000007")).isEqualTo(1);
+        assertThat(countWhere("consents", "study_id = ? AND consent_code = '2' AND consent_abbreviation = 'DS-CVD-IRB-NPU-MDS'",
+                "phs000007")).isEqualTo(1);
+        assertThat(countWhere("samples", "sample_source = 'DBGap'")).isEqualTo(2);
+        assertThat(countWhere("samples", "sample_source = 'submitted' AND source_sample_id IN ('NWD1', 'NWD2')"))
+                .isEqualTo(2);
+        assertThat(readMappingFile("phs000007")).isEqualTo("old_hpds_id,new_hpds_id,common_dbgap_id\n"
+                + "9001," + p1 + ",1001\n9002," + p2 + ",1002\n");
+        assertThat(Files.readString(reportsDir.resolve(ParticipantsMigrationJob.SOURCES_REPORT)))
+                .contains("phs000007,FHS,success,multi,,absent," + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME);
     }
 
+    /**
+     * The SSTR fails on its second row, after its job has purged consents and inserted rows. Its
+     * transaction must roll all of that back, so only the MULTI load remains: the SSTR's
+     * 'FROM-SSTR' abbreviation must not survive.
+     */
     @Test
-    void unmatched_patient_mappings_are_filtered_and_reported() throws IOException {
-        managedInputs("MIXED,mixed-study-01,Yes");
+    void a_malformed_sstr_is_rolled_back_and_the_study_loaded_from_multi() {
+        managedInputs("FHS,phs000007,Yes");
         String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"mixed-study-01.c1\",\"0\"\n",
-                "mixed/data/MIXED_PatientMapping.v2.csv",
-                "SUBJ1,MIXED,2002\n" + "SUBJ2,MIXED,9999\n" + "SUBJ3,MIXED,8888\n"));
+                "phs000007/rawData/sstr_phs000007.v33.txt", """
+                SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
+                S9\tNWD9\t1\tFROM-SSTR\t9999\t5999
+                S1\tNWD1\t\tFROM-SSTR\t1001\t5001
+                """,
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
 
-        JobResult result = executor.run(job,
-                Map.of("data-folder", base), "it-unmatched");
+        JobResult result = executor.run(job, Map.of("data-folder", base), "it-sstr-fallback");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(result.getMetrics())
-                .containsEntry("succeededStudies", 1L)
-                .containsEntry("subjectsWithoutConsent", 2L);
+                .containsEntry("multiStudyIds", List.of("phs000007"))
+                .containsEntry("sstrFallbackStudyIds", List.of("phs000007"));
+        assertThat(result.getOutputValidation().getIssues()).anyMatch(i -> i.code().equals("SSTR_FALLBACK_TO_MULTI"));
+        assertThat(countWhere("consents", "consent_abbreviation = 'FROM-SSTR'")).isZero();
+        assertThat(countWhere("participants", "source_id = '9999'")).isZero();
+        assertThat(countWhere("samples", "source_sample_id = 'NWD9'")).isZero();
+        assertThat(countWhere("consents", "study_id = ?", "phs000007")).isEqualTo(2);
+    }
 
-        assertThat(participants.count()).isEqualTo(1);
-        assertThat(countWhere("consents", "study_id = ?", "mixed-study-01")).isEqualTo(1);
+    @Test
+    void study_with_neither_sstr_nor_multi_is_skipped_and_reported() throws IOException {
+        managedInputs("FHS,phs000007,Yes");
+        String base = baseUri(Map.of("phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
 
-        String mapping = readMappingFile("mixed-study-01");
-        assertThat(mapping).contains("2002,").doesNotContain("9999").doesNotContain("8888");
+        JobResult result = executor.run(job, Map.of("data-folder", base), "it-no-source");
 
-        String unmatched = Files.readString(reportsDir.resolve("MIXED_unmatched_mappings.csv"));
-        assertThat(unmatched).isEqualTo("id,old_hpds_id\nSUBJ2,9999\nSUBJ3,8888\n");
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics())
+                .containsEntry("noParticipantSourceStudyIds", List.of("phs000007"))
+                .containsEntry("skippedStudyIds", List.of("phs000007"))
+                .containsEntry("failedStudies", 0L);
+        assertThat(participants.count()).isZero();
+        assertThat(Files.readString(reportsDir.resolve(ParticipantsMigrationJob.ISSUES_REPORT)))
+                .contains("phs000007,WARNING,NO_PARTICIPANT_FILES");
     }
 
     @Test
     void study_not_marked_ready_is_skipped_entirely() {
         managedInputs(
-                "OTHER,other-study-01,Yes",
-                "NOTSET,not-ready-study,No");
+                "FHS,phs000007,Yes",
+                "NOTSET,phs000008,No");
         String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
-                "other/data/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-not-ready");
@@ -285,19 +277,19 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
     @Test
     void isolates_a_failing_study_so_others_still_succeed() {
         managedInputs(
-                "OTHER,other-study-01,Yes",
-                "MISSING,missing-study-01,Yes");
+                "FHS,phs000007,Yes",
+                "MISSING,phs000009,Yes");
         String base = baseUri(Map.of(
-                "general/completed/GLOBAL_allConcepts_merged.csv", "\"2002\",\"µ_consentsµ\",\"\",\"other-study-01.c1\",\"0\"\n",
-                "other/data/OTHER_PatientMapping.v2.csv", "SUBJ42,OTHER,2002\n"));
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
+                "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-isolation");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getMetrics()).containsEntry("succeededStudies", 1L).containsEntry("failedStudies", 1L);
-        assertThat(countWhere("participants", "source_id = ? AND source = ?", "SUBJ42", "other-study-01"))
-                .isEqualTo(1);
-        assertThat(Files.exists(reportsDir.resolve("missing-study-01_hpds_id_mapping.csv"))).isFalse();
+        assertThat(countWhere("participants", "source_id = ? AND source = ?", "1001", "DBGap")).isEqualTo(1);
+        assertThat(Files.exists(reportsDir.resolve("phs000009_hpds_id_mapping.csv"))).isFalse();
     }
 }

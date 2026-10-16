@@ -110,9 +110,10 @@ The permanent orchestrator's stage logic is in `etl-runners/common/orchestrator.
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
 invoked with `SKIP_TESTS=true` so the same commit's suites are not re-run per study. Runner
 jobs go further: each orchestrator builds the runner image once and passes it as
-`PREBUILT_IMAGE_TAR`, so those builds build nothing on the Jenkins host. The permanent
-orchestrator passes it to every runner job it calls (SSTR load, global AllConcepts, VCF indexes,
-per-study allConcepts, merge and manifest).
+`PREBUILT_IMAGE_TAR`, so those builds (SSTR load, allConcepts generation, large splits) build
+nothing on the Jenkins host; smaller splits run on a runner pool with no per-study build at all.
+The permanent orchestrator passes it to every runner job it calls (SSTR load, global AllConcepts,
+VCF indexes, per-study allConcepts, merge and manifest).
 
 The orchestrator backs up only a database its own start succeeded on (`DB_STARTED`): a failed
 start changed nothing worth saving, and is never recorded as a run's backup. The participant DB
@@ -250,12 +251,16 @@ because a truncated file is internally consistent.
 per-study data problem as a study-level failure and continues, and skips unmatched ids with only a
 log warning. Neither is visible in the exit status.
 
-- `readyStudies > 0`, `failedStudies == 0`, `succeeded + failed == ready`
+- `readyStudies > 0`, `failedStudies == 0`, `succeeded + skipped + failed == ready`
+- `skippedStudies == 0` is a warning, not a failure: a study with no participant files, or one
+  flagged `STUDY_NEEDS_DATA_REVIEW` (its patient mapping resolved to none of its loaded
+  subjects), is listed and left out of the later stages, and the build is UNSTABLE
 - one `STUDY_MIGRATED` record per success
-- one `*_hpds_id_mapping.csv` per succeeded study
-- per mapping file: exact header, at least one row, well-formed UUIDs, no blank ids, and no
-  duplicated `old_hpds_id` (one legacy patient mapped to two new uuids is the corruption this
-  migration exists to avoid)
+- one `*_hpds_id_mapping.csv` per succeeded or needs-review study
+- per mapping file: exact header (`old_hpds_id,new_hpds_id,common_dbgap_id`), at least one row
+  (exactly zero for a study flagged `STUDY_NEEDS_DATA_REVIEW` in the report),
+  integer HPDS ids, no blank ids, and no duplicated `old_hpds_id` (one legacy patient mapped to two
+  new ids is the corruption this migration exists to avoid)
 - each sstr sub-report validated; a mapping file with fewer rows than its study's sstr subject
   count is warned about, being the visible symptom of silently dropped patients
 
@@ -471,8 +476,8 @@ is never printed to the Jenkins console; a rotation invalidates whatever an earl
 
 ### Full Migration
 
-Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_FOLDER`. Set `PREFLIGHT_ONLY` to
-validate the export layout without provisioning anything.
+Run `new-hpds-etl-participant-migration-pipeline` with `MANAGED_INPUTS` and `DATA_ROOT`. Set
+`PREFLIGHT_ONLY` to validate the export layout without provisioning anything.
 
 ### Permanent Sweep
 
@@ -557,6 +562,7 @@ an environment may run.
 | `generate-allconcepts-manifest`                 | `true`  | `ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED`                 |
 | `generate-identity-consent-mapping`             | `true`  | `ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED`             |
 | `participants-migration`                        | `true`  | `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED`                        |
+| `split-allconcepts`                             | `true`  | `ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED`                             |
 
 Running a disabled job exits `5` (`CONFIG_ERROR`) with a message naming the flag.
 
@@ -603,6 +609,23 @@ Loads that share subjects serialize on those rows anyway — the loser waits for
 transaction to commit — so parallelism buys least where studies overlap most, and sequential keeps
 the participant DB load predictable and the console log readable.
 
+The migration's `Split AllConcepts` stage runs its studies in **parallel**: the split job only reads
+the participant DB (consents), so there is nothing to race on. Studies are sized up front and run
+largest first, small ones on `SPLIT_CONCURRENCY` (default 5) long-lived runner-pool workers that the
+orchestrator feeds directly (no Jenkins build per study), large ones on their own right-sized
+instances, `SPLIT_LARGE_CONCURRENCY` (default 2) at a time. The stage ends with one consolidated
+report, `downstream-artifacts/split-allconcepts-report-<build-tag>.md` (see
+[MIGRATION_PIPELINE.md](MIGRATION_PIPELINE.md#stage-4-split-allconcepts)). The DB's
+`max_connections` (300) is far above that concurrency.
+
+A study whose **data** is the problem (no participant files, a patient mapping that matches none of
+its subjects, a missing or rejected allConcepts input) is excluded and the run carries on UNSTABLE;
+only a non-data failure (infrastructure, timeout) fails a stage. Whatever the result, the build ends
+with `downstream-artifacts/migration-report/` (also in S3 under
+`etl-runner/reports/migration-pipeline/<build-tag>/migration-report/`): participant counts per consent
+group, each study's status, and every study needing follow-up with why (see
+[MIGRATION_PIPELINE.md](MIGRATION_PIPELINE.md#post-migration-report)).
+
 ---
 
 ## Directory Layout
@@ -632,6 +655,7 @@ etl-runners/
 │  └─ test/                     run-tests.sh + stub docker/aws
 ├─ participants-migration/            TEMPORARY
 ├─ split-allconcepts/                 TEMPORARY
+├─ migration-report/                  TEMPORARY: the migration orchestrator's final report (no runner)
 ├─ sstr-populate-rds-participants/    PERMANENT
 ├─ generate-global-all-concepts/      PERMANENT
 ├─ create-vcf-indexes/                PERMANENT

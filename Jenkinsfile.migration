@@ -8,7 +8,10 @@
 // When the migration is complete, delete:
 //   - this file
 //   - etl-runners/participants-migration/                (runner, Terraform, validation)
+//   - etl-runners/split-allconcepts/                     (runner, Terraform, validation)
+//   - etl-runners/migration-report/                      (the final cross-stage report)
 //   - src/.../jobs/migration/ParticipantsMigrationJob    (and its tests)
+//   - src/.../jobs/migration/SplitAllConceptsJob         (and its tests)
 //   - the etl.pipelines.migrate-all entry in application.yml
 //
 // Structure: the DAG lives here, not in the JAR. Each migration job is one stage that triggers
@@ -16,9 +19,28 @@
 // outputs, and tearing itself down. A stage runs only if the one above it succeeded, so ordering
 // between migrations is stage order.
 //
+// The participant database is a long-lived PostgreSQL 16 container on the Jenkins host.
+// 'Start participant DB' makes sure it is up (see OVERWRITE_DB, DB_RESTORE_FROM and
+// IF_LAST_RUN_FAILED) after the tests, and post { always } backs it up to S3 -- as the latest
+// clean backup only when this build succeeded. It is never torn down. See
+// docs/PARTICIPANT_DB.md.
+//
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
 // SKIP_TESTS=true: they rebuild the JAR in their own workspace but do not re-run suites this
-// pipeline already ran on the same commit.
+// pipeline already ran on the same commit. The per-study split builds rebuild nothing: this
+// pipeline builds their runner image once and passes it as PREBUILT_IMAGE_TAR, and runs at most
+// SPLIT_CONCURRENCY of them at a time. With SPLIT_USE_RUNNER_POOL (the default) they also share
+// SPLIT_CONCURRENCY long-lived worker instances (etl-runners/runner-pool), each running study after
+// study, so only the first study on each worker waits for an instance to boot. The pool is
+// destroyed when the stage ends, and in post { always } should the build die first.
+//
+// The split stage is planned first (etl-runners/split-allconcepts/plan-studies.sh): every input is
+// checked and sized in one parallel pass, studies run largest first, and studies of
+// SPLIT_LARGE_STUDY_GB or more each run on their own right-sized instance instead of the pool. Pool
+// studies are dispatched by this pipeline directly (run-pooled-study.sh), not through one Jenkins
+// build per study. Every study's result, reports, validation and logs land under
+// downstream-artifacts/split-allconcepts/<study_id>/, consolidated into one report,
+// downstream-artifacts/split-allconcepts-report-<build-tag>.{md,json} (split-report.sh).
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -36,72 +58,102 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
         // A migration is a one-off against shared tables. Never run two at once.
         disableConcurrentBuilds()
-        timeout(time: 8, unit: 'HOURS')
+        // A backstop only. Stuck runs are caught by each study's own timeout, which grows with its
+        // input (a 30 GiB+ allConcepts split can take many hours), and 600+ studies of participant
+        // migration and splitting take a long time end to end.
+        timeout(time: 72, unit: 'HOURS')
     }
 
     parameters {
         string(name: 'MANAGED_INPUTS',
-               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
                description: 'participants-migration --managed-inputs: study list CSV with "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
-        string(name: 'DATA_FOLDER',
-               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/current',
-               description: 'participants-migration --data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
+        string(name: 'DATA_ROOT',
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
+               description: 'Root of the per-study folders, one per study id. Must be an s3:// URI. Inputs: {root}/{study_id}/legacy/allConcepts/ (pre-split allConcepts), {root}/{study_id}/legacy/data/ (patient mapping), {root}/{study_id}/rawData/ (SSTR, or the Subject/Sample MULTI fallback). Outputs: {root}/{study_id}/allConcepts/c{code}/ (split + merged allConcepts) and {root}/{study_id}/mappings/<build-tag>/ (hpds id mapping).')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: 'Rows per batch insert, passed to every migration job')
+        string(name: 'PARTICIPANTS_PARALLELISM', defaultValue: '4',
+               description: 'participants-migration --parallelism: studies migrated at once, 1-8')
+        string(name: 'PARTICIPANTS_RESUME_FROM_RUN_ID', defaultValue: '',
+               description: 'participants-migration --resume-from: run id of an earlier participants-migration run over the same DATA_ROOT, e.g. <build-tag>-participants of a run that timed out. Studies it migrated are copied, not migrated again. Blank migrates every study.')
+        string(name: 'PARTICIPANTS_TIMEOUT_SECONDS', defaultValue: '43200',
+               description: 'How long participants-migration waits for its runner before giving up (exit 124). Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: 'Comma-separated study ids; blank runs every ready study. Applies to the participants and split stages only -- the global AllConcepts and VCF stages always cover ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
                description: 'Jenkins job that runs etl-runners/split-allconcepts/Jenkinsfile')
-        string(name: 'MAPPING_UPLOAD_BASE',
-               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/mappings',
-               description: 'S3 prefix the orchestrator uploads each {studyid}_hpds_id_mapping.csv to before triggering split-allconcepts. Must be readable by CONTAINER_ASSUME_ROLE_ARN (the split container does ALL S3 I/O as that role). A per-build tag is appended.')
-        string(name: 'SPLIT_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/split_allconcepts/',
-               description: 'Output location for split allConcepts files. Must be an s3:// URI: a local path resolves INSIDE the runner container (/app), which is destroyed with the instance, silently discarding every per-consent CSV.')
         string(name: 'ALL_CONCEPTS_JOB', defaultValue: 'generate-global-all-concepts',
                description: 'Jenkins job that runs the generate-global-all-concepts runner')
-        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/global_allconcepts/',
-               description: 'Output location for global_AllConcepts.csv. Must be an s3:// URI reachable by CONTAINER_ASSUME_ROLE_ARN.')
+        string(name: 'ALL_CONCEPTS_OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/global_allconcepts/',
+               description: 'Output location for global_AllConcepts.csv. Must be an s3:// URI.')
         string(name: 'VCF_INDEXES_JOB', defaultValue: 'create-vcf-indexes',
                description: 'Jenkins job that runs the create-vcf-indexes runner')
-        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/vcf_indexes/',
-               description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI reachable by CONTAINER_ASSUME_ROLE_ARN.')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for containers to assume when reading S3 inputs from the 73 bucket. Passed to every downstream runner.')
+        string(name: 'VCF_INDEXES_OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/vcf_indexes/',
+               description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI.')
+        string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
+               description: 'Jenkins job that runs the merge-allconcepts runner')
+        string(name: 'MERGE_ALLCONCEPTS_PARALLELISM', defaultValue: '8',
+               description: 'merge-allconcepts --parallelism: consent folders merged at once, 1-16')
+        string(name: 'MERGE_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '14400',
+               description: 'How long merge-allconcepts may run before it is failed as stuck (exit 124)')
+        string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: '',
+               description: 'S3 prefix to scan for {study_id}/allConcepts/c{code}/ folders to merge. Blank defaults to DATA_ROOT.')
+        string(name: 'ALLCONCEPTS_MANIFEST_JOB', defaultValue: 'generate-allconcepts-manifest',
+               description: 'Jenkins job that writes the versioned allConcepts_manifest.csv at DATA_ROOT (last stage)')
+        string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
+               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
+        string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
+               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
+        booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
+               description: 'Replace the participant database before this run with DB_RESTORE_FROM (blank = the latest clean backup), whether or not one is up. A running database is saved to participant_db_pre_overwrite.tar first.')
+        string(name: 'DB_RESTORE_FROM', defaultValue: '',
+               description: 'What a new or replaced participant database is loaded from: blank = the latest clean backup, "none" = a fresh schema, a file under backups/, or an s3:// URI. Ignored when the database is up and OVERWRITE_DB is false.')
+        choice(name: 'IF_LAST_RUN_FAILED', choices: ['restore-clean', 'continue'],
+               description: 'If the previous pipeline run failed, its writes are still in the live database: restore-clean (default) replaces it from the latest clean backup before this run; continue builds on it.')
+        booleanParam(name: 'SPLIT_USE_RUNNER_POOL', defaultValue: true,
+               description: 'Run the split builds on a pool of SPLIT_CONCURRENCY worker instances that stay up for the whole stage and take study after study, instead of booting a fresh instance per study.')
+        string(name: 'SPLIT_CONCURRENCY', defaultValue: '5',
+               description: 'Runner-pool workers (at most 50): studies under SPLIT_LARGE_STUDY_GB run on them one after another. With SPLIT_USE_RUNNER_POOL off, the most split builds at once.')
+        string(name: 'SPLIT_LARGE_STUDY_GB', defaultValue: '5',
+               description: 'Studies whose legacy allConcepts input is this many GiB or more each run on their own instance, with a root volume of twice the input plus 50 GiB (at least 100). 0 sends every study to the pool.')
+        string(name: 'SPLIT_LARGE_CONCURRENCY', defaultValue: '2',
+               description: 'Most large studies running at once on their own instances, alongside the pool.')
+        string(name: 'SPLIT_LARGE_INSTANCE_TYPE', defaultValue: 'r6i.xlarge',
+               description: 'Instance type for large studies.')
+        string(name: 'SPLIT_LARGE_TIMEOUT_SECONDS', defaultValue: '14400',
+               description: 'Least time one large study gets before it is failed as stuck (exit 124). Its timeout grows with its input; see SPLIT_TIMEOUT_SECONDS_PER_GB.')
+        string(name: 'SPLIT_POOL_TIMEOUT_SECONDS', defaultValue: '3600',
+               description: 'Least time one pool-lane study gets before it is failed as stuck (exit 124), its worker then retired. Includes the worker\'s boot for its first study. Its timeout grows with its input; see SPLIT_TIMEOUT_SECONDS_PER_GB.')
+        string(name: 'SPLIT_TIMEOUT_BASE_SECONDS', defaultValue: '1800',
+               description: 'Size-scaled split timeout: this plus SPLIT_TIMEOUT_SECONDS_PER_GB per GiB of the study\'s allConcepts input, never less than its lane\'s minimum above.')
+        string(name: 'SPLIT_TIMEOUT_SECONDS_PER_GB', defaultValue: '600',
+               description: 'Seconds allowed per GiB of allConcepts input (default 10 minutes: a 30 GiB study gets 5.5 hours). Raise it if large studies time out while still making progress.')
         booleanParam(name: 'CONTINUE_ON_STUDY_FAILURE', defaultValue: true,
                description: 'Keep splitting remaining studies when one fails. Each study is independent.')
         booleanParam(name: 'RUN_INTEGRATION_TESTS', defaultValue: true,
                description: 'Run the Testcontainers *IT suites (needs a Docker daemon on the agent). These are the only checks that assert real DB state, so leaving them on is strongly preferred before a migration.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
-               description: 'Validate every migration input layout and stop, without provisioning anything')
-        choice(name: 'ENV', choices: ['integration'],
-               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for network, RDS, and account settings.')
+               description: 'Validate every migration input layout and stop, without provisioning anything (the participant DB included)')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars for account, network, and DB settings.')
     }
 
     environment {
-        AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
-
+        ENV        = "${params.ENV ?: 'development'}"
+        AWS_REGION = 'us-east-1'
     }
 
     stages {
 
-        stage('AWS config') {
-            steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
-            }
-        }
-
         stage('Build') {
             steps {
+                // The workspace persists between builds. Everything under downstream-artifacts/ must
+                // come from THIS build: the stages read it (skipped/excluded study lists, mapping
+                // CSVs) and the final migration report treats whatever is there as this run's.
+                sh 'rm -rf downstream-artifacts managed_inputs.original.csv split-mappings split-mappings.list'
                 sh './mvnw -B clean package -DskipTests'
             }
         }
@@ -112,12 +164,50 @@ EOF
         // ITs, and the unit suites are fast, so the two modes are simply verify vs test.
         stage('Tests') {
             steps {
-                sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
+                // Jenkins runs in a podman container that reaches the HOST's podman through the
+                // mounted /var/run/docker.sock. Ryuk (Testcontainers' cleanup container) would bind
+                // that path from the host, where it does not exist, and never start; and the test
+                // containers publish their ports on the host, which is not this container's
+                // localhost. Containers are still removed when the JVM exits normally.
+                withEnv(['TESTCONTAINERS_RYUK_DISABLED=true',
+                         'TESTCONTAINERS_HOST_OVERRIDE=host.containers.internal']) {
+                    sh(params.RUN_INTEGRATION_TESTS ? './mvnw -B verify' : './mvnw -B test')
+                }
+                // The participant database scripts (stubbed docker/aws; seconds, no AWS or runtime needed).
+                sh 'make -C etl-runners/participant-db test'
+                // The Split AllConcepts stage scripts (stubbed aws).
+                sh 'make -C etl-runners/split-allconcepts test'
             }
             post {
                 always {
                     junit testResults: 'target/surefire-reports/*.xml,target/failsafe-reports/*.xml',
                           allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Start participant DB') {
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    def downstream = build(
+                        job: params.DB_START_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-db"),
+                            booleanParam(name: 'OVERWRITE', value: params.OVERWRITE_DB),
+                            string(name: 'RESTORE_FROM', value: params.DB_RESTORE_FROM?.trim() ?: ''),
+                            string(name: 'IF_LAST_RUN_FAILED', value: params.IF_LAST_RUN_FAILED),
+                            string(name: 'ENV',    value: params.ENV),
+                        ])
+                    if (downstream.result != 'SUCCESS') {
+                        error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the participant " +
+                              'database did not come up -- see that job\'s console.')
+                    }
+                    // Only now does post { always } own the end-of-run backup. A failed start changed
+                    // nothing worth saving.
+                    env.DB_STARTED = 'true'
                 }
             }
         }
@@ -142,10 +232,12 @@ EOF
                         propagate: false,
                         parameters: [
                             string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS),
-                            string(name: 'DATA_FOLDER',    value: params.DATA_FOLDER),
+                            string(name: 'DATA_FOLDER',    value: params.DATA_ROOT),
                             string(name: 'BATCH_SIZE',     value: params.BATCH_SIZE),
+                            string(name: 'PARALLELISM',    value: params.PARTICIPANTS_PARALLELISM),
+                            string(name: 'JOB_TIMEOUT_SECONDS', value: params.PARTICIPANTS_TIMEOUT_SECONDS ?: '43200'),
+                            string(name: 'RESUME_FROM_RUN_ID', value: params.PARTICIPANTS_RESUME_FROM_RUN_ID ?: ''),
                             string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
-                            string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
                             string(name: 'ENV',            value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS',     value: true),
@@ -162,7 +254,7 @@ EOF
                     if (downstream.result == 'UNSTABLE') {
                         unstable('participants-migration completed with validation warnings')
                     } else if (downstream.result != 'SUCCESS') {
-                        error("participants-migration #${downstream.number} ended ${downstream.result}")
+                        error("participants-migration #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
                 }
             }
@@ -176,9 +268,12 @@ EOF
                                 projectName: params.PARTICIPANTS_MIGRATION_JOB,
                                 selector: specific(env.PARTICIPANTS_BUILD ?: '0'),
                                 target: 'downstream-artifacts/participants-migration',
+                                // One result file per study; the sources report already summarises them.
+                                excludes: '**/studies/**',
                                 flatten: true,
                                 optional: true)
                         } catch (err) {
+                            rethrowIfInterrupted(err)
                             echo "Could not copy downstream artifacts (${err.message}). " +
                                  "They remain on ${params.PARTICIPANTS_MIGRATION_JOB} #${env.PARTICIPANTS_BUILD}."
                         }
@@ -190,206 +285,27 @@ EOF
         stage('Split AllConcepts') {
             steps {
                 script {
-                    // Catch a stale form value (e.g. the pre-fix './output' default, which
-                    // Jenkins keeps serving until the job re-processes its parameters block,
-                    // and which Rebuild copies forward) here, once, instead of scheduling
-                    // 28 downstream builds that each fail the same runner-side guard.
-                    if (!params.SPLIT_OUTPUT.trim().startsWith('s3://')) {
-                        error("SPLIT_OUTPUT must be an s3:// URI, got '${params.SPLIT_OUTPUT}'. A local path " +
-                              'resolves inside the runner container and the split results are destroyed with the instance.')
-                    }
-                    if (!params.MAPPING_UPLOAD_BASE.trim().startsWith('s3://')) {
-                        error("MAPPING_UPLOAD_BASE must be an s3:// URI, got '${params.MAPPING_UPLOAD_BASE}'.")
-                    }
-                    if (!params.ALL_CONCEPTS_OUTPUT.trim().startsWith('s3://')) {
-                        error("ALL_CONCEPTS_OUTPUT must be an s3:// URI, got '${params.ALL_CONCEPTS_OUTPUT}'. " +
-                              'The runner container writes it as CONTAINER_ASSUME_ROLE_ARN; use the 73 bucket.')
-                    }
-                    if (!params.VCF_INDEXES_OUTPUT.trim().startsWith('s3://')) {
-                        error("VCF_INDEXES_OUTPUT must be an s3:// URI, got '${params.VCF_INDEXES_OUTPUT}'. " +
-                              'The runner container writes it as CONTAINER_ASSUME_ROLE_ARN; use the 73 bucket.')
-                    }
-
-                    // Resolve the study list from managed inputs so we can loop per study.
-                    def managedInputsUri = params.MANAGED_INPUTS?.trim()
-                    if (!managedInputsUri) {
-                        error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
-                    }
-
-                    def studies = []
-                    // Use an env var to avoid Groovy GString injection into the shell.
-                    env.MI_URI = managedInputsUri
-                    def lines = sh(returnStdout: true, script: '''
-                        AWS_PROFILE=dbgap-etl aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
-                    ''').trim()
-
-                    if (!lines) {
-                        error("Could not read managed inputs from ${managedInputsUri}")
-                    }
-
-                    def header = null
-                    lines.readLines().each { line ->
-                        if (!line.trim()) return
-                        def cols = parseCsvLine(line)
-                        if (header == null) {
-                            header = cols
-                            return
-                        }
-                        def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
-                            ? cols[header.indexOf('Study Identifier')].trim() : ''
-                        def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
-                            ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
-                        def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
-                            ? cols[header.indexOf('Data is ready to process')].trim() : ''
-                        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
-                            studies << [studyId: studyId, abv: abv]
-                        }
-                    }
-
-                    def filterIds = params.STUDY_FILTER.split(',').collect { it.trim() }.findAll { it }
-                    if (filterIds) {
-                        studies = studies.findAll { filterIds.contains(it.studyId) }
-                        echo "STUDY_FILTER active: ${studies.size()} of the ready studies match ${filterIds}"
-                    }
-
-                    if (studies.isEmpty()) {
-                        error('No ready studies found in managed inputs for Split AllConcepts.')
-                    }
-
-                    echo "Split AllConcepts: ${studies.size()} study/studies to process"
-
-                    // Upload each study's mapping CSV to S3 before fanning out. The copied
-                    // artifact is a file in THIS workspace; the split job runs in a container
-                    // (WORKDIR /app, only /reports mounted) on its own EC2 instance, so a
-                    // workspace path can never resolve there. It must travel via a bucket the
-                    // container's assumed role (CONTAINER_ASSUME_ROLE_ARN) can read -- the
-                    // single S3Client in AwsConfig uses that role for ALL S3 I/O, which rules
-                    // out the stack bucket where runner reports land. Sequential on purpose:
-                    // the env-var handoff into sh is not safe under `parallel`.
-                    def mappingTag  = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
-                    def mappingBase = "${params.MAPPING_UPLOAD_BASE.trim().replaceAll('/+$', '')}/${mappingTag}"
-                    for (study in studies) {
-                        def sid = study.studyId
-                        def remoteMapping = "${mappingBase}/${sid}_hpds_id_mapping.csv"
-                        if (params.PREFLIGHT_ONLY) {
-                            // Nothing has produced a mapping yet; pass the would-be URI so the
-                            // split runner's soft preflight check warns instead of failing.
-                            study.mappingUri = remoteMapping
-                            continue
-                        }
-                        def localMapping = "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv"
-                        if (!fileExists(localMapping)) {
-                            error("${sid}: mapping CSV not found at ${localMapping}. " +
-                                  "The participants-migration copyArtifacts step may have failed.")
-                        }
-                        env.MAP_SRC = localMapping
-                        env.MAP_DST = remoteMapping
-                        sh 'AWS_PROFILE=dbgap-etl aws s3 cp "$MAP_SRC" "$MAP_DST" --no-progress'
-                        study.mappingUri = remoteMapping
-                    }
-
-                    def results = java.util.Collections.synchronizedList([])
-                    def branches = [:]
-
-                    for (study in studies) {
-                        def s = study
-                        branches[s.studyId] = {
-                            def sid = s.studyId
-                            def abv = s.abv
-                            def abvLower = abv.toLowerCase()
-
-                            def inputUri = "s3://avillach-73-bdcatalyst-etl/${abvLower}/completed/${sid}/${sid}_allConcepts_new_search_with_data_analyzer.csv"
-
-                            def mappingUri = s.mappingUri
-
-                            echo "--- ${sid} (${abv}) ---"
-                            echo "  input:   ${inputUri}"
-                            echo "  mapping: ${mappingUri}"
-
-                            def outcome
-                            try {
-                                def downstream = build(
-                                    job: params.SPLIT_ALLCONCEPTS_JOB,
-                                    wait: true,
-                                    propagate: false,
-                                    parameters: [
-                                        string(name: 'STUDY_ID',     value: sid),
-                                        string(name: 'ABBREVIATION', value: abv),
-                                        string(name: 'INPUT',        value: inputUri),
-                                        string(name: 'MAPPING',      value: mappingUri),
-                                        string(name: 'OUTPUT',       value: params.SPLIT_OUTPUT),
-                                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
-                                        string(name: 'RUN_ID',       value: "${env.BUILD_TAG}-split-${sid}"),
-                                        string(name: 'ENV',          value: params.ENV),
-                                        booleanParam(name: 'SKIP_TESTS', value: true),
-                                        booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
-                                    ])
-
-                                outcome = [studyId: sid, result: downstream.result,
-                                           build: downstream.number, url: downstream.absoluteUrl]
-
-                                try {
-                                    copyArtifacts(
-                                        projectName: params.SPLIT_ALLCONCEPTS_JOB,
-                                        selector: specific("${downstream.number}"),
-                                        target: "downstream-artifacts/split-allconcepts/${sid}",
-                                        optional: true)
-                                } catch (err) {
-                                    echo "Could not copy artifacts for ${sid} (${err.message})"
-                                }
-                            } catch (err) {
-                                outcome = [studyId: sid, result: 'NOT_BUILT',
-                                           build: null, url: null, error: err.message]
-                                echo "${sid}: could not run — ${err.message}"
-                            }
-
-                            results << outcome
-                            echo "${sid}: ${outcome.result}"
-                        }
-                    }
-
-                    if (!params.CONTINUE_ON_STUDY_FAILURE) {
-                        branches.failFast = true
-                    }
-                    parallel branches
-
-                    // --- summary --------------------------------------------------
-                    def ok       = results.findAll { it.result == 'SUCCESS' }
-                    def warned   = results.findAll { it.result == 'UNSTABLE' }
-                    def failed   = results.findAll { !(it.result in ['SUCCESS', 'UNSTABLE']) }
-
-                    echo ''
-                    echo '================ Split AllConcepts summary ================'
-                    results.each { r -> echo String.format('  %-12s %-10s %s', r.studyId, r.result, r.url ?: '') }
-                    echo "  ${ok.size()} succeeded, ${warned.size()} with warnings, " +
-                         "${failed.size()} failed"
-                    echo '==========================================================='
-
-                    if (failed) {
-                        error("Split AllConcepts failed for: ${failed*.studyId.join(', ')}")
-                    }
-                    if (warned) {
-                        unstable("Split AllConcepts completed with warnings: ${warned*.studyId.join(', ')}")
-                    }
+                    runSplitAllConcepts()
                 }
             }
         }
 
         stage('Generate global AllConcepts') {
+            // No pre-flight mode of its own: it reads the participant DB, which PREFLIGHT_ONLY
+            // does not start.
+            when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
                     echo 'Generating global_AllConcepts.csv from migrated data...'
 
                     def conceptParams = [
                         string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
-                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
-                        booleanParam(name: 'ALLOW_EMPTY', value: params.PREFLIGHT_ONLY),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
-                        conceptParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
+                        conceptParams << string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs())
                     }
 
                     def downstream = build(
@@ -398,10 +314,10 @@ EOF
                         propagate: false,
                         parameters: conceptParams)
 
-                    if (downstream.result == 'FAILURE') {
-                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} failed")
-                    } else if (downstream.result == 'UNSTABLE') {
+                    if (downstream.result == 'UNSTABLE') {
                         unstable("${params.ALL_CONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
 
                     try {
@@ -411,6 +327,7 @@ EOF
                             target: 'downstream-artifacts/all-concepts',
                             optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "Could not copy artifacts for all-concepts (${err.message}); " +
                              "they remain on ${params.ALL_CONCEPTS_JOB} #${downstream.number}."
                     }
@@ -428,13 +345,13 @@ EOF
                         // The migration regenerates artifacts for studies the legacy
                         // system already processed; without this the job sees zero work.
                         booleanParam(name: 'INCLUDE_PROCESSED', value: true),
-                        string(name: 'CONTAINER_ASSUME_ROLE_ARN', value: params.CONTAINER_ASSUME_ROLE_ARN),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
+                        booleanParam(name: 'PREFLIGHT_ONLY', value: params.PREFLIGHT_ONLY),
                     ]
                     if (params.MANAGED_INPUTS?.trim()) {
-                        vcfParams << string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS)
+                        vcfParams << string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs())
                     }
 
                     def downstream = build(
@@ -446,7 +363,7 @@ EOF
                     if (downstream.result == 'UNSTABLE') {
                         unstable('Create VCF indexes completed with warnings')
                     } else if (downstream.result != 'SUCCESS') {
-                        error("${params.VCF_INDEXES_JOB} #${downstream.number} ended ${downstream.result}")
+                        error("${params.VCF_INDEXES_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
 
                     try {
@@ -456,8 +373,100 @@ EOF
                             target: 'downstream-artifacts/vcf-indexes',
                             optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "Could not copy artifacts for vcf-indexes (${err.message}); " +
                              "they remain on ${params.VCF_INDEXES_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
+
+        stage('Merge AllConcepts') {
+            // No pre-flight mode of its own: skipped rather than provisioned under PREFLIGHT_ONLY.
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    echo 'Merging per-consent allConcepts files where needed...'
+
+                    def mergeInput = params.MERGE_ALLCONCEPTS_INPUT?.trim()
+                            ?: params.DATA_ROOT.trim()
+                    echo "merge input: ${mergeInput}"
+
+                    def mergeParams = [
+                        string(name: 'INPUT', value: mergeInput),
+                        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : ''),
+                        string(name: 'PARALLELISM', value: params.MERGE_ALLCONCEPTS_PARALLELISM),
+                        string(name: 'JOB_TIMEOUT_SECONDS', value: params.MERGE_ALLCONCEPTS_TIMEOUT_SECONDS ?: '14400'),
+                        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-merge-allconcepts"),
+                        string(name: 'ENV',    value: params.ENV),
+                        booleanParam(name: 'SKIP_TESTS', value: true),
+                    ]
+
+                    def downstream = build(
+                        job: params.MERGE_ALLCONCEPTS_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: mergeParams)
+
+                    if (downstream.result == 'UNSTABLE') {
+                        unstable("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} completed with warnings")
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
+                    }
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.MERGE_ALLCONCEPTS_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/merge-allconcepts',
+                            optional: true)
+                    } catch (err) {
+                        rethrowIfInterrupted(err)
+                        echo "Could not copy artifacts for merge-allconcepts (${err.message}); " +
+                             "they remain on ${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number}."
+                    }
+                }
+            }
+        }
+
+        stage('AllConcepts manifest') {
+            // Last stage: verifies the global AllConcepts file (ALL_CONCEPTS_OUTPUT) and every ready
+            // consent group's MERGED file, and publishes the versioned
+            // {DATA_ROOT}/allConcepts_manifest.csv for production ingestion. Writes nothing (and fails
+            // the build) if any of them is missing or stale, so ingestion never gets a bad manifest.
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    def downstream = build(
+                        job: params.ALLCONCEPTS_MANIFEST_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                            string(name: 'INPUT', value: params.MERGE_ALLCONCEPTS_INPUT?.trim() ?: params.DATA_ROOT.trim()),
+                            string(name: 'GLOBAL_ALLCONCEPTS', value: params.ALL_CONCEPTS_OUTPUT.trim()),
+                            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : ''),
+                            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-allconcepts-manifest"),
+                            string(name: 'ENV',    value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS', value: true),
+                        ])
+
+                    try {
+                        copyArtifacts(
+                            projectName: params.ALLCONCEPTS_MANIFEST_JOB,
+                            selector: specific("${downstream.number}"),
+                            target: 'downstream-artifacts/allconcepts-manifest',
+                            optional: true)
+                    } catch (err) {
+                        rethrowIfInterrupted(err)
+                        echo "Could not copy artifacts for allconcepts-manifest (${err.message}); " +
+                             "they remain on ${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number}."
+                    }
+
+                    if (downstream.result == 'UNSTABLE') {
+                        unstable("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} completed with warnings")
+                    } else if (downstream.result != 'SUCCESS') {
+                        error("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: " +
+                              'the manifest was NOT updated. Its report lists every missing or stale MERGED file.')
                     }
                 }
             }
@@ -466,6 +475,13 @@ EOF
 
     post {
         always {
+            script {
+                // First: a failed backup fails the build loudly, and the report must exist regardless.
+                writeMigrationReport()
+                backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
+                stopRunnerPool()
+                removeRunnerImage()
+            }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
         }
         failure {
@@ -474,13 +490,228 @@ EOF
                  "whether this was validation (2), data (3), infrastructure (4, retryable), or config (5)."
         }
         unstable {
-            echo 'Migration pipeline completed WITH WARNINGS. Rows were skipped or a study reported ' +
-                 'something unexpected — review the archived reports before treating the migration as done.'
+            echo 'Migration pipeline completed WITH WARNINGS. Studies were excluded for data problems, rows were ' +
+                 'skipped, or a study reported something unexpected. downstream-artifacts/migration-report/' +
+                 'migration-report.md lists every study needing follow-up and why; review it before treating ' +
+                 'the migration as done.'
         }
         success {
             echo 'Migration pipeline completed. Every migration stage passed its own output validation.'
         }
     }
+}
+
+// The run's final report (etl-runners/migration-report/migration-report.py), written whatever stage
+// the build stopped at: participants per consent group to compare against production, each ready
+// study's status, and every study needing follow-up with why. Lands in downstream-artifacts/
+// migration-report/ (archived on this build) and in S3 under
+// etl-runner/reports/migration-pipeline/<build-tag>/migration-report/, for QA jobs to read. A failure
+// here is reported but never changes the build's result.
+def writeMigrationReport() {
+    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def root = params.DATA_ROOT?.trim() ?: ''
+    def dest = root ==~ /^s3:\/\/[^\/]+.*/
+        ? "s3://${root.substring('s3://'.length()).split('/')[0]}/etl-runner/reports/migration-pipeline/${tag}/migration-report/"
+        : ''
+    withEnv(["MR_RUN=${tag}", "MR_RESULT=${currentBuild.currentResult}", "MR_DEST=${dest}"]) {
+        int rc = sh(returnStatus: true, script: '''
+            python3 etl-runners/migration-report/migration-report.py downstream-artifacts "$MR_RUN" \
+                downstream-artifacts/migration-report "$MR_RESULT" || exit 1
+            if [ -n "$MR_DEST" ]; then
+              aws s3 cp downstream-artifacts/migration-report "$MR_DEST" --recursive --no-progress --only-show-errors || exit 2
+              echo "Migration report uploaded to $MR_DEST"
+            fi
+        ''')
+        if (rc == 1) {
+            echo 'WARNING: the migration report could not be written; each stage\'s own report is still archived.'
+        } else if (rc != 0) {
+            echo "WARNING: the migration report was written (downstream-artifacts/migration-report/) but not uploaded to ${dest}."
+        }
+    }
+}
+
+// Dumps the participant DB to S3 at the end of the run, if this build's start succeeded. The
+// database stays up. A SUCCESS or UNSTABLE build overwrites participant_db.tar, the latest clean
+// backup; a failed or aborted one writes participant_db_not_promoted.tar instead and marks the live
+// database as holding a failed run (the next start acts on IF_LAST_RUN_FAILED). A failed backup
+// fails the build loudly: this run's writes then exist only in the live database.
+def backupParticipantDb(String backupJob, String envName) {
+    if (env.DB_STARTED != 'true') {
+        return
+    }
+    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']
+    echo "Backing up the participant database (promote: ${promote})"
+    def downstream = build(
+        job: backupJob,
+        wait: true,
+        propagate: false,
+        parameters: [
+            booleanParam(name: 'PROMOTE_BACKUP', value: promote),
+            string(name: 'ENV', value: envName),
+        ])
+    if (downstream.result != 'SUCCESS') {
+        currentBuild.result = 'FAILURE'
+        echo "ERROR: ${backupJob} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: this run's writes are in the " +
+             "live participant database but in no verified backup. Re-run ${backupJob} " +
+             "(PROMOTE_BACKUP=${promote}) before the next pipeline run."
+    }
+}
+
+// The integer value of a positive whole-number parameter, or a clear error.
+// How long one split study may run before it is failed as stuck: grows with its allConcepts input
+// (whole GiB, rounded up), and is never less than its lane's minimum.
+def splitTimeoutSeconds(inputBytes, int floor, int base, int perGb) {
+    def raw = "${inputBytes ?: ''}".trim()
+    long bytes = raw ==~ /[0-9]+/ ? (raw as long) : 0L
+    long gib = (bytes + 1073741823L).intdiv(1073741824L)
+    long scaled = base + gib * perGb
+    return scaled > floor ? scaled : (long) floor
+}
+
+def positiveParam(String name) {
+    def raw = "${params[name] ?: ''}".trim()
+    if (!(raw ==~ /[1-9][0-9]{0,6}/)) {
+        error("${name} must be a positive whole number, got '${params[name]}'.")
+    }
+    return raw as int
+}
+
+// Rows of a tab-separated file with a header line, as maps keyed by the header.
+@NonCPS
+static List<Map<String, String>> parseTsv(String text) {
+    def lines = text.readLines().findAll { it }
+    if (!lines) {
+        return []
+    }
+    def header = lines[0].split('\t', -1) as List
+    return lines.drop(1).collect { line ->
+        def cols = line.split('\t', -1)
+        def row = [:]
+        header.eachWithIndex { h, i -> row[h] = i < cols.length ? cols[i] : '' }
+        row
+    }
+}
+
+// A copy of plan rows ordered by input size, largest first.
+@NonCPS
+static List largestFirst(List rows) {
+    return rows.collect { it }.sort { a, b -> (b.input_bytes as long) <=> (a.input_bytes as long) }
+}
+
+// Rethrows err if it is an abort, a timeout(), or any other interrupt of this build, so a catch meant
+// for a step's own failure never swallows it. FlowInterruptedException (abort, timeout) extends
+// InterruptedException, and instanceof needs no script approval in the sandbox.
+def rethrowIfInterrupted(err) {
+    if (err instanceof InterruptedException) {
+        throw err
+    }
+}
+
+// Runs a split worker's loop. If the build is aborted or times out, no worker in either lane takes
+// another study, and the interrupt is rethrown.
+def stopAllOnInterrupt(Map progress, Closure loop) {
+    try {
+        loop()
+    } catch (err) {
+        if (err instanceof InterruptedException) {
+            progress.stop = true
+            progress.stopReason = progress.stopReason ?: 'the build was aborted or timed out'
+        }
+        throw err
+    }
+}
+
+// Terraform variables for this build's runner pool; apply and destroy both need them. The pool
+// module is generic (etl-runners/runner-pool): the split workers need the participant DB (consents),
+// which they read from SSM at boot (TF_VAR_environment comes from common.mk), and are sized like
+// the single split runner's default.
+def runnerPoolEnv() {
+    return ["TF_VAR_run_id=${env.POOL_ID}",
+            "TF_VAR_pool_job=${env.POOL_JOB}",
+            "TF_VAR_pool_size=${env.POOL_SIZE}",
+            "TF_VAR_image_tar=${env.RUNNER_IMAGE_TAR}",
+            "TF_VAR_name_suffix=${env.BUILD_NUMBER}",
+            'TF_VAR_uses_participant_db=true',
+            'TF_VAR_instance_type=r6i.large',
+            "POOL_STATE_KEY=tf_backend/etl-runners/hpds-etl/runner-pool/${env.POOL_ID}.tfstate"]
+}
+
+// Provisions `size` runner-pool workers for `job` on this build's runner image and returns their
+// instance ids. POOL_PROVISIONED is set before the apply, so a partial apply is still destroyed.
+def startRunnerPool(String job, int size) {
+    env.POOL_ID  = "${env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')}-${job}-pool"
+    env.POOL_JOB = job
+    env.POOL_SIZE = "${size}"
+    env.POOL_PROVISIONED = 'true'
+    def ids
+    withEnv(runnerPoolEnv()) {
+        sh 'make -C etl-runners/runner-pool init apply STATE_KEY="$POOL_STATE_KEY"'
+        def out = sh(returnStdout: true, script: '''
+            cd etl-runners/runner-pool
+            TF=$(make -s tf-path)
+            $TF -chdir=terraform output -raw mailbox_s3_prefix; echo
+            $TF -chdir=terraform output -raw worker_log_s3_prefix; echo
+            $TF -chdir=terraform output -json instance_ids | jq -r '.[]'
+        ''').trim().readLines()
+        env.POOL_MAILBOX_URI = out[0].trim()
+        env.POOL_LOG_PREFIX  = out[1].trim()
+        ids = out.drop(2).collect { it.trim() }.findAll { it }
+    }
+    if (ids.size() != size || ids.any { !(it ==~ /i-[0-9a-f]+/) }) {
+        error("Runner pool ${env.POOL_ID}: expected ${size} worker instance ids, got ${ids}")
+    }
+    echo "Runner pool ${env.POOL_ID}: ${size} worker(s) ${ids}, mailboxes under ${env.POOL_MAILBOX_URI}/. " +
+         'Each boots once (a few minutes) and then takes study after study.'
+    return ids
+}
+
+// Destroys this build's runner pool, if it has one. Idempotent; a failed destroy is loud but does
+// not hide the run's own result -- the workers also terminate themselves after their idle timeout.
+def stopRunnerPool() {
+    if (env.POOL_PROVISIONED != 'true') {
+        return
+    }
+    int rc
+    withEnv(runnerPoolEnv()) {
+        rc = sh(returnStatus: true, script: 'make -C etl-runners/runner-pool destroy STATE_KEY="$POOL_STATE_KEY"')
+    }
+    if (rc == 0) {
+        env.POOL_PROVISIONED = 'false'
+        echo "Runner pool ${env.POOL_ID} destroyed."
+    } else {
+        echo "WARNING: could not destroy runner pool ${env.POOL_ID} (rc=${rc}). Its workers terminate " +
+             'themselves after 30 idle minutes; to remove them now, run `make -C etl-runners/runner-pool destroy` ' +
+             "with STATE_KEY=tf_backend/etl-runners/hpds-etl/runner-pool/${env.POOL_ID}.tfstate and the same TF_VAR_* values."
+    }
+}
+
+// The EC2 state of `instanceId` (already validated as i-...), or 'unknown'.
+def instanceState(String instanceId) {
+    return sh(returnStdout: true, script: """
+        aws ec2 describe-instances --region "\$AWS_REGION" --instance-ids ${instanceId} \\
+          --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown
+    """).trim()
+}
+
+// Deletes the shared split runner image: the tarball in S3, the local one, and the image in this
+// host's podman storage. Every split build that used it has finished by now.
+// Why a downstream build failed, as its own post-failure block recorded it in its description
+// (the job's exit meaning, or that it stopped before writing a report): " -- <reason>", or "".
+def failureDetail(downstream) {
+    String why = downstream.description?.trim()
+    return why ? " -- ${why}" : ''
+}
+
+def removeRunnerImage() {
+    if (!env.RUNNER_IMAGE_TAR) {
+        return
+    }
+    sh(returnStatus: true, script: '''
+        bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+        aws s3 rm "s3://$bucket/etl-runner/container/$RUNNER_IMAGE_TAR" --region "$AWS_REGION" || true
+        rm -f "etl-runners/split-allconcepts/$RUNNER_IMAGE_TAR"
+        docker rmi "${RUNNER_IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+    ''')
 }
 
 @NonCPS
@@ -510,4 +741,424 @@ static List<String> parseCsvLine(String line) {
     }
     fields << current.toString().trim()
     return fields
+}
+
+// The managed-inputs URI for every stage after Split AllConcepts. A study is excluded from the run,
+// without failing it, when its data is the problem:
+//   - participants-migration skips it (metrics.skippedStudyIds): no participant files at all, or a
+//     patient mapping that resolved to none of its subjects (STUDY_NEEDS_DATA_REVIEW);
+//   - Split AllConcepts excludes it (metrics.excludedStudyIds): no usable legacy allConcepts input,
+//     or its data was rejected by the split job or its validation.
+// Every later stage reads its ready list from managed inputs on its own, and would then fail on that
+// study instead -- the manifest finds no consent folders for it. So when studies were excluded, the
+// later stages get a copy of managed inputs with them marked not ready, written once under this
+// run's report prefix. Without exclusions this is MANAGED_INPUTS unchanged. Every excluded study is
+// listed, with why, in the final migration report (migration-report.sh).
+def laterStageManagedInputs() {
+    def original = params.MANAGED_INPUTS?.trim() ?: ''
+    if (env.LATER_STAGE_MANAGED_INPUTS) {
+        return env.LATER_STAGE_MANAGED_INPUTS
+    }
+    def skipped = sh(returnStdout: true, script: '''
+        {
+          for f in downstream-artifacts/participants-migration/participants-migration-*.json; do
+            [ -f "$f" ] && jq -r '(.metrics.skippedStudyIds // [])[]' "$f"
+          done
+          for f in downstream-artifacts/split-allconcepts-report-*.json; do
+            [ -f "$f" ] && jq -r '(.metrics.excludedStudyIds // [])[]' "$f"
+          done
+        } | sort -u
+    ''').trim()
+    if (!skipped || !(original ==~ /^s3:\/\/[^\/]+\/.+/)) {
+        env.LATER_STAGE_MANAGED_INPUTS = original
+        return original
+    }
+
+    env.EXCLUDED_STUDIES = skipped.readLines().join(',')
+    def bucket = original.substring('s3://'.length()).split('/')[0]
+    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def effective = "s3://${bucket}/etl-runner/reports/migration-pipeline/${tag}/managed_inputs.csv"
+    withEnv(["MI_SRC=${original}", "MI_DST=${effective}"]) {
+        // python3's csv module, not a line edit: the sheet's quoted fields can contain commas.
+        sh '''#!/bin/bash
+            set -euo pipefail
+            mkdir -p downstream-artifacts
+            aws s3 cp "$MI_SRC" managed_inputs.original.csv --only-show-errors
+            python3 - managed_inputs.original.csv downstream-artifacts/managed_inputs.later-stages.csv \
+                "$EXCLUDED_STUDIES" <<'PY'
+import csv, sys
+src, dst, skipped = sys.argv[1], sys.argv[2], set(sys.argv[3].split(","))
+with open(src, newline="", encoding="utf-8-sig") as fh:
+    rows = list(csv.reader(fh))
+sid, ready = rows[0].index("Study Identifier"), rows[0].index("Data is ready to process")
+for row in rows[1:]:
+    if len(row) > max(sid, ready) and row[sid].strip() in skipped:
+        row[ready] = "No"
+with open(dst, "w", newline="", encoding="utf-8") as fh:
+    csv.writer(fh, lineterminator="\\n").writerows(rows)
+PY
+            aws s3 cp downstream-artifacts/managed_inputs.later-stages.csv "$MI_DST" --only-show-errors
+        '''
+    }
+    echo "${skipped.readLines().size()} study/studies excluded for data problems by participants-migration or Split AllConcepts " +
+         "(${env.EXCLUDED_STUDIES}). The stages after them use ${effective}, which marks them not ready."
+    env.LATER_STAGE_MANAGED_INPUTS = effective
+    return effective
+}
+
+// The Split AllConcepts stage. A function rather than inline in pipeline {}: declarative compiles
+// the whole pipeline block into one JVM method, and this body alone pushed it past the 64 KB limit
+// ("Method too large"). Keep long stage logic out here.
+def runSplitAllConcepts() {
+    // Catch a stale form value (e.g. the pre-fix './output' default, which
+    // Jenkins keeps serving until the job re-processes its parameters block,
+    // and which Rebuild copies forward) here, once, instead of scheduling
+    // 28 downstream builds that each fail the same runner-side guard.
+    if (!params.DATA_ROOT.trim().startsWith('s3://')) {
+        error("DATA_ROOT must be an s3:// URI, got '${params.DATA_ROOT}'. A local path " +
+              'resolves inside the runner container and the split results are destroyed with the instance.')
+    }
+    def dataRoot = params.DATA_ROOT.trim().replaceAll('/+$', '')
+    if (!params.ALL_CONCEPTS_OUTPUT.trim().startsWith('s3://')) {
+        error("ALL_CONCEPTS_OUTPUT must be an s3:// URI, got '${params.ALL_CONCEPTS_OUTPUT}'. " +
+              'A local path resolves inside the runner container and is destroyed with it.')
+    }
+    if (!params.VCF_INDEXES_OUTPUT.trim().startsWith('s3://')) {
+        error("VCF_INDEXES_OUTPUT must be an s3:// URI, got '${params.VCF_INDEXES_OUTPUT}'. " +
+              'A local path resolves inside the runner container and is destroyed with it.')
+    }
+
+    // Resolve the study list from managed inputs so we can loop per study. Studies participants-migration
+    // skipped are marked not ready in this copy (see laterStageManagedInputs).
+    def managedInputsUri = params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : null
+    if (!managedInputsUri) {
+        error('MANAGED_INPUTS is required for the Split AllConcepts stage.')
+    }
+
+    def studies = []
+    // Use an env var to avoid Groovy GString injection into the shell.
+    env.MI_URI = managedInputsUri
+    def lines = sh(returnStdout: true, script: '''
+        aws s3 cp "$MI_URI" - 2>/dev/null || cat "$MI_URI" 2>/dev/null || echo ''
+    ''').trim()
+
+    if (!lines) {
+        error("Could not read managed inputs from ${managedInputsUri}")
+    }
+
+    def header = null
+    lines.readLines().each { line ->
+        if (!line.trim()) return
+        def cols = parseCsvLine(line)
+        if (header == null) {
+            header = cols
+            return
+        }
+        def studyId = cols.size() > header.indexOf('Study Identifier') && header.indexOf('Study Identifier') >= 0
+            ? cols[header.indexOf('Study Identifier')].trim() : ''
+        def abv = cols.size() > header.indexOf('Study Abbreviated Name') && header.indexOf('Study Abbreviated Name') >= 0
+            ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
+        def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
+            ? cols[header.indexOf('Data is ready to process')].trim() : ''
+        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
+            studies << [studyId: studyId, abv: abv]
+        }
+    }
+
+    def filterIds = params.STUDY_FILTER.split(',').collect { it.trim() }.findAll { it }
+    if (filterIds) {
+        studies = studies.findAll { filterIds.contains(it.studyId) }
+        echo "STUDY_FILTER active: ${studies.size()} of the ready studies match ${filterIds}"
+    }
+
+    if (studies.isEmpty()) {
+        error('No ready studies found in managed inputs for Split AllConcepts.')
+    }
+
+    echo "Split AllConcepts: ${studies.size()} study/studies to process"
+
+    int concurrency      = positiveParam('SPLIT_CONCURRENCY')
+    int largeConcurrency = positiveParam('SPLIT_LARGE_CONCURRENCY')
+    if (!(params.SPLIT_LARGE_STUDY_GB.trim() ==~ /[0-9]+/)) {
+        error("SPLIT_LARGE_STUDY_GB must be a whole number of GiB (0 sends every study to the pool), got '${params.SPLIT_LARGE_STUDY_GB}'.")
+    }
+    int largeGb = params.SPLIT_LARGE_STUDY_GB.trim() as int
+    int poolTimeoutFloor  = positiveParam('SPLIT_POOL_TIMEOUT_SECONDS')
+    int largeTimeoutFloor = positiveParam('SPLIT_LARGE_TIMEOUT_SECONDS')
+    int timeoutBase       = positiveParam('SPLIT_TIMEOUT_BASE_SECONDS')
+    int timeoutPerGb      = positiveParam('SPLIT_TIMEOUT_SECONDS_PER_GB')
+
+    // Everything about each study lands in <resultsDir>/<study_id>/ and is consolidated into
+    // one report at the end. A previous build's results in this workspace would otherwise
+    // be reported as this run's.
+    def runBase    = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def resultsDir = 'downstream-artifacts/split-allconcepts'
+    def planDir    = 'downstream-artifacts/split-plan'
+    sh "rm -rf '${resultsDir}' '${planDir}' downstream-artifacts/split-allconcepts-report-*"
+    env.SPLIT_STAGE_STARTED = sh(returnStdout: true, script: 'date +%s').trim()
+
+    def mappingTag = runBase
+    for (study in studies) {
+        study.mappingUri = "${dataRoot}/${study.studyId}/mappings/${mappingTag}/${study.studyId}_hpds_id_mapping.csv"
+    }
+
+    // --- plan: check every input in one parallel pass, size it, order largest first, pick a lane
+    writeFile file: "${planDir}/studies.tsv",
+              text: studies.collect { "${it.studyId}\t${it.abv.replaceAll(/[\t\r\n]/, ' ')}\t${it.mappingUri}" }.join('\n') + '\n'
+    int planRc
+    withEnv(["DATA_ROOT=${dataRoot}", "LARGE_STUDY_GB=${largeGb}", "PLAN_DIR=${planDir}"]) {
+        planRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/plan-studies.sh "$PLAN_DIR/studies.tsv" "$PLAN_DIR"')
+    }
+    if (planRc != 0) {
+        error("Split AllConcepts could not be planned (plan-studies.sh exit ${planRc}): some study inputs could not " +
+              'be checked in S3 -- see the plan-studies lines above. Nothing was provisioned.')
+    }
+    def plan          = parseTsv(readFile("${planDir}/plan.tsv"))
+    def missingInputs = parseTsv(readFile("${planDir}/missing.tsv"))
+    def poolQueue  = plan.findAll { it.lane == 'pool' }
+    def largeQueue = plan.findAll { it.lane == 'large' }
+
+    if (params.PREFLIGHT_ONLY) {
+        echo "Pre-flight: ${poolQueue.size()} study/studies for the runner pool, ${largeQueue.size()} large " +
+             "(${largeGb} GiB or more) for their own instances, ${missingInputs.size()} without a usable input. " +
+             "The plan is archived under ${planDir}/."
+        if (missingInputs) {
+            error("Pre-flight: no usable legacy allConcepts input for ${missingInputs*.study_id.join(', ')} -- see ${planDir}/missing.tsv.")
+        }
+        return
+    }
+
+    // Studies without a usable input fail here, each with its own result, and are not run.
+    for (m in missingInputs) {
+        withEnv(["R_OUT=${resultsDir}/${m.study_id}/study-result.json", "R_SID=${m.study_id}", "R_ABV=${m.abbreviation}",
+                 "R_REASON=${m.reason}", "R_INPUT=${m.input_uri}"]) {
+            sh '''etl-runners/split-allconcepts/record-study-result.sh --out "$R_OUT" --study "$R_SID" --abv "$R_ABV" \
+                    --lane preflight --stage preflight --reason "$R_REASON" --input-uri "$R_INPUT" >/dev/null'''
+        }
+    }
+
+    // One runner image for every split, whichever lane it runs in.
+    if (plan) {
+        env.RUNNER_IMAGE_TAR = "hpds-etl-runner-${runBase}.tar.gz"
+        sh "make -C etl-runners/split-allconcepts package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
+    }
+
+    // Upload the planned studies' mapping CSVs before fanning out. The copied artifact is a
+    // file in THIS workspace; the split job runs in a container on its own instance, so it
+    // travels via the data bucket, under {root}/{study_id}/mappings/<build-tag>/. Staged as
+    // that tree and uploaded in one recursive copy rather than one aws process per study.
+    if (plan) {
+        def noMapping = plan.findAll {
+            !fileExists("downstream-artifacts/participants-migration/${it.study_id}_hpds_id_mapping.csv")
+        }
+        if (noMapping) {
+            error("Mapping CSV not found under downstream-artifacts/participants-migration/ for: " +
+                  "${noMapping*.study_id.join(', ')}. The participants-migration copyArtifacts step may have failed.")
+        }
+        writeFile file: 'split-mappings.list', text: plan*.study_id.join('\n') + '\n'
+        env.MAPPING_TAG  = mappingTag
+        env.MAPPING_ROOT = dataRoot
+        sh '''
+            set -eu
+            rm -rf split-mappings
+            while read -r sid; do
+              [ -n "$sid" ] || continue
+              mkdir -p "split-mappings/$sid/mappings/$MAPPING_TAG"
+              cp "downstream-artifacts/participants-migration/${sid}_hpds_id_mapping.csv" \
+                 "split-mappings/$sid/mappings/$MAPPING_TAG/"
+            done < split-mappings.list
+            aws s3 cp split-mappings "$MAPPING_ROOT/" --recursive --no-progress --only-show-errors
+            echo "Uploaded $(find split-mappings -type f | wc -l | tr -d ' ') mapping CSV(s)"
+        '''
+    }
+
+    // --- run ---------------------------------------------------------------------------
+    // Two lanes, both largest first. Pool lane: SPLIT_CONCURRENCY long-lived workers, each
+    // taking study after study (run-pooled-study.sh). Own-instance lane: large studies, and
+    // every study when SPLIT_USE_RUNNER_POOL is off, each through a split-allconcepts build
+    // on an instance sized for it. Taking the next study needs no lock: pipeline Groovy runs
+    // every parallel branch on one thread and switches only at a step, and there is no step
+    // between reading a queue's cursor and advancing it.
+    def buildQueue = params.SPLIT_USE_RUNNER_POOL ? largeQueue : (largeQueue + poolQueue)
+    if (!params.SPLIT_USE_RUNNER_POOL) {
+        poolQueue = []
+        buildQueue = largestFirst(buildQueue)
+    }
+    int poolWorkers  = Math.min(concurrency, poolQueue.size())
+    int buildWorkers = Math.min(params.SPLIT_USE_RUNNER_POOL ? largeConcurrency : concurrency, buildQueue.size())
+    if (poolWorkers > 50) {
+        error("SPLIT_CONCURRENCY above 50 is not supported with the runner pool (got ${concurrency}).")
+    }
+    echo "Split AllConcepts plan: ${poolQueue.size()} study/studies on ${poolWorkers} pool worker(s), " +
+         "${buildQueue.size()} on their own instances (at most ${buildWorkers} at a time), " +
+         "${missingInputs.size()} without a usable input. Largest first."
+
+    def poolInstances = poolWorkers > 0 ? startRunnerPool('split-allconcepts', poolWorkers) : []
+    def started = [] as Set
+    def progress = [stop: false, stopReason: '', poolNext: 0, buildNext: 0, liveWorkers: poolWorkers]
+    def branches = [:]
+
+    for (int w = 1; w <= poolWorkers; w++) {
+        def poolInstance = poolInstances[w - 1]
+        def workerName = "pool-worker-${w}"
+        branches[workerName] = { stopAllOnInterrupt(progress) {
+            while (!progress.stop && progress.poolNext < poolQueue.size()) {
+                def s = poolQueue[progress.poolNext]
+                progress.poolNext = progress.poolNext + 1
+                started << s.study_id
+                int rc
+                withEnv(["STUDY_ID=${s.study_id}", "ABBREVIATION=${s.abbreviation}", "INPUT_URI=${s.input_uri}",
+                         "INPUT_BYTES=${s.input_bytes}", "MAPPING_URI=${s.mapping_uri}", "OUTPUT_URI=${dataRoot}",
+                         "RUN_ID=${runBase}-split-${s.study_id}", "POOL_INSTANCE=${poolInstance}",
+                         "POOL_MAILBOX=${env.POOL_MAILBOX_URI}", "POOL_LOG_PREFIX=${env.POOL_LOG_PREFIX}",
+                         "PIPELINE_TIMEOUT=${splitTimeoutSeconds(s.input_bytes, poolTimeoutFloor, timeoutBase, timeoutPerGb)}",
+                         "STUDY_OUT=${resultsDir}/${s.study_id}"]) {
+                    rc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/run-pooled-study.sh "$STUDY_OUT"')
+                }
+                boolean ok = rc == 0 || rc == 10
+                if (!ok && !params.CONTINUE_ON_STUDY_FAILURE) {
+                    progress.stop = true
+                    progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
+                }
+                // A dead worker takes no more studies, nor does one retired after a timeout
+                // (exit 2), which may still be running the timed-out job; the others carry on.
+                if (!ok && (rc == 2 || instanceState(poolInstance) != 'running')) {
+                    progress.liveWorkers = progress.liveWorkers - 1
+                    def why = rc == 2 ? 'was retired after a timed-out study' : 'is no longer running'
+                    echo "${workerName}: worker ${poolInstance} ${why}, so it takes no more studies " +
+                         "(${progress.liveWorkers} pool worker(s) left). Worker log: ${env.POOL_LOG_PREFIX}-${poolInstance}.log"
+                    break
+                }
+            }
+        } }
+    }
+
+    for (int w = 1; w <= buildWorkers; w++) {
+        def workerName = "own-instance-${w}"
+        branches[workerName] = { stopAllOnInterrupt(progress) {
+            while (!progress.stop && progress.buildNext < buildQueue.size()) {
+                def s = buildQueue[progress.buildNext]
+                progress.buildNext = progress.buildNext + 1
+                started << s.study_id
+                boolean large = s.lane == 'large'
+                long t0 = System.currentTimeMillis().intdiv(1000)
+                def buildUrl = ''
+                def buildReason = ''
+                def studyTimeout = splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)
+                echo "[${s.study_id}] own instance (${large ? "large, ${s.volume_gb} GiB volume, ${params.SPLIT_LARGE_INSTANCE_TYPE.trim()}" : 'default size'}; timeout ${studyTimeout}s)"
+                try {
+                    def downstream = build(
+                        job: params.SPLIT_ALLCONCEPTS_JOB,
+                        wait: true,
+                        propagate: false,
+                        parameters: [
+                            string(name: 'STUDY_ID',            value: s.study_id),
+                            string(name: 'ABBREVIATION',        value: s.abbreviation),
+                            string(name: 'INPUT',               value: s.input_uri),
+                            string(name: 'MAPPING',             value: s.mapping_uri),
+                            string(name: 'OUTPUT',              value: dataRoot),
+                            string(name: 'RUN_ID',              value: "${runBase}-split-${s.study_id}"),
+                            string(name: 'PREBUILT_IMAGE_TAR',  value: env.RUNNER_IMAGE_TAR ?: ''),
+                            string(name: 'INSTANCE_TYPE',       value: large ? params.SPLIT_LARGE_INSTANCE_TYPE.trim() : 'r6i.large'),
+                            string(name: 'ROOT_VOLUME_GB',      value: large ? s.volume_gb : '50'),
+                            string(name: 'JOB_TIMEOUT_SECONDS', value: "${splitTimeoutSeconds(s.input_bytes, large ? largeTimeoutFloor : poolTimeoutFloor, timeoutBase, timeoutPerGb)}"),
+                            string(name: 'ENV',                 value: params.ENV),
+                            booleanParam(name: 'SKIP_TESTS',     value: true),
+                            booleanParam(name: 'PREFLIGHT_ONLY', value: false),
+                        ])
+                    buildUrl = downstream.absoluteUrl
+                    buildReason = "${params.SPLIT_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)} " +
+                                  "before its runner reported a status; see ${downstream.absoluteUrl}console"
+                    try {
+                        copyArtifacts(projectName: params.SPLIT_ALLCONCEPTS_JOB, selector: specific("${downstream.number}"),
+                                      target: "${resultsDir}/${s.study_id}/build", optional: true)
+                    } catch (err) {
+                        rethrowIfInterrupted(err)
+                        echo "[${s.study_id}] could not copy the build's reports (${err.message}); they remain on ${downstream.absoluteUrl}"
+                    }
+                } catch (err) {
+                    rethrowIfInterrupted(err)
+                    buildReason = "could not run ${params.SPLIT_ALLCONCEPTS_JOB}: ${err.message}"
+                }
+                // Same validation and result file as a pool-lane study, from the build's reports.
+                int rc
+                withEnv(["STUDY_ID=${s.study_id}", "ABBREVIATION=${s.abbreviation}", "INPUT_URI=${s.input_uri}",
+                         "INPUT_BYTES=${s.input_bytes}", "LANE=${large ? 'large' : 'pool'}",
+                         "RUN_ID=${runBase}-split-${s.study_id}", "STUDY_OUT=${resultsDir}/${s.study_id}",
+                         "DOWNSTREAM_URL=${buildUrl}", "DOWNSTREAM_REASON=${buildReason}", "T0=${t0}"]) {
+                    rc = sh(returnStatus: true, script: '''
+                        set +ex
+                        R="$STUDY_OUT/build/etl-runners/split-allconcepts/reports"
+                        mkdir -p "$R"
+                        run=""
+                        [ -f "$R/status.json" ] && run=$(jq -r '.runId // empty' "$R/status.json")
+                        [ -n "$run" ] || run="$RUN_ID"
+                        case "$run" in *-r[0-9]*) attempts=2 ;; *) attempts=1 ;; esac
+                        vrc=""
+                        if [ -f "$R/split-allconcepts-$run.json" ]; then
+                          etl-runners/split-allconcepts/validate.sh "$R" "$run" > "$STUDY_OUT/validation.txt" 2>&1 && vrc=0 || vrc=$?
+                        fi
+                        set --
+                        [ -f "$R/status.json" ] || set -- --reason "$DOWNSTREAM_REASON"
+                        outcome=$(etl-runners/split-allconcepts/record-study-result.sh --out "$STUDY_OUT/study-result.json" \
+                          --study "$STUDY_ID" --abv "$ABBREVIATION" --lane "$LANE" --run-id "$run" --attempts "$attempts" \
+                          --reports-dir "$R" --validation-rc "$vrc" --validation-file "$STUDY_OUT/validation.txt" \
+                          --input-uri "$INPUT_URI" --input-bytes "$INPUT_BYTES" --build-url "$DOWNSTREAM_URL" \
+                          --started-epoch "$T0" --finished-epoch "$(date +%s)" "$@") || outcome=FAILED
+                        echo "[$STUDY_ID] $outcome$( [ "$outcome" = SUCCESS ] || [ "$outcome" = SUCCESS_WITH_WARNINGS ] || \
+                          jq -r '": " + (.failureReason // "")' "$STUDY_OUT/study-result.json" 2>/dev/null)"
+                        case "$outcome" in SUCCESS) exit 0 ;; SUCCESS_WITH_WARNINGS) exit 10 ;; *) exit 1 ;; esac
+                    ''')
+                }
+                if (rc != 0 && rc != 10 && !params.CONTINUE_ON_STUDY_FAILURE) {
+                    progress.stop = true
+                    progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
+                }
+            }
+        } }
+    }
+
+    try {
+        if (branches) {
+            parallel branches
+        }
+    } finally {
+        // Every study is done: stop paying for idle workers now, not at the end of the build.
+        stopRunnerPool()
+    }
+
+    // Studies never started: the run was stopped early, or every pool worker died or was retired.
+    for (s in plan.findAll { !(it.study_id in started) }) {
+        def why = progress.stopReason ?: (s.lane == 'pool' && progress.liveWorkers == 0
+                    ? 'every runner-pool worker died or was retired after a timeout before reaching it; see the worker logs'
+                    : 'no worker was left to run it')
+        withEnv(["R_OUT=${resultsDir}/${s.study_id}/study-result.json", "R_SID=${s.study_id}",
+                 "R_ABV=${s.abbreviation}", "R_LANE=${s.lane}", "R_REASON=not started: ${why}",
+                 "R_INPUT=${s.input_uri}", "R_BYTES=${s.input_bytes}"]) {
+            sh '''etl-runners/split-allconcepts/record-study-result.sh --out "$R_OUT" --study "$R_SID" --abv "$R_ABV" \
+                    --lane "$R_LANE" --stage not-started --reason "$R_REASON" --input-uri "$R_INPUT" \
+                    --input-bytes "$R_BYTES" >/dev/null'''
+        }
+    }
+
+    // --- one report for the whole stage ----------------------------------------------------
+    int reportRc
+    withEnv(["STAGE_STARTED_EPOCH=${env.SPLIT_STAGE_STARTED}", "LARGE_STUDY_GB=${largeGb}",
+             "POOL_WORKERS=${poolWorkers}", "RESULTS_DIR=${resultsDir}", "REPORT_RUN=${runBase}"]) {
+        reportRc = sh(returnStatus: true, script: 'etl-runners/split-allconcepts/split-report.sh "$RESULTS_DIR" "$REPORT_RUN" downstream-artifacts')
+    }
+    def reportMd = "downstream-artifacts/split-allconcepts-report-${runBase}.md"
+    // Worked out above from participants-migration alone; the stages after this one must also leave
+    // out the studies this stage excluded for data problems, so it is worked out again on next use.
+    env.LATER_STAGE_MANAGED_INPUTS = ''
+    // Archived now, so the report is on the build page while the later stages run.
+    archiveArtifacts artifacts: "downstream-artifacts/split-allconcepts-report-*, ${resultsDir}/**, ${planDir}/**",
+                     allowEmptyArchive: true
+    if (reportRc == 10) {
+        unstable("Split AllConcepts completed with warnings; see ${reportMd} (archived on this build).")
+    } else if (reportRc != 0) {
+        def summary = reportRc == 1 ? sh(returnStdout: true, script: "jq -r '.errorMessage // empty' 'downstream-artifacts/split-allconcepts-report-${runBase}.json' 2>/dev/null || true").trim() : ''
+        error("Split AllConcepts failed: ${summary ?: "the report could not be written (split-report.sh exit ${reportRc})"}. " +
+              "Each failed study's reason, logs and re-run setting are in ${reportMd} (archived on this build).")
+    }
 }

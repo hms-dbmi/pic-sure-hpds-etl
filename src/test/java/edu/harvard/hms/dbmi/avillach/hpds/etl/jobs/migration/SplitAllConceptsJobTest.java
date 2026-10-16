@@ -77,8 +77,8 @@ class SplitAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        Path c1File = outputDir.resolve("split_allconcepts/phs001412/c1/FHS_allConcepts_c1.csv");
-        Path c2File = outputDir.resolve("split_allconcepts/phs001412/c2/FHS_allConcepts_c2.csv");
+        Path c1File = outputDir.resolve("phs001412/allConcepts/c1/phs001412_allConcepts_c1.csv");
+        Path c2File = outputDir.resolve("phs001412/allConcepts/c2/phs001412_allConcepts_c2.csv");
         assertThat(c1File).exists();
         assertThat(c2File).exists();
 
@@ -93,6 +93,10 @@ class SplitAllConceptsJobTest {
         assertThat(c2Lines).hasSize(1);
         assertThat(c2Lines.get(0)).contains(String.valueOf(id2));
         assertThat(c2Lines.get(0)).contains("55");
+
+        // c1 has two rows for one participant: rows and participants are counted separately.
+        assertThat(result.getMetrics().get("rowsPerConsent")).isEqualTo(Map.of("1", 2L, "2", 1L));
+        assertThat(result.getMetrics().get("participantsPerConsent")).isEqualTo(Map.of("1", 1L, "2", 1L));
     }
 
     @Test
@@ -115,7 +119,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-upper");
 
-        Path expected = outputDir.resolve("split_allconcepts/phs000999/c1/LOWCASE_allConcepts_c1.csv");
+        Path expected = outputDir.resolve("phs000999/allConcepts/c1/phs000999_allConcepts_c1.csv");
         assertThat(expected).exists();
     }
 
@@ -139,7 +143,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-no-old-ids");
 
-        Path outFile = outputDir.resolve("split_allconcepts/phs000111/c1/TST_allConcepts_c1.csv");
+        Path outFile = outputDir.resolve("phs000111/allConcepts/c1/phs000111_allConcepts_c1.csv");
         String content = Files.readString(outFile, StandardCharsets.UTF_8);
         assertThat(content).doesNotContain("old-legacy-id-999");
         assertThat(content).contains(String.valueOf(id1));
@@ -259,7 +263,7 @@ class SplitAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getInputValidation().getIssues())
-                .anyMatch(i -> i.code().equals("INVALID_STUDY_ID"));
+                .anyMatch(i -> i.code().equals("BAD_STUDY_ID"));
     }
 
     @Test
@@ -307,7 +311,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-format");
 
-        Path outFile = outputDir.resolve("split_allconcepts/phs000777/c1/TST_allConcepts_c1.csv");
+        Path outFile = outputDir.resolve("phs000777/allConcepts/c1/phs000777_allConcepts_c1.csv");
         String line = Files.readAllLines(outFile, StandardCharsets.UTF_8).getFirst();
         assertThat(line).isEqualTo(
                 "\"%s\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"".formatted(id1));
@@ -333,7 +337,7 @@ class SplitAllConceptsJobTest {
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-quotes");
 
-        Path outFile = outputDir.resolve("split_allconcepts/phs000888/c1/TST_allConcepts_c1.csv");
+        Path outFile = outputDir.resolve("phs000888/allConcepts/c1/phs000888_allConcepts_c1.csv");
         String line = Files.readAllLines(outFile, StandardCharsets.UTF_8).getFirst();
         assertThat(line).contains("value with \"\"quotes\"\"");
     }
@@ -369,8 +373,8 @@ class SplitAllConceptsJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        Path c1 = outputDir.resolve("split_allconcepts/phs000123/c1/MUL_allConcepts_c1.csv");
-        Path c2 = outputDir.resolve("split_allconcepts/phs000123/c2/MUL_allConcepts_c2.csv");
+        Path c1 = outputDir.resolve("phs000123/allConcepts/c1/phs000123_allConcepts_c1.csv");
+        Path c2 = outputDir.resolve("phs000123/allConcepts/c2/phs000123_allConcepts_c2.csv");
         assertThat(c1).exists();
         assertThat(c2).exists();
         assertThat(Files.readAllLines(c1)).hasSize(2);
@@ -393,5 +397,36 @@ class SplitAllConceptsJobTest {
         Path path = tempDir.resolve("allconcepts_" + System.nanoTime() + ".csv");
         Files.writeString(path, String.join("\n", rows) + "\n");
         return path;
+    }
+
+    @Test
+    void counts_malformed_rows_and_attaches_the_unmapped_sample() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs000777";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µtestµ\",\"\",\"mapped\",\"0\"",
+                "\"999\",\"µtestµ\",\"\",\"unmapped\",\"0\"",
+                "\"100\",\"µtestµ\",\"\",\"short\"",
+                "\"\",\"µtestµ\",\"\",\"blank id\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "TST",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", tempDir.resolve("output").toString()), "test-malformed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics()).containsEntry("malformedRows", 2L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MALFORMED_ROWS") && i.message().startsWith("2 row(s)"))
+                .anyMatch(i -> i.code().equals("UNMAPPED_IDS")
+                        && i.context().get("firstOldHpdsIds").equals(List.of("999"))
+                        && i.context().get("count").equals(1L));
     }
 }

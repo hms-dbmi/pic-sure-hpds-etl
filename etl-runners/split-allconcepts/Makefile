@@ -12,7 +12,7 @@ NAME := split-allconcepts
 
 include ../common.mk
 
-.PHONY: preflight validate
+.PHONY: preflight validate test
 
 # Cheap checks against the input layout, run BEFORE any instance is provisioned.
 preflight:
@@ -21,3 +21,8 @@ preflight:
 # Post-run assertions over the reports fetched by `make fetch-reports`.
 validate:
 	@./validate.sh $(REPORTS_DIR) "$(TF_VAR_run_id)"
+
+# The Split AllConcepts stage scripts (plan-studies, run-pooled-study, record-study-result,
+# split-report) against a stubbed aws CLI; no AWS access needed.
+test:
+	@./test/run-tests.sh
