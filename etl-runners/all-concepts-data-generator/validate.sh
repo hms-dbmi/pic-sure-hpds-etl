@@ -20,7 +20,7 @@ REGION="${AWS_REGION:-us-east-1}"
 REPORT="$REPORTS_DIR/all-concepts-data-generator-${RUN_ID}.json"
 
 if [[ ! -f "$REPORT" ]]; then
-    echo "FAIL: report not found: $REPORT"
+    echo "FAIL: no report at $REPORT. The job writes it as it finishes, so the job stopped early (timeout, crash or lost instance); its exit code and runner log say why."
     exit 1
 fi
 

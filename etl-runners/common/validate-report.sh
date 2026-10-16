@@ -30,7 +30,7 @@ echo "Validating report: $REPORT"
 if [[ ! -f "$REPORT" ]]; then
   # A missing report means the JAR never got far enough to write one -- the run did not
   # merely fail, it failed before it could explain itself.
-  fail "report file does not exist: $REPORT"
+  fail "report file does not exist: $REPORT (the job writes it as it finishes, so the job stopped early: timeout, crash or lost instance; its exit code and runner log say why)"
   summary
   exit 1
 fi

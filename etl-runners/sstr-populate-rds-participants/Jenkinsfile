@@ -292,6 +292,13 @@ pipeline {
             when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
             steps {
                 script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/sstr-populate-rds-participants-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
                     int rc = sh(returnStatus: true, script:
                         "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
@@ -299,11 +306,13 @@ pipeline {
                     // load that exits 0 but wrote fewer consent rows than it found subjects
                     // is still a failed load.
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
                     }
                     echo "Study ${params.STUDY_ID} validated: consent rows match distinct participants and every group is accounted for."
@@ -338,8 +347,12 @@ pipeline {
             }
         }
         failure {
-            echo "sstr-populate-rds-participants FAILED for ${params.STUDY_ID} at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''} On exit 3 the study was rolled back and RDS is unchanged — " +
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "sstr-populate-rds-participants FAILED for ${params.STUDY_ID}: ${currentBuild.description}. On exit 3 the study was rolled back and RDS is unchanged — " +
                  "fix the file and re-run. Reports are archived on this build; the full runner log is in S3 " +
                  "under etl-runner/logs/sstr-populate-rds-participants-${env.EFFECTIVE_RUN_ID}.log"
         }

@@ -202,7 +202,7 @@ pipeline {
                             string(name: 'ENV',    value: params.ENV),
                         ])
                     if (downstream.result != 'SUCCESS') {
-                        error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}: the participant " +
+                        error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the participant " +
                               'database did not come up -- see that job\'s console.')
                     }
                     // Only now does post { always } own the end-of-run backup. A failed start changed
@@ -254,7 +254,7 @@ pipeline {
                     if (downstream.result == 'UNSTABLE') {
                         unstable('participants-migration completed with validation warnings')
                     } else if (downstream.result != 'SUCCESS') {
-                        error("participants-migration #${downstream.number} ended ${downstream.result}")
+                        error("participants-migration #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
                 }
             }
@@ -316,7 +316,7 @@ pipeline {
                     if (downstream.result == 'UNSTABLE') {
                         unstable("${params.ALL_CONCEPTS_JOB} #${downstream.number} completed with warnings")
                     } else if (downstream.result != 'SUCCESS') {
-                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} ended ${downstream.result}")
+                        error("${params.ALL_CONCEPTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
 
                     try {
@@ -361,7 +361,7 @@ pipeline {
                     if (downstream.result == 'UNSTABLE') {
                         unstable('Create VCF indexes completed with warnings')
                     } else if (downstream.result != 'SUCCESS') {
-                        error("${params.VCF_INDEXES_JOB} #${downstream.number} ended ${downstream.result}")
+                        error("${params.VCF_INDEXES_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
 
                     try {
@@ -408,7 +408,7 @@ pipeline {
                     if (downstream.result == 'UNSTABLE') {
                         unstable("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} completed with warnings")
                     } else if (downstream.result != 'SUCCESS') {
-                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result}")
+                        error("${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}")
                     }
 
                     try {
@@ -460,7 +460,7 @@ pipeline {
                     if (downstream.result == 'UNSTABLE') {
                         unstable("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} completed with warnings")
                     } else if (downstream.result != 'SUCCESS') {
-                        error("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} ended ${downstream.result}: " +
+                        error("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: " +
                               'the manifest was NOT updated. Its report lists every missing or stale MERGED file.')
                     }
                 }
@@ -546,7 +546,7 @@ def backupParticipantDb(String backupJob, String envName) {
         ])
     if (downstream.result != 'SUCCESS') {
         currentBuild.result = 'FAILURE'
-        echo "ERROR: ${backupJob} #${downstream.number} ended ${downstream.result}: this run's writes are in the " +
+        echo "ERROR: ${backupJob} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: this run's writes are in the " +
              "live participant database but in no verified backup. Re-run ${backupJob} " +
              "(PROMOTE_BACKUP=${promote}) before the next pipeline run."
     }
@@ -662,6 +662,13 @@ def instanceState(String instanceId) {
 
 // Deletes the shared split runner image: the tarball in S3, the local one, and the image in this
 // host's podman storage. Every split build that used it has finished by now.
+// Why a downstream build failed, as its own post-failure block recorded it in its description
+// (the job's exit meaning, or that it stopped before writing a report): " -- <reason>", or "".
+def failureDetail(downstream) {
+    String why = downstream.description?.trim()
+    return why ? " -- ${why}" : ''
+}
+
 def removeRunnerImage() {
     if (!env.RUNNER_IMAGE_TAR) {
         return
@@ -1027,7 +1034,7 @@ def runSplitAllConcepts() {
                             booleanParam(name: 'PREFLIGHT_ONLY', value: false),
                         ])
                     buildUrl = downstream.absoluteUrl
-                    buildReason = "${params.SPLIT_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result} " +
+                    buildReason = "${params.SPLIT_ALLCONCEPTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)} " +
                                   "before its runner reported a status; see ${downstream.absoluteUrl}console"
                     try {
                         copyArtifacts(projectName: params.SPLIT_ALLCONCEPTS_JOB, selector: specific("${downstream.number}"),

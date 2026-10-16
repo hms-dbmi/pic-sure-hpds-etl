@@ -370,15 +370,24 @@ pipeline {
             when { expression { !params.PREFLIGHT_ONLY && (env.TF_INITIALISED == 'true' || env.POOL_DISPATCHED == 'true') } }
             steps {
                 script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/split-allconcepts-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
                     int rc = sh(returnStatus: true, script:
                         "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc})")
                     }
                     echo "Split allConcepts validated for study ${params.STUDY_ID}."
@@ -410,8 +419,12 @@ pipeline {
             }
         }
         failure {
-            echo "split-allconcepts FAILED for study ${params.STUDY_ID} at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''}"
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "split-allconcepts FAILED for study ${params.STUDY_ID}: ${currentBuild.description}."
         }
         unstable {
             echo "split-allconcepts completed WITH WARNINGS for study ${params.STUDY_ID}."

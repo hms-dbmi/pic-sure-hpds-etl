@@ -14,7 +14,7 @@ RUN_ID="${2:?Usage: validate.sh <reports-dir> <run-id>}"
 REPORT="$REPORTS_DIR/create-vcf-indexes-${RUN_ID}.json"
 
 if [[ ! -f "$REPORT" ]]; then
-    echo "FAIL: report not found: $REPORT"
+    echo "FAIL: no report at $REPORT. The job writes it as it finishes, so the job stopped early (timeout, crash or lost instance); its exit code and runner log say why."
     exit 1
 fi
 
