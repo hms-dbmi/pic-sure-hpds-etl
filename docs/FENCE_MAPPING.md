@@ -117,6 +117,10 @@ writes the production `general/data/metadata_new_search.json`:
 
 ## Proposal for the PSAMA team: a lean shape
 
+**This is a proposal only.** Neither PSAMA nor this repo's validator and schema support it: the
+validator accepts the legacy shape (`bio_data_catalyst`) and would reject a file in the shape below
+(unknown root properties). Nothing validates it yet.
+
 Only four values drive behaviour; the other 19 are display metadata that belongs in the data
 dictionary, and carrying them makes every unknown-field typo fatal. A proposed replacement:
 
@@ -139,5 +143,5 @@ dictionary, and carrying them makes every unknown-field typo fatal. A proposed r
 - PSAMA should validate on load and refuse to start (or keep the previous mapping) on any error,
   instead of logging and continuing with an empty mapping.
 
-This is a proposal only; nothing in this repo or in PSAMA implements it. The validator accepts the
-legacy shape.
+If PSAMA adopts it, this repo's schema and validator would need a second schema for the new shape;
+until then, treat the legacy file as the only validated format.

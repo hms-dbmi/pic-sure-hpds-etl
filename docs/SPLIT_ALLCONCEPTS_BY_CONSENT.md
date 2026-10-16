@@ -27,6 +27,11 @@ Both `\` and the legacy `µ` delimiters are accepted.
 
 ## What it does
 
+0. **Pin the input.** The job reads the input's identity first (S3 `versionId` and `eTag`; for a local
+   file, size and mtime) and opens both passes against exactly that object: `GetObject` with the
+   `versionId` when the bucket is versioned, otherwise `If-Match: eTag`. After each pass it checks the
+   identity again. If the object was replaced in between, the run fails with `INFRASTRUCTURE_ERROR`
+   (exit 4, "Input changed since it was first read") before anything is uploaded.
 1. **Pass 1** streams the input. Every row is checked against the CSVLoader contract (below), and for
    rows whose path equals `consents-path` the job records patient to set of `tval` values, for
    example `phs123456.c1`.
@@ -71,8 +76,9 @@ Run on every row before anything is written; any violation is an error and **not
   needs an integer column 0 (`Integer.parseInt`);
 - exactly 5 fields;
 - `concept_path` non-empty;
-- `nval` blank or a number (`Double.parseDouble` aborts otherwise; the check is the stricter Table
-  Schema number);
+- `nval` blank or accepted by `Double.parseDouble(nval.trim())`, exactly CSVLoader's test (so padded
+  values, `NaN` and `Infinity` pass; `1,5` fails). The Table Schema type `number` is a little
+  stricter; the Java check follows what CSVLoader will actually accept;
 - `timestamp` blank or `^-?[0-9]+$` and fits 64 bits (`Long.parseLong`).
 
 Reported but not rejected: rows with timestamp `0` (info `TIMESTAMP_ZERO`) and positive timestamps
@@ -88,7 +94,11 @@ Partition names must not contain `-` (the file suffix is `-allConcepts.csv`), a 
 - A non-empty output prefix is refused unless `force=true`; with `force`, same-named files are
   overwritten. Nothing is ever deleted.
 - The Jenkins job sets `force` on the retry after an infrastructure failure, since the first attempt
-  may have uploaded some partitions.
+  may have uploaded some partitions. The retry does not compare itself with a manifest a partial
+  attempt may have left (the manifest is written last, so an attempt that died earlier leaves none);
+  pinning means each attempt is internally consistent, and a retry that finds a replaced input fails
+  rather than mixing versions. Compare `input.versionId`/`input.eTag` in the final manifest with the
+  object you expect.
 
 ## Manifest
 
@@ -108,8 +118,13 @@ Partition names must not contain `-` (the file suffix is `-allConcepts.csv`), a 
 Rows are counted by **source row**: `input = study + global + dropped` must hold (`balanced`). Lines in
 the partition files can exceed that because a row is repeated for a multi-consent patient and, in
 `by-patient` mode, for each partition; `extraCopies = partitionLines - study - global` records that
-separately. Per-partition `rows` is the number of lines in that file. S3 VersionId/ETag of the input
-are not recorded because `IoResolver` does not expose them.
+separately. Per-partition `rows` is the number of lines in that file. `input` records the pinned
+object: `uri`, `versionId` (null on a never-versioned bucket), `eTag`, `size`, `lastModifiedMillis`
+(`versionId` and `eTag` are null for a local file). `studyNodesWithoutConsents` lists the nodes below.
+
+`STUDY_NODE_WITHOUT_CONSENTS` (warning, both globals modes): a `phsNNNNNN` node at `depth` that is
+not a study in `consents-path` is handled as a global variable (own partition, or copied by patient),
+and listed in the report and the manifest. It usually means a study whose consents are missing.
 
 ## fence_mapping cross-check (report-only)
 

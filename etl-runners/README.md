@@ -33,7 +33,8 @@ etl-runners/
 ├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT)
 ├── generate-global-all-concepts/       PERMANENT (JobType.PERMANENT)
 ├── create-vcf-indexes/                 PERMANENT (JobType.PERMANENT)
-└── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone
+├── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone
+└── split-allconcepts-by-consent/       PERMANENT (JobType.PERMANENT), standalone; has test/run-tests.sh
 ```
 
 ## Shared Components
@@ -129,6 +130,7 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `generate-global-all-concepts`      | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_allow_empty`     |
 | `create-vcf-indexes`                | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_include_processed` |
 | `generate-identity-consent-mapping` | `TF_VAR_base_uri`, `TF_VAR_dataset_prefix`, `TF_VAR_input_role_arn`, `TF_VAR_output_uri`, `TF_VAR_per_study` |
+| `split-allconcepts-by-consent`      | `TF_VAR_input_uri`, `TF_VAR_output_uri`, `TF_VAR_depth`, `TF_VAR_globals`, `TF_VAR_fence_mapping`, `TF_VAR_consents_path`, `TF_VAR_force`, `TF_VAR_root_volume_size` (see `docs/SPLIT_ALLCONCEPTS_BY_CONSENT.md`) |
 
 ### Validation Expectations
 
