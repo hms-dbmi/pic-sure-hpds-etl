@@ -95,7 +95,7 @@ Jenkins agent                          ephemeral EC2 (self-terminating)
 docker build          ─ hpds-etl-runner image
 docker save | gzip    ─▶ s3://<stack>/etl-runner/container/<run>.tar.gz
 terraform apply       ─▶ launch instance ──▶ user_data:
-                                              fetch RDS creds (Secrets Manager, instance role)
+                                              fetch participant DB creds (SSM, instance role)
                                               docker load + docker run
                                               java -jar hpds-etl.jar --job=… --run-id=…
                                               sync /reports  ─▶ s3://…/etl-runner/reports/<run>/
@@ -174,7 +174,8 @@ are treated as independent gates: a load that exits `0` but wrote fewer consent 
 found subjects is still a failed load.
 
 **All jobs** (`common/validate-report.sh`): valid JSON, `status == SUCCESS`, a success exit code,
-zero input- and output-validation errors, no `errorMessage`. Warnings are surfaced, not swallowed.
+zero input- and output-validation errors, no `errorMessage`. Validation warnings, or an exit code of
+`SUCCESS_WITH_WARNINGS`, are reported as warnings: exit 10, so the build is UNSTABLE.
 
 **`sstr-populate-rds-participants`** — two metrics are exact invariants rather than heuristics:
 
@@ -252,34 +253,42 @@ This is the same agent the BDC ETL runners use, plus JDK 25.
 
 ## AWS Setup
 
-### 1. RDS Secret
+### 1. Participant DB Credentials
 
-Create a Secrets Manager secret holding the ETL user's credentials, then set `rds_secret_id` in
-both `terraform/*.tfvars`. Either shape is accepted:
-
-```json
-{ "url": "jdbc:postgresql://host:5432/hpds", "username": "hpds_etl", "password": "…" }
-```
-
-```json
-{ "host": "host", "port": 5432, "dbname": "hpds", "username": "hpds_etl", "password": "…" }
-```
-
-The second is what an RDS-managed secret produces, so a rotated secret works unchanged.
+`participant-db-start` generates the app role's password, rotating it on every start, and
+publishes the connection details as the SSM SecureString
+`/hpds-etl/<ENV>/participant-db/app-credentials` (the name comes from
+`etl-runners/common/db-credentials-path.sh`). Each DB-backed runner (`uses_participant_db = true`)
+reads it at boot with its instance role, and connects with `sslmode=require`. Details in
+[PARTICIPANT_DB.md](PARTICIPANT_DB.md#credentials).
 
 ### 2. IAM
 
 `jenkins-s3-role` needs:
 
-- `secretsmanager:GetSecretValue` on the secret
+- `ssm:GetParameter` on `arn:aws:ssm:<region>:<account>:parameter/hpds-etl/<ENV>/participant-db/app-credentials`
+  (runners at boot, and `require-db.sh` on the Jenkins server), plus `ssm:PutParameter` on the same
+  ARN for the Jenkins server (`participant-db-start`)
+- `kms:Decrypt` (runners, `require-db.sh`) and `kms:Encrypt` / `kms:GenerateDataKey`
+  (`participant-db-start`) on the parameter's key, via `kms:ViaService = ssm.<region>.amazonaws.com`.
+  With the AWS-managed `alias/aws/ssm` key, the SSM permissions alone are enough
 - read on the input buckets
 - read/write on the stack bucket's `etl-runner/*` prefixes
 - `AmazonSSMManagedInstanceCore`
 
-The full policy is in
-[`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md). The role
-is shared with the BDC pipelines and managed centrally, which is why `manage_secret_access`
-defaults to `false`.
+```json
+{ "Effect": "Allow",
+  "Action": ["ssm:GetParameter", "ssm:PutParameter"],
+  "Resource": "arn:aws:ssm:us-east-1:<account>:parameter/hpds-etl/*/participant-db/app-credentials" },
+{ "Effect": "Allow",
+  "Action": ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"],
+  "Resource": "<arn of the parameter's KMS key>",
+  "Condition": { "StringEquals": { "kms:ViaService": "ssm.us-east-1.amazonaws.com" } } }
+```
+
+The runner-side statements are also in
+[`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md#iam). The role
+is shared with the BDC pipelines and managed centrally, so the code creates no IAM resources.
 
 ### 3. Networking
 
@@ -289,10 +298,11 @@ so this is the one setting that configuration cannot vouch for. Confirm it befor
 
 ### Credential Handling
 
-Credentials never reach Jenkins. Terraform receives the secret's id, never its value, so nothing
-sensitive enters Terraform state, the console log, or the EC2 user-data blob. On the instance the
-values are written to a `600`-mode file passed as `docker --env-file`, keeping them out of the
-process table and `docker inspect`. `xtrace` is disabled in the bootstrap for the same reason.
+Credentials never reach Jenkins' console, Terraform variables, Terraform state or the EC2
+user-data blob: Terraform passes only the SSM parameter's name. On the instance the values are
+written to a `600`-mode file passed as `--env-file` (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`),
+keeping them out of the process table and `inspect` output. `xtrace` is disabled in the bootstrap
+for the same reason. The password is rotated on every `participant-db-start` with a run id.
 
 ---
 

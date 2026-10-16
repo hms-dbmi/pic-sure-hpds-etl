@@ -8,9 +8,10 @@
 // BDC-DMC-Harmonization-Examples-YYYYMMDD drop is selected deterministically.
 //
 // Standalone job (not part of the orchestrator DAG): run it when a new DMC drop
-// lands. Touches no database. Input reads happen in-process under ROLE_ARN
-// (the NHLBI exchange role); output writes go through the container's default
-// credentials (CONTAINER_ASSUME_ROLE_ARN, dbgap-etl).
+// lands. Touches no database (so it runs whether or not the participant DB is
+// up). Input reads happen in-process under ROLE_ARN (the NHLBI exchange role,
+// assumed by the instance role); output writes go through the container's
+// default credentials, i.e. the instance role bdc-etl-jenkins-role.
 //
 // Inputs
 //   --base            bucket/prefix holding the DMC drops
@@ -41,6 +42,9 @@ pipeline {
 
     options {
         timestamps()
+        // Lets an orchestrator copy this job's reports. Neither calls this job yet; set so it
+        // matches the other runner jobs.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
         timeout(time: 2, unit: 'HOURS')
@@ -53,7 +57,7 @@ pipeline {
                description: '--dataset-prefix: pin one drop, e.g. BDC-DMC-Harmonization-Examples-20260804. Blank = latest by date (deterministic).')
         string(name: 'ROLE_ARN', defaultValue: 'arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3',
                description: '--role-arn: IAM role the job assumes in-process for all reads of the base (same role name in both NHLBI accounts).')
-        string(name: 'OUTPUT', defaultValue: 's3://avillach-73-bdcatalyst-etl/dmcharmonizedexamples/output/',
+        string(name: 'OUTPUT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/dmcharmonizedexamples/output/',
                description: '--output: where the mapping CSV(s) are written. The default prefix is TEMPORARY until the staging decision (S3 vs RDS) settles on ALS-12727.')
         booleanParam(name: 'PER_STUDY', defaultValue: false,
                description: '--per-study: one CSV per study instead of a single combined file.')
@@ -67,16 +71,14 @@ pipeline {
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container default credential chain (used for the output writes). Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate inputs and stop without provisioning anything')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
         AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
@@ -87,7 +89,6 @@ pipeline {
         TF_VAR_input_role_arn            = "${params.ROLE_ARN.trim()}"
         TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
         TF_VAR_per_study                 = "${params.PER_STUDY}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -97,15 +98,11 @@ pipeline {
 
         stage('Init') {
             steps {
-                // Two agent-side profiles: dbgap-etl for the output bucket checks,
-                // nhlbi-exchange (the ROLE_ARN param) for the exchange bucket checks.
+                // One agent-side profile, nhlbi-exchange (the ROLE_ARN param), for the
+                // exchange bucket checks. Everything else -- the output bucket included --
+                // runs as the agent's own role (bdc-etl-jenkins-role).
                 sh '''
                     cat > "$AWS_CONFIG_FILE" <<EOF
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-
 [profile nhlbi-exchange]
 role_arn = $TF_VAR_input_role_arn
 credential_source = Ec2InstanceMetadata
@@ -163,13 +160,11 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc})")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
                     }
                 }
             }
@@ -248,18 +243,24 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
             steps {
                 script {
-                    int rc
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        rc = sh(returnStatus: true, script:
-                            "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/generate-identity-consent-mapping-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
                     }
+                    int rc = sh(returnStatus: true, script:
+                        "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
                     }
                     echo "Identity consent mapping generated and validated."
@@ -290,8 +291,12 @@ EOF
             }
         }
         failure {
-            echo "generate-identity-consent-mapping FAILED at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''} Reports are archived on this build."
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "generate-identity-consent-mapping FAILED: ${currentBuild.description}. Reports are archived on this build."
         }
         unstable {
             echo 'generate-identity-consent-mapping completed WITH WARNINGS. ' +
