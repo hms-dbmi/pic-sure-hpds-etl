@@ -51,6 +51,10 @@ etl:
     create-vcf-indexes:
       enabled: ${ETL_JOB_CREATE_VCF_INDEXES_ENABLED:true}
 
+    # PERMANENT: validate the PSAMA fence_mapping.json (schema + uniqueness checks).
+    validate-fence-mapping:
+      enabled: ${ETL_JOB_VALIDATE_FENCE_MAPPING_ENABLED:true}
+
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:
       enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}

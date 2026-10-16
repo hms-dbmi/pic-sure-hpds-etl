@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PSAMA fence_mapping.json",
+  "description": "Shape that pic-sure-auth-microapp parses at startup (FenceMappingUtility, BioDataCatalyst, StudyMetaData). PSAMA uses a default Jackson ObjectMapper, so ONE unknown field anywhere rejects the whole file and PSAMA starts with an empty mapping. Cross-entry rules (unique key, unique authZ, public entries) are not expressible here and live in FenceMappingValidator. See docs/FENCE_MAPPING.md.",
+  "type": "object",
+  "properties": {
+    "bio_data_catalyst": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "study_identifier": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Study accession, e.g. phs123456. First half of the PSAMA map key (FenceMappingUtility:58-61). Empty would produce keys like '.c1' that no HPDS partition matches."
+          },
+          "study_type": {
+            "type": "string",
+            "description": "'public' (case-insensitive) grants the entry to every user (BdcConsentsBuilder:49-53); any other value is not used by PSAMA. The legacy generator copies the managed-input study type (e.g. parent, topmed, public)."
+          },
+          "abbreviated_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short study name. Parsed, not used by PSAMA."
+          },
+          "full_study_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Long study name. Parsed, not used by PSAMA."
+          },
+          "consent_group_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^(c[0-9]+)?$",
+            "description": "Consent group, e.g. c1. Key is study_identifier + '.' + code (phs123456.c1); empty or null gives the study-level key (bare phs123456). PSAMA does not constrain the value; the pattern is the shape the ETL partitions use."
+          },
+          "consent_group_name_abv": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Consent group abbreviation (e.g. GRU). Parsed, not used by PSAMA."
+          },
+          "consent_group_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Consent group full name. Parsed, not used by PSAMA."
+          },
+          "request_access": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "dbGaP request-access URL. Parsed, not used by PSAMA."
+          },
+          "data_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Data type label. Parsed, not used by PSAMA."
+          },
+          "clinical_variable_count": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Count. Parsed into a primitive int, so a non-numeric value rejects the whole file. Minimum is -1 because the legacy generator defaults it to -1 (BDCMetadataElements); not used by PSAMA."
+          },
+          "genetic_sample_size": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Count. Parsed into a primitive int, so a non-numeric value rejects the whole file. Minimum is -1 because the legacy generator defaults it to -1 (BDCMetadataElements); not used by PSAMA."
+          },
+          "clinical_sample_size": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Count. Parsed into a primitive int, so a non-numeric value rejects the whole file. Minimum is -1 because the legacy generator defaults it to -1 (BDCMetadataElements); not used by PSAMA."
+          },
+          "raw_clinical_variable_count": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Count. Parsed into a primitive int, so a non-numeric value rejects the whole file. Minimum is -1 because the legacy generator defaults it to -1 (BDCMetadataElements); not used by PSAMA."
+          },
+          "raw_genetic_sample_size": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Count. Parsed into a primitive int, so a non-numeric value rejects the whole file. Minimum is -1 because the legacy generator defaults it to -1 (BDCMetadataElements); not used by PSAMA."
+          },
+          "raw_clinical_sample_size": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Count. Parsed into a primitive int, so a non-numeric value rejects the whole file. Minimum is -1 because the legacy generator defaults it to -1 (BDCMetadataElements); not used by PSAMA."
+          },
+          "study_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Study version. Parsed, not used by PSAMA."
+          },
+          "study_phase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Study phase. Parsed, not used by PSAMA."
+          },
+          "top_level_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Top-level concept path, e.g. \\\\phs123456\\\\. Parsed, not used by PSAMA."
+          },
+          "is_harmonized": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "'Y' or 'Yes' (case-insensitive) means true, anything else false (IsHarmonizedDeserializer). Parsed, not used by PSAMA in production code."
+          },
+          "study_focus": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Study focus. Parsed, not used by PSAMA."
+          },
+          "study_design": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Study design. Parsed, not used by PSAMA."
+          },
+          "authZ": {
+            "type": "string",
+            "description": "FENCE authorization path the user logs in with (FENCEAuthenticationService:146); second key of the PSAMA mapping. Must be a non-null string: authZ.replace(...) at FenceMappingUtility:62 throws NullPointerException at startup."
+          },
+          "additional_information": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free text. Parsed, not used by PSAMA."
+          }
+        },
+        "required": [
+          "study_identifier",
+          "consent_group_code",
+          "study_type",
+          "authZ"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "bio_data_catalyst"
+  ],
+  "additionalProperties": false
+}

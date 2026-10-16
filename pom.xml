@@ -25,6 +25,9 @@
         <java.version>25</java.version>
         <aws.sdk.version>2.52.1</aws.sdk.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <!-- 2.0.x is the Jackson 2 (com.fasterxml) line; 3.x moved to Jackson 3 (tools.jackson),
+             which this project does not use (see JacksonConfig, DelimitedReader). -->
+        <json-schema-validator.version>2.0.8</json-schema-validator.version>
     </properties>
 
     <dependencyManagement>
@@ -76,6 +79,13 @@
         <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-csv</artifactId>
+        </dependency>
+
+        <!-- JSON Schema validation of fence_mapping.json (core/fencemapping) -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>${json-schema-validator.version}</version>
         </dependency>
 
         <!-- AWS S3 -->
