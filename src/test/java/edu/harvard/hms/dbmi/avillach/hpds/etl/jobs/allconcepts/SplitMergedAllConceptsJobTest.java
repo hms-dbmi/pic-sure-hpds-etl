@@ -30,6 +30,7 @@ import java.util.stream.Stream;
 import static edu.harvard.hms.dbmi.avillach.hpds.etl.support.FenceMappingFixtures.file;
 import static edu.harvard.hms.dbmi.avillach.hpds.etl.support.FenceMappingFixtures.legacyEntry;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
 
 class SplitMergedAllConceptsJobTest {
 
@@ -668,6 +669,13 @@ class SplitMergedAllConceptsJobTest {
         return q(reason) + "," + q(String.valueOf(rowNum)) + "," + originalRow;
     }
 
+    /** The manifest's repairs.timestampsConvertedByForm, in file order. */
+    private Map<String, Long> byForm() throws IOException {
+        Map<String, Long> m = new LinkedHashMap<>();
+        manifest().at("/repairs/timestampsConvertedByForm").fields().forEachRemaining(e -> m.put(e.getKey(), e.getValue().asLong()));
+        return m;
+    }
+
     private List<String> rejectLines() throws IOException {
         return Files.readAllLines(out.resolve("rejects").resolve("rejected-rows.csv"), StandardCharsets.UTF_8);
     }
@@ -730,7 +738,8 @@ class SplitMergedAllConceptsJobTest {
                 row(1, "\\phs123456\\b\\", "1", "", "2023-06-06T15:20:00Z"),
                 row(1, "\\phs123456\\c\\", "1", "", "2023-06-06T15:20:00.123Z"),
                 row(1, "\\phs123456\\d\\", "1", "", "2023-06-06T17:20:00+02:00"),
-                row(1, "\\phs123456\\e\\", "1", "", "1700000000000"));
+                row(1, "\\phs123456\\e\\", "1", "", "1700000000000"),
+                row(1, "\\phs123456\\f\\", "1", "", "0"));
 
         JobResult r = run(in, "timestamps", "convert-iso");
 
@@ -740,22 +749,78 @@ class SplitMergedAllConceptsJobTest {
                 row(1, "\\phs123456\\b\\", "1", "", "1686064800000"),
                 row(1, "\\phs123456\\c\\", "1", "", "1686064800123"),
                 row(1, "\\phs123456\\d\\", "1", "", "1686064800000"),
-                row(1, "\\phs123456\\e\\", "1", "", "1700000000000"));
+                row(1, "\\phs123456\\e\\", "1", "", "1700000000000"),
+                // integers, 0 included, are CSVLoader's own contract and stay as they are
+                row(1, "\\phs123456\\f\\", "1", "", "0"));
         assertThat(manifest().at("/repairs/timestamps").asText()).isEqualTo("convert-iso");
         assertThat(manifest().at("/repairs/badRows").asText()).isEqualTo("fail");
         assertThat(manifest().at("/repairs/timestampsConverted").asLong()).isEqualTo(4);
+        assertThat(byForm()).containsExactly(entry("offset", 4L), entry("zoneless-utc", 0L), entry("date-utc", 0L));
         assertThat(manifest().at("/repairs/rejectsFile").isNull()).isTrue();
-        assertThat(hasIssue(r.getOutputValidation().getIssues(), "TIMESTAMPS_CONVERTED")).isTrue();
+        List<String> codes = r.getOutputValidation().getIssues().stream().map(ValidationIssue::code).toList();
+        assertThat(codes).contains("TIMESTAMPS_CONVERTED").doesNotContain("TIMESTAMPS_ASSUMED_UTC");
         assertThat(r.getMetrics()).containsEntry("timestampsConverted", 4L);
+        assertThat(r.getMetrics().get("timestampsConvertedByForm")).isEqualTo(
+                Map.of("offset", 4L, "zoneless-utc", 0L, "date-utc", 0L));
         assertThat(outputFiles()).doesNotContain("rejects");
     }
 
+    /** Expected values are those of the ingest-service TimestampParserTest. */
     @Test
-    void convert_iso_never_guesses_a_timestamp_without_an_offset() throws Exception {
-        for (String bad : List.of("2023-06-06T15:20:00", "2023-06-06", "2023-06-06 15:20:00+00:00", "2023-06-06T15:20:00+0000",
-                "2023-13-06T15:20:00Z", "yesterday")) {
+    void convert_iso_reads_zoneless_forms_as_utc_and_counts_them_by_form() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, "\\phs123456\\a\\", "1", "", "2023-11-25 14:00:00"),
+                row(1, "\\phs123456\\b\\", "1", "", "2024-06-27 00:00:00"),
+                row(1, "\\phs123456\\c\\", "1", "", "2020-01-02 03:04:05.678"),
+                row(1, "\\phs123456\\d\\", "1", "", "2021-06-07 08:09:10.9"),
+                row(1, "\\phs123456\\e\\", "1", "", "2022-03-04 05:06:07.03"),
+                row(1, "\\phs123456\\f\\", "1", "", "2025-02-28T12:56:40.500"),
+                row(1, "\\phs123456\\g\\", "1", "", "2023-06-06T15:20:00"),
+                row(1, "\\phs123456\\h\\", "1", "", "2025-02-28"),
+                row(1, "\\phs123456\\i\\", "1", "", "2023-06-06"),
+                row(1, "\\phs123456\\j\\", "1", "", "2023-06-06 15:20:00.123456789"),
+                row(1, "\\phs123456\\k\\", "1", "", "2021-01-15T10:30:00Z"));
+
+        JobResult r = run(in, "timestamps", "convert-iso");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(
+                row(1, "\\phs123456\\a\\", "1", "", "1700920800000"),
+                row(1, "\\phs123456\\b\\", "1", "", "1719446400000"),
+                row(1, "\\phs123456\\c\\", "1", "", "1577934245678"),
+                row(1, "\\phs123456\\d\\", "1", "", "1623053350900"),
+                row(1, "\\phs123456\\e\\", "1", "", "1646370367030"),
+                row(1, "\\phs123456\\f\\", "1", "", "1740747400500"),
+                row(1, "\\phs123456\\g\\", "1", "", "1686064800000"),
+                row(1, "\\phs123456\\h\\", "1", "", "1740700800000"),
+                row(1, "\\phs123456\\i\\", "1", "", "1686009600000"),
+                row(1, "\\phs123456\\j\\", "1", "", "1686064800123"), // sub-millisecond digits truncated
+                row(1, "\\phs123456\\k\\", "1", "", "1610706600000"));
+        assertThat(manifest().at("/repairs/timestampsConverted").asLong()).isEqualTo(11);
+        assertThat(byForm()).containsExactly(entry("offset", 1L), entry("zoneless-utc", 8L), entry("date-utc", 2L));
+        assertThat(r.getMetrics()).containsEntry("timestampsConverted", 11L);
+        ValidationIssue assumed = r.getOutputValidation().getIssues().stream()
+                .filter(i -> i.code().equals("TIMESTAMPS_ASSUMED_UTC")).findFirst().orElseThrow();
+        assertThat(assumed.message()).contains("10 timestamp(s)").contains("assumed to be UTC");
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "TIMESTAMPS_CONVERTED")).isTrue();
+    }
+
+    @Test
+    void convert_iso_still_rejects_what_the_ingest_service_parser_rejects() throws Exception {
+        for (String bad : List.of("2023-06-06T15:20:00+0000", "2023-06-06 15:20:00+00:00", "2023-13-06T15:20:00Z",
+                "2023-13-45 99:00:00", "2023-02-30", "2023-06-06 15:20", "06/06/2023", "invalid-timestamp", "yesterday")) {
             Path in = input(consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", bad));
             JobResult r = run(in, "timestamps", "convert-iso", "force", "true");
+            assertThat(r.getExitCode()).as("timestamp '%s'", bad).isEqualTo(ExitCode.VALIDATION_FAILED);
+            assertThat(hasIssue(r.getOutputValidation().getIssues(), "BAD_TIMESTAMP")).isTrue();
+        }
+    }
+
+    @Test
+    void by_default_zoneless_and_space_separated_timestamps_are_errors() throws Exception {
+        for (String bad : List.of("2023-11-25 14:00:00", "2023-06-06T15:20:00", "2023-06-06")) {
+            Path in = input(consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", bad));
+            JobResult r = run(in, "force", "true");
             assertThat(r.getExitCode()).as("timestamp '%s'", bad).isEqualTo(ExitCode.VALIDATION_FAILED);
             assertThat(hasIssue(r.getOutputValidation().getIssues(), "BAD_TIMESTAMP")).isTrue();
         }
@@ -793,6 +858,8 @@ class SplitMergedAllConceptsJobTest {
         assertThat(repairs.get("badRows").asText()).isEqualTo("quarantine");
         assertThat(repairs.get("maxRejectFraction").asDouble()).isEqualTo(0.6);
         assertThat(repairs.get("timestampsConverted").asLong()).isEqualTo(1);
+        assertThat(repairs.at("/timestampsConvertedByForm/offset").asLong()).isEqualTo(1);
+        assertThat(repairs.at("/timestampsConvertedByForm/zoneless-utc").asLong()).isZero();
         assertThat(repairs.at("/rejected/total").asLong()).isEqualTo(4);
         assertThat(repairs.at("/rejected/byReason/EMBEDDED_HEADER").asLong()).isEqualTo(1);
         assertThat(repairs.at("/rejected/byReason/BAD_NVAL").asLong()).isEqualTo(1);
@@ -951,6 +1018,7 @@ class SplitMergedAllConceptsJobTest {
         assertThat(repairs.get("badRows").asText()).isEqualTo("fail");
         assertThat(repairs.get("maxRejectFraction").asDouble()).isEqualTo(0.01);
         assertThat(repairs.get("timestampsConverted").asLong()).isZero();
+        assertThat(byForm()).containsExactly(entry("offset", 0L), entry("zoneless-utc", 0L), entry("date-utc", 0L));
         assertThat(repairs.at("/rejected/total").asLong()).isZero();
         assertThat(repairs.get("droppedConsents")).isEmpty();
         assertThat(repairs.get("rejectsFile").isNull()).isTrue();

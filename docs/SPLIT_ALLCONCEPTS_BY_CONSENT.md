@@ -106,12 +106,29 @@ counted in the manifest and the report, and the defaults stay strict.
 | Param | Values | Effect |
 |---|---|---|
 | `timestamps` | `strict` (default) | a timestamp that is not blank or an integer is `BAD_TIMESTAMP` |
-| | `convert-iso` | a timestamp that is not an integer but parses as ISO-8601 **with an explicit offset or `Z`** (`2023-06-06T15:20:00+00:00`, `2023-06-06T15:20:00Z`, `2023-06-06T15:20:00.123Z`) is rewritten to epoch milliseconds in the output line (`1686064800000`) and counted. A local date-time (`2023-06-06T15:20:00`), a bare date, or any other text has no instant, is never guessed, and stays `BAD_TIMESTAMP`. Sub-millisecond digits are truncated. |
+| | `convert-iso` | a timestamp that is not an integer is converted if it has one of the forms below, using the same rules as the hpds-ingest ingest-service (`TimestampParser.parse`), and is rewritten to epoch milliseconds in the output line (`1686064800000`) and counted. Anything else stays `BAD_TIMESTAMP`. Sub-millisecond digits are truncated. |
 | `bad-rows` | `fail` (default) | any row that breaks the contract, or any consent that cannot name a partition, is an error: exit 2, nothing written |
 | | `quarantine` | such a row is not written to any partition; it goes to `rejects/rejected-rows.csv` and the run continues |
 | `max-reject-fraction` | `0.01` | with `quarantine`: if rejected rows / data rows is **greater** than this, the run fails as under `fail` (exit 2, `REJECT_FRACTION_EXCEEDED`, nothing written, the message names the counts and the reasons), so a broken input cannot be quietly halved. Invalid values (not a decimal, outside [0,1], NaN) are `INVALID_MAX_REJECT_FRACTION`. |
 
 Invalid values of the other two are `INVALID_TIMESTAMPS` and `INVALID_BAD_ROWS`.
+
+Forms `convert-iso` accepts, tried in this order (the manifest and report count them as `timestampsConvertedByForm`):
+
+| Form (key) | Accepted text | Read as |
+|---|---|---|
+| `offset` | ISO-8601 instant with `Z` or an offset: `2023-06-06T15:20:00Z`, `2023-06-06T15:20:00+00:00`, `2023-06-06T17:20:00+02:00`, `2023-06-06T15:20:00.123Z` | the instant as given |
+| `zoneless-utc` | `uuuu-MM-dd HH:mm:ss` with an optional fraction of 1-9 digits (`2023-11-25 14:00:00`, `2020-01-02 03:04:05.678`, `2021-06-07 08:09:10.9`), or an ISO local date-time (`2023-06-06T15:20:00`, `2025-02-28T12:56:40.500`) | **UTC (assumed)** |
+| `date-utc` | ISO local date (`2023-06-06`) | **midnight UTC (assumed)** |
+
+Integers, `0` included, are never converted: they are CSVLoader's own contract. Not accepted, so still
+`BAD_TIMESTAMP`: an offset without a colon (`2023-06-06T15:20:00+0000`), a space-separated value with an
+offset, an invalid date or time (`2023-13-06T15:20:00Z`, `2023-13-45 99:00:00`), a time without seconds,
+and any other text. The zoneless forms carry no zone, so their meaning is an assumption: they are read as
+UTC because that is what the ingest-service does with the same strings, which keeps the two paths
+consistent. If the source system wrote local time, those instants are shifted; check that before relying
+on them. The run says so with the `TIMESTAMPS_ASSUMED_UTC` warning whenever `zoneless-utc` or `date-utc`
+is above 0.
 
 What `quarantine` sets aside, by `reason`:
 
@@ -152,9 +169,10 @@ field quoted (`"` doubled), LF line ends, UTF-8, in input order, uploaded with t
 ### Reporting
 
 Repairs are warnings, never errors, so a run that used them exits 0 with warnings (UNSTABLE in Jenkins):
-`TIMESTAMPS_CONVERTED`, `ROWS_QUARANTINED` (counts per reason and the rejects file), `CONSENTS_DROPPED`
+`TIMESTAMPS_CONVERTED` (with the count per form), `TIMESTAMPS_ASSUMED_UTC` (zoneless or date-only values were
+read as UTC), `ROWS_QUARANTINED` (counts per reason and the rejects file), `CONSENTS_DROPPED`
 (each value with its row count). The report metrics gain `timestampsMode`, `badRowsMode`,
-`timestampsConverted`, `rejectedRows`, `rejectedByReason`, `droppedConsents`, `rejectsUri`.
+`timestampsConverted`, `timestampsConvertedByForm` (`offset`, `zoneless-utc`, `date-utc`), `rejectedRows`, `rejectedByReason`, `droppedConsents`, `rejectsUri`.
 
 ## Safety
 
@@ -182,6 +200,7 @@ Repairs are warnings, never errors, so a run that used them exits 0 with warning
   "timestamps": { "zero": 0, "likelySeconds": 0 },
   "repairs": {
     "timestamps": "strict", "badRows": "fail", "maxRejectFraction": 0.01, "timestampsConverted": 0,
+    "timestampsConvertedByForm": { "offset": 0, "zoneless-utc": 0, "date-utc": 0 },
     "rejected": { "total": 0, "byReason": {} },
     "droppedConsents": [],
     "rejectsFile": null
@@ -198,7 +217,9 @@ separately. Per-partition `rows` is the number of lines in that file. `input` re
 object: `uri`, `versionId` (null on a never-versioned bucket), `eTag`, `size`, `lastModifiedMillis`
 (`versionId` and `eTag` are null for a local file). `studyNodesWithoutConsents` lists the nodes below.
 
-`repairs` records what the opt-in repairs did: the two modes and the limit, `timestampsConverted`,
+`repairs` records what the opt-in repairs did: the two modes and the limit, `timestampsConverted` (the total) and
+`timestampsConvertedByForm` (its split into `offset`, `zoneless-utc` and `date-utc`; the two passes must
+agree on it, else `PASS_MISMATCH`),
 `rejected.byReason` (the `INVALID_CONSENT_VALUE` rows included), `droppedConsents` as
 `{"value", "problem", "rows"}` (`rows` counts the row copies that were meant for that consent and were not
 written, whether or not another partition still got the row), and `rejectsFile` (the URI, or null when
@@ -228,6 +249,11 @@ java -jar target/hpds-etl.jar --job=split-allconcepts-by-consent \
 
 etl-runners/split-allconcepts-by-consent/test/run-tests.sh     # preflight/validate shell tests
 ```
+
+`etl-runners/split-allconcepts-by-consent/validate.sh` checks the fetched report after a run. The row
+accounting it verifies is `input == study + global + dropped + rejected` (it reads `metrics.rejectedRows`,
+0 when absent), and it warns (exit 10, `no rows quarantined`) when any row was set aside, next to the
+existing warnings for dropped rows and epoch-second-looking timestamps.
 
 On a runner the job is started by `etl-runners/split-allconcepts-by-consent/Jenkinsfile`. The runner
 needs a root disk of at least twice the input (`ROOT_VOLUME_GB`, default 1000; `by-patient` can need

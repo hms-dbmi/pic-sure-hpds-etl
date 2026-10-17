@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.HashMap;
@@ -62,7 +63,7 @@ import java.util.stream.Stream;
  * been read and found valid; nothing is ever deleted.
  *
  * <p><b>Opt-in repairs</b> (off by default, always counted and reported): {@code timestamps=convert-iso}
- * rewrites ISO-8601 timestamps that carry an offset to epoch milliseconds, and {@code bad-rows=quarantine}
+ * rewrites ISO-8601 timestamps to epoch milliseconds (zoneless forms as UTC, like the hpds-ingest ingest-service), and {@code bad-rows=quarantine}
  * moves rows that break the contract, plus rows of consents that cannot name a partition, to
  * {@code rejects/rejected-rows.csv} instead of failing the run, up to {@code max-reject-fraction}. Both
  * passes decide each row with the same {@link SplitRowCheck}.
@@ -148,9 +149,10 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                                 "false"),
                         ParamSpec.optional("timestamps",
                                 "'strict' (default): a timestamp that is not blank or an integer is an error; "
-                                        + "'convert-iso': an ISO-8601 timestamp with an explicit offset or Z "
-                                        + "(2023-06-06T15:20:00+00:00) is rewritten to epoch milliseconds and counted. "
-                                        + "Anything without an offset is never guessed.",
+                                        + "'convert-iso': a timestamp is rewritten to epoch milliseconds and counted, by form, if it is an ISO-8601 "
+                                        + "instant with Z or an offset (2023-06-06T15:20:00+00:00), or, ASSUMED TO BE UTC, "
+                                        + "'yyyy-MM-dd HH:mm:ss[.fraction]', an ISO local date-time (2023-06-06T15:20:00) or a date "
+                                        + "(2023-06-06, midnight). Anything else stays an error.",
                                 "strict"),
                         ParamSpec.optional("bad-rows",
                                 "'fail' (default): any row that breaks the CSVLoader contract, or any consent value that cannot "
@@ -294,6 +296,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 droppedConsents.add(new DroppedConsent(value, problem, p2.droppedConsentRows.getOrDefault(value, 0L))));
         Repairs repairs = new Repairs(settings.timestampsMode(), settings.badRowsMode(), settings.maxRejectFraction(),
                 pass2Ran ? p2.timestampsConverted : p1.timestampsConverted,
+                convertedByFormMap(pass2Ran ? p2.convertedByForm : p1.convertedByForm),
                 new TreeMap<>(pass2Ran ? p2.rejected : p1.rejected), droppedConsents, rejectsUri);
 
         Output out = new Output(inputUri, outputUri, depth, globals, consentsPath,
@@ -330,11 +333,22 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
     private static void checkPassesAgree(Pass1 p1, Pass2 p2, Findings errors) {
         Map<String, Long> contractRejects = new TreeMap<>(p2.rejected);
         contractRejects.remove(INVALID_CONSENT_VALUE);
-        if (!contractRejects.equals(p1.rejected) || p2.timestampsConverted != p1.timestampsConverted) {
+        if (!contractRejects.equals(p1.rejected) || p2.timestampsConverted != p1.timestampsConverted
+                || !Arrays.equals(p2.convertedByForm, p1.convertedByForm)) {
             errors.add("PASS_MISMATCH", 0, "pass 1 rejected " + p1.rejected + " and converted " + p1.timestampsConverted
-                    + " timestamp(s), pass 2 rejected " + contractRejects + " and converted " + p2.timestampsConverted
+                    + " timestamp(s) " + convertedByFormMap(p1.convertedByForm) + ", pass 2 rejected " + contractRejects
+                    + " and converted " + p2.timestampsConverted + " " + convertedByFormMap(p2.convertedByForm)
                     + ": the passes did not see the same rows");
         }
+    }
+
+    /** Converted-timestamp counts keyed by the manifest label of each form, every form present. */
+    private static Map<String, Long> convertedByFormMap(long[] counts) {
+        Map<String, Long> m = new LinkedHashMap<>();
+        for (SplitRowCheck.TimestampForm form : SplitRowCheck.TimestampForm.values()) {
+            m.put(form.label, counts[form.ordinal()]);
+        }
+        return m;
     }
 
     // ---------------------------------------------------------------- pass 1
@@ -369,6 +383,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 if (check.convertedTimestamp() != null) {
                     row.set(4, check.convertedTimestamp());
                     p.timestampsConverted++;
+                    p.convertedByForm[check.convertedForm().ordinal()]++;
                 }
                 if (check.hasTimestamp()) {
                     long v = check.timestamp();
@@ -448,6 +463,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 if (check.convertedTimestamp() != null) {
                     row.set(4, check.convertedTimestamp());
                     p2.timestampsConverted++;
+                    p2.convertedByForm[check.convertedForm().ordinal()]++;
                 }
                 int patient = check.patient();
                 String line = formatLine(row);
@@ -642,6 +658,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         m.put("badRows", r.badRowsMode());
         m.put("maxRejectFraction", r.maxRejectFraction());
         m.put("timestampsConverted", r.timestampsConverted());
+        m.put("timestampsConvertedByForm", r.timestampsConvertedByForm());
         Map<String, Object> rejected = new LinkedHashMap<>();
         rejected.put("total", r.rejectedRows());
         rejected.put("byReason", new TreeMap<>(r.rejectedByReason()));
@@ -706,7 +723,15 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         Repairs r = o.repairs();
         if (r.timestampsConverted() > 0) {
             report.warning("TIMESTAMPS_CONVERTED", r.timestampsConverted() + " ISO-8601 timestamp(s) were rewritten to epoch "
-                    + "milliseconds (timestamps=" + r.timestampsMode() + ")");
+                    + "milliseconds (timestamps=" + r.timestampsMode() + "), by form " + r.timestampsConvertedByForm());
+            long assumed = r.timestampsConvertedByForm().get(SplitRowCheck.TimestampForm.ZONELESS_UTC.label)
+                    + r.timestampsConvertedByForm().get(SplitRowCheck.TimestampForm.DATE_UTC.label);
+            if (assumed > 0) {
+                report.warning("TIMESTAMPS_ASSUMED_UTC", assumed + " timestamp(s) had no time zone (zoneless-utc "
+                        + r.timestampsConvertedByForm().get(SplitRowCheck.TimestampForm.ZONELESS_UTC.label) + ", date-utc "
+                        + r.timestampsConvertedByForm().get(SplitRowCheck.TimestampForm.DATE_UTC.label)
+                        + ") and were assumed to be UTC, as the hpds-ingest ingest-service does; a date is midnight UTC");
+            }
         }
         if (r.rejectedRows() > 0) {
             report.warning("ROWS_QUARANTINED", r.rejectedRows() + " row(s) were not written to any partition and are in "
@@ -789,6 +814,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 .metric("timestampsMode", o.repairs().timestampsMode())
                 .metric("badRowsMode", o.repairs().badRowsMode())
                 .metric("timestampsConverted", o.repairs().timestampsConverted())
+                .metric("timestampsConvertedByForm", o.repairs().timestampsConvertedByForm())
                 .metric("rejectedRows", o.repairs().rejectedRows())
                 .metric("rejectedByReason", o.repairs().rejectedByReason())
                 .metric("droppedConsents", o.repairs().droppedConsents().size())
@@ -955,6 +981,8 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         long timestampZero;
         long timestampSeconds;
         long timestampsConverted;
+        /** {@link #timestampsConverted} by {@link SplitRowCheck.TimestampForm} ordinal. */
+        final long[] convertedByForm = new long[SplitRowCheck.TimestampForm.values().length];
         String headerText;
         /** Rows that failed {@link SplitRowCheck} under bad-rows=quarantine, by first failed check. */
         final Map<String, Long> rejected = new TreeMap<>();
@@ -975,6 +1003,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         final Set<String> notes = new LinkedHashSet<>();
         final Set<String> studyNodesWithoutConsents = new TreeSet<>();
         long timestampsConverted;
+        final long[] convertedByForm = new long[SplitRowCheck.TimestampForm.values().length];
         final Map<String, Long> rejected = new TreeMap<>();
         /** Per dropped consent: source rows that had a copy meant for it. */
         final Map<String, Long> droppedConsentRows = new HashMap<>();
@@ -1108,7 +1137,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
 
     /** What the opt-in repairs did. Rejected counts include the INVALID_CONSENT_VALUE rows. */
     public record Repairs(String timestampsMode, String badRowsMode, double maxRejectFraction, long timestampsConverted,
-                          Map<String, Long> rejectedByReason, List<DroppedConsent> droppedConsents, String rejectsUri) {
+                          Map<String, Long> timestampsConvertedByForm, Map<String, Long> rejectedByReason, List<DroppedConsent> droppedConsents, String rejectsUri) {
 
         long rejectedRows() {
             return rejectedByReason.values().stream().mapToLong(Long::longValue).sum();

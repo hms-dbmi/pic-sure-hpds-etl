@@ -1,7 +1,14 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts;
 
-import java.time.OffsetDateTime;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
+import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -24,7 +31,29 @@ final class SplitRowCheck {
     static final String BAD_TIMESTAMP = "BAD_TIMESTAMP";
     static final String EMBEDDED_HEADER = "EMBEDDED_HEADER";
 
+    /** Which accepted ISO form a converted timestamp was written in; {@code label} is the manifest key. */
+    enum TimestampForm {
+        /** Carries {@code Z} or an offset: the instant is known. */
+        OFFSET("offset"),
+        /** Zoneless date-time (space-separated or ISO {@code T}): assumed to be UTC. */
+        ZONELESS_UTC("zoneless-utc"),
+        /** Bare date: assumed to be midnight UTC. */
+        DATE_UTC("date-utc");
+
+        final String label;
+
+        TimestampForm(String label) {
+            this.label = label;
+        }
+    }
+
     private static final Pattern TIMESTAMP = Pattern.compile("-?[0-9]*");
+
+    // "uuuu-MM-dd HH:mm:ss" with an optional fraction of 1 to 9 digits, as in the ingest-service TimestampParser
+    private static final DateTimeFormatter SPACE_SEPARATED = new DateTimeFormatterBuilder()
+            .appendPattern("uuuu-MM-dd HH:mm:ss").optionalStart()
+            .appendFraction(ChronoField.NANO_OF_SECOND, 1, 9, true).optionalEnd()
+            .toFormatter().withResolverStyle(ResolverStyle.STRICT);
 
     private final boolean convertIso;
     private final boolean quarantine;
@@ -34,6 +63,7 @@ final class SplitRowCheck {
     private boolean hasTimestamp;
     private long timestamp;
     private String convertedTimestamp;
+    private TimestampForm convertedForm;
 
     SplitRowCheck(SplitRepairSettings settings) {
         this.convertIso = settings.convertIso();
@@ -46,6 +76,7 @@ final class SplitRowCheck {
         messages.clear();
         hasTimestamp = false;
         convertedTimestamp = null;
+        convertedForm = null;
 
         // Only when quarantining: a stray header is told apart from other bad patient numbers. Without it
         // such a row is a BAD_PATIENT_NUM error, as always.
@@ -89,12 +120,21 @@ final class SplitRowCheck {
             return;
         }
         if (convertIso) {
-            Long millis = isoToEpochMillis(ts);
-            if (millis != null) {
-                timestamp = millis;
-                hasTimestamp = true;
-                convertedTimestamp = Long.toString(millis);
-                return;
+            for (TimestampForm form : TimestampForm.values()) {
+                Instant instant = parse(ts, form);
+                if (instant != null) {
+                    long millis;
+                    try {
+                        millis = instant.toEpochMilli();
+                    } catch (ArithmeticException e) {
+                        break; // beyond what a 64-bit millisecond count holds
+                    }
+                    timestamp = millis;
+                    hasTimestamp = true;
+                    convertedTimestamp = Long.toString(millis);
+                    convertedForm = form;
+                    return;
+                }
             }
         }
         problem(BAD_TIMESTAMP, "timestamp must be blank or an integer (CSVLoader aborts on anything else): '"
@@ -102,14 +142,27 @@ final class SplitRowCheck {
     }
 
     /**
-     * Epoch milliseconds of an ISO-8601 date-time that carries an explicit offset or {@code Z}
-     * ({@code 2023-06-06T15:20:00+00:00}, fractional seconds allowed), else null. A local date-time or a
-     * bare date has no instant and is never guessed.
+     * The first {@link TimestampForm} that {@code s} parses as, else null. The forms and their order follow
+     * {@code TimestampParser.parse} of the hpds-ingest ingest-service (hms-dbmi/pic-sure-hpds,
+     * ingest-service/.../producer/TimestampParser.java), so a timestamp means the same instant here as
+     * there: an ISO-8601 instant with {@code Z} or an offset is kept as given; {@code uuuu-MM-dd HH:mm:ss}
+     * with an optional fraction of 1 to 9 digits, an ISO local date-time and an ISO local date are read as
+     * UTC (a date as midnight). Integers never get here (CSVLoader's own contract).
      */
-    static Long isoToEpochMillis(String s) {
+    static Instant parse(String s, TimestampForm form) {
         try {
-            return OffsetDateTime.parse(s).toInstant().toEpochMilli();
-        } catch (DateTimeParseException | ArithmeticException e) {
+            return switch (form) {
+                case OFFSET -> Instant.parse(s);
+                case ZONELESS_UTC -> {
+                    try {
+                        yield LocalDateTime.parse(s, SPACE_SEPARATED).toInstant(ZoneOffset.UTC);
+                    } catch (DateTimeParseException e) {
+                        yield LocalDateTime.parse(s, DateTimeFormatter.ISO_LOCAL_DATE_TIME).toInstant(ZoneOffset.UTC);
+                    }
+                }
+                case DATE_UTC -> LocalDate.parse(s, DateTimeFormatter.ISO_LOCAL_DATE).atStartOfDay().toInstant(ZoneOffset.UTC);
+            };
+        } catch (DateTimeParseException e) {
             return null;
         }
     }
@@ -170,5 +223,10 @@ final class SplitRowCheck {
     /** The epoch-millisecond text to put in column 4 if this row's ISO timestamp was converted, else null. */
     String convertedTimestamp() {
         return convertedTimestamp;
+    }
+
+    /** The form that was converted, when {@link #convertedTimestamp()} is not null. */
+    TimestampForm convertedForm() {
+        return convertedForm;
     }
 }

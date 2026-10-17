@@ -54,6 +54,7 @@ STUDY=$(jq -r '.metrics.studyRows // 0' "$REPORT")
 GLOBAL=$(jq -r '.metrics.globalRows // 0' "$REPORT")
 DROP_STUDY=$(jq -r '.metrics.droppedStudyNoConsent // 0' "$REPORT")
 DROP_GLOBAL=$(jq -r '.metrics.droppedGlobalNoConsent // 0' "$REPORT")
+REJECTED=$(jq -r '.metrics.rejectedRows // 0' "$REPORT")
 PARTITIONS=$(jq -r '.metrics.partitions // 0' "$REPORT")
 STUDY_PARTS=$(jq -r '.metrics.studyPartitions // 0' "$REPORT")
 GLOBAL_PARTS=$(jq -r '.metrics.globalPartitions // 0' "$REPORT")
@@ -61,7 +62,7 @@ LINES=$(jq -r '.metrics.partitionLines // 0' "$REPORT")
 SECONDS_LIKE=$(jq -r '.metrics.timestampLikelySeconds // 0' "$REPORT")
 MODE=$(jq -r '.metrics.globals // "unknown"' "$REPORT")
 OUTPUT=$(jq -r '.metrics.outputUri // "unknown"' "$REPORT")
-SUM=$(( STUDY + GLOBAL + DROP_STUDY + DROP_GLOBAL ))
+SUM=$(( STUDY + GLOBAL + DROP_STUDY + DROP_GLOBAL + REJECTED ))
 
 echo ""
 echo "  Output:             $OUTPUT"
@@ -70,15 +71,17 @@ echo "  Input rows:         $TOTAL"
 echo "  Study rows:         $STUDY   (to $STUDY_PARTS study partition(s))"
 echo "  Global rows:        $GLOBAL   ($GLOBAL_PARTS global partition(s))"
 echo "  Dropped (no consent): study $DROP_STUDY, global $DROP_GLOBAL"
+echo "  Rejected (quarantined): $REJECTED"
 echo "  Lines written:      $LINES"
 
 check "at least one row was read"                    test "$TOTAL" -gt 0
 check "at least one partition was written"           test "$PARTITIONS" -gt 0
-check "input rows == study + global + dropped ($SUM)" test "$TOTAL" -eq "$SUM"
+check "input rows == study + global + dropped + rejected ($SUM)" test "$TOTAL" -eq "$SUM"
 check "the job's own row accounting balanced"        jq -e '.metrics.balanced == true' "$REPORT"
 check "manifest was written"                         jq -e '(.metrics.manifestUri // "") != ""' "$REPORT"
 soft  "no study rows dropped for lack of a consent"  test "$DROP_STUDY" -eq 0
 soft  "no global rows dropped for lack of a consent" test "$DROP_GLOBAL" -eq 0
+soft  "no rows quarantined"                          test "$REJECTED" -eq 0
 soft  "no timestamps that look like epoch seconds"   test "$SECONDS_LIKE" -eq 0
 
 if [[ "$MODE" == "own" && "$GLOBAL_PARTS" -gt 0 ]]; then
