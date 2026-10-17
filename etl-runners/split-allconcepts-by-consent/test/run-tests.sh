@@ -106,7 +106,7 @@ report() { # report <dir> <run id> <jq-overrides-as-json>
       metrics: {
         outputUri: "s3://bucket-a/data/transforms/all_concepts_split/run-1/", globals: "own",
         totalRows: 100, studyRows: 60, globalRows: 40, droppedStudyNoConsent: 0, droppedGlobalNoConsent: 0,
-        partitionLines: 105, balanced: true, partitions: 5, studyPartitions: 3, globalPartitions: 2,
+        rejectedRows: 0, partitionLines: 105, balanced: true, partitions: 5, studyPartitions: 3, globalPartitions: 2,
         timestampLikelySeconds: 0, manifestUri: "s3://bucket-a/data/transforms/all_concepts_split/run-1/split_manifest.json"
       }
     } * $over' > "$dir/split-allconcepts-by-consent-$run.json"
@@ -131,6 +131,15 @@ expect "an empty split fails"                               1  validate "$WORK/e
 
 report "$WORK/dropped" r5 '{"metrics":{"studyRows":50,"droppedStudyNoConsent":10}}'
 expect "dropped rows are a warning (exit 10)"               10 validate "$WORK/dropped" r5
+
+# 100 input rows = 55 study + 40 global + 5 quarantined: balances, but the quarantine is a warning
+report "$WORK/rejected" r9 '{"metrics":{"studyRows":55,"rejectedRows":5}}'
+expect "quarantined rows that balance are a warning (exit 10)" 10 validate "$WORK/rejected" r9
+expect "the quarantine warning is printed"                  0  bash -c "cd '$RUNNER' && ./validate.sh '$WORK/rejected' r9 | grep -q 'no rows quarantined'"
+
+# rejected rows not accounted for in the totals still fail the sum check
+report "$WORK/rejunbal" r10 '{"metrics":{"rejectedRows":5}}'
+expect "rejected rows that do not add up fail"              1  validate "$WORK/rejunbal" r10
 
 report "$WORK/secs" r6 '{"metrics":{"timestampLikelySeconds":3}}'
 expect "likely-seconds timestamps are a warning (exit 10)"  10 validate "$WORK/secs" r6
