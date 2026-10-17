@@ -1081,6 +1081,192 @@ class SplitMergedAllConceptsJobTest {
         assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
     }
 
+    // ------------------------------------------------------------ zero-timestamps
+
+    private static String path(String name) {
+        return "\\phs123456\\" + name + "\\";
+    }
+
+    @Test
+    void by_default_zero_timestamps_are_kept_and_reported_as_keep() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, path("a"), "1", "", "0"), row(1, path("b"), "1", "", "00"), row(1, path("c"), "1", "", "-0"));
+
+        JobResult r = run(in);
+
+        assertThat(lines("phs123456.c1")).containsExactly(
+                row(1, path("a"), "1", "", "0"), row(1, path("b"), "1", "", "00"), row(1, path("c"), "1", "", "-0"));
+        assertThat(manifest().at("/repairs/zeroTimestamps").asText()).isEqualTo("keep");
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isZero();
+        assertThat(manifest().at("/timestamps/zero").asLong()).isEqualTo(3);
+        assertThat(r.getMetrics()).containsEntry("zeroTimestampsMode", "keep").containsEntry("timestampsBlanked", 0L);
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "TIMESTAMPS_BLANKED")).isFalse();
+    }
+
+    @Test
+    void blank_writes_integer_zero_as_an_empty_field_and_leaves_everything_else_alone() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, path("a"), "1", "", "0"),
+                row(1, path("b"), "1", "", "00"),
+                row(1, path("c"), "1", "", "-0"),
+                row(1, path("d"), "1", "", "1"),
+                row(1, path("e"), "1", "", "-5"),
+                row(1, path("f"), "1", "", "1700000000000"),
+                row(1, path("g"), "1", "", ""));
+
+        JobResult r = run(in, "zero-timestamps", "BLANK");
+
+        // strict timestamps mode: blanking is independent of convert-iso
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(
+                row(1, path("a"), "1", "", ""),
+                row(1, path("b"), "1", "", ""),
+                row(1, path("c"), "1", "", ""),
+                row(1, path("d"), "1", "", "1"),
+                row(1, path("e"), "1", "", "-5"),
+                row(1, path("f"), "1", "", "1700000000000"),
+                row(1, path("g"), "1", "", ""));
+        assertThat(manifest().at("/repairs/zeroTimestamps").asText()).isEqualTo("blank");
+        assertThat(manifest().at("/repairs/timestamps").asText()).isEqualTo("strict");
+        assertThat(manifest().at("/repairs/badRows").asText()).isEqualTo("fail");
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isEqualTo(3);
+        assertThat(manifest().at("/repairs/timestampsConverted").asLong()).isZero();
+        // timestampZero keeps counting the zeros seen, blanked or not
+        assertThat(manifest().at("/timestamps/zero").asLong()).isEqualTo(3);
+        assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
+        assertThat(r.getMetrics()).containsEntry("zeroTimestampsMode", "blank").containsEntry("timestampsBlanked", 3L)
+                .containsEntry("timestampZero", 3L);
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "TIMESTAMPS_BLANKED")).isTrue();
+    }
+
+    @Test
+    void blanking_is_a_note_not_a_warning() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), row(1, path("a"), "1", "", "0"));
+
+        JobResult r = run(in, "zero-timestamps", "blank");
+
+        // the TIMESTAMP_ZERO info and TIMESTAMPS_BLANKED are both informational: a clean run stays clean
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(r.getOutputValidation().getIssues()).filteredOn(i -> i.code().equals("TIMESTAMPS_BLANKED"))
+                .singleElement().satisfies(i -> assertThat(i.severity().name()).isEqualTo("INFO"));
+    }
+
+    @Test
+    void blank_also_blanks_an_iso_timestamp_converted_to_epoch_zero_and_counts_the_conversion() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, path("a"), "1", "", "1970-01-01T00:00:00Z"),
+                row(1, path("b"), "1", "", "1970-01-01"),
+                row(1, path("c"), "1", "", "1970-01-01T01:00:00+01:00"),
+                row(1, path("d"), "1", "", "1970-01-01T00:00:01Z"),
+                row(1, path("e"), "1", "", "0"));
+
+        JobResult r = run(in, "timestamps", "convert-iso", "zero-timestamps", "blank");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(
+                row(1, path("a"), "1", "", ""),
+                row(1, path("b"), "1", "", ""),
+                row(1, path("c"), "1", "", ""),
+                row(1, path("d"), "1", "", "1000"),
+                row(1, path("e"), "1", "", ""));
+        // a, b, c, d were ISO and are counted as converted; a, b, c, e are zero and blanked
+        assertThat(manifest().at("/repairs/timestampsConverted").asLong()).isEqualTo(4);
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isEqualTo(4);
+        assertThat(manifest().at("/timestamps/zero").asLong()).isEqualTo(4);
+    }
+
+    @Test
+    void without_blank_a_converted_epoch_zero_is_written_as_the_integer_zero() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), row(1, path("a"), "1", "", "1970-01-01T00:00:00Z"));
+
+        run(in, "timestamps", "convert-iso");
+
+        assertThat(lines("phs123456.c1")).containsExactly(row(1, path("a"), "1", "", "0"));
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isZero();
+    }
+
+    @Test
+    void blank_works_together_with_quarantine_and_a_quarantined_row_keeps_its_final_line() throws Exception {
+        Path in = input(
+                consent(1, "phs123456.c1"),
+                consent(2, "tutorial-demo_one"),
+                row(1, path("a"), "1", "", "0"),
+                row(1, path("b"), "n/a", "", "0"),
+                row(2, "\\tutorial-demo_one\\x\\", "1", "", "0"),
+                row(1, path("c"), "1", "", "2023-06-06T00:00:00Z"));
+
+        JobResult r = run(in, "bad-rows", "quarantine", "max-reject-fraction", "0.9", "timestamps", "convert-iso",
+                "zero-timestamps", "blank");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(row(1, path("a"), "1", "", ""), row(1, path("c"), "1", "", "1686009600000"));
+        // a contract failure is filed as read (the row was never repaired); a row set aside only because its consent
+        // cannot name a partition passed the check, so it is filed with the repaired timestamp, like a converted one
+        assertThat(rejectLines()).containsExactly(
+                rejectLine("BAD_NVAL", 4, row(1, path("b"), "n/a", "", "0")),
+                rejectLine("INVALID_CONSENT_VALUE", 5, row(2, "\\tutorial-demo_one\\x\\", "1", "", "")));
+        // counted for every row that passed the check: a, the consent-rejected row, not the BAD_NVAL row
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isEqualTo(2);
+        assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
+    }
+
+    @Test
+    void a_row_dropped_for_having_no_consent_still_counts_as_blanked_in_both_passes() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, path("a"), "1", "", "0"),
+                row(9, path("b"), "1", "", "0"));
+
+        JobResult r = run(in, "zero-timestamps", "blank");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(row(1, path("a"), "1", "", ""));
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isEqualTo(2);
+    }
+
+    @Test
+    void blank_applies_to_global_rows_and_by_patient_copies_alike() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), consent(1, "phs123456.c2"),
+                row(1, "\\age\\", "50", "", "0"));
+
+        run(in, "globals", "by-patient", "zero-timestamps", "blank");
+
+        assertThat(lines("phs123456.c1")).contains(row(1, "\\age\\", "50", "", "")).hasSize(3);
+        assertThat(lines("phs123456.c2")).contains(row(1, "\\age\\", "50", "", "")).hasSize(3);
+        // the count is per source row, not per copy
+        assertThat(manifest().at("/repairs/timestampsBlanked").asLong()).isEqualTo(1);
+    }
+
+    @Test
+    void the_zero_timestamps_param_is_validated() throws Exception {
+        Path in = standardInput();
+
+        JobResult r = run(in, "zero-timestamps", "drop");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(hasIssue(r.getInputValidation().getIssues(), "INVALID_ZERO_TIMESTAMPS")).isTrue();
+        assertThat(outputFiles()).isEmpty();
+        for (String good : List.of("keep", "blank", " Blank ")) {
+            assertThat(hasIssue(run(in, "zero-timestamps", good, "force", "true").getInputValidation().getIssues(),
+                    "INVALID_ZERO_TIMESTAMPS")).as(good).isFalse();
+        }
+    }
+
+    @Test
+    void passes_that_disagree_on_how_many_timestamps_were_blanked_fail_the_run() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), row(1, path("a"), "1", "", "0"), row(1, path("b"), "1", "", "5"));
+        String altered = String.join("\n", consent(1, "phs123456.c1"), row(1, path("a"), "1", "", "7"),
+                row(1, path("b"), "1", "", "5")) + "\n";
+        SplitMergedAllConceptsJob shifting = new SplitMergedAllConceptsJob(new ShiftingIo(altered), new DelimitedReader(),
+                new FenceMappingValidator(mapper), mapper);
+
+        JobResult r = executor.run(shifting, Map.of("input", in.toString(), "output", out.toString(),
+                "fence-mapping", "none", "zero-timestamps", "blank"), "t");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "PASS_MISMATCH")).isTrue();
+        assertThat(outputFiles()).isEmpty();
+    }
+
     // ------------------------------------------------------------ helpers under test
 
     @Test

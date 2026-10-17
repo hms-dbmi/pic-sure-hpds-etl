@@ -57,17 +57,20 @@ final class SplitRowCheck {
 
     private final boolean convertIso;
     private final boolean quarantine;
+    private final boolean blankZero;
     private final List<String> codes = new ArrayList<>(4);
     private final List<String> messages = new ArrayList<>(4);
     private int patient;
     private boolean hasTimestamp;
     private long timestamp;
     private String convertedTimestamp;
+    private boolean blankTimestamp;
     private TimestampForm convertedForm;
 
     SplitRowCheck(SplitRepairSettings settings) {
         this.convertIso = settings.convertIso();
         this.quarantine = settings.quarantine();
+        this.blankZero = settings.blankZeroTimestamps();
     }
 
     /** Checks one non-blank data row; true if it may be written. */
@@ -76,6 +79,7 @@ final class SplitRowCheck {
         messages.clear();
         hasTimestamp = false;
         convertedTimestamp = null;
+        blankTimestamp = false;
         convertedForm = null;
 
         // Only when quarantining: a stray header is told apart from other bad patient numbers. Without it
@@ -103,6 +107,9 @@ final class SplitRowCheck {
                     + SplitMergedAllConceptsJob.abbreviate(nval) + "'");
         }
         checkTimestamp(row.get(4));
+        // Decided on the parsed value, after the integer check and any ISO conversion, so '0', '00', '-0' and an
+        // ISO instant at the epoch are all blanked alike.
+        blankTimestamp = blankZero && codes.isEmpty() && hasTimestamp && timestamp == 0;
         return codes.isEmpty();
     }
 
@@ -223,6 +230,14 @@ final class SplitRowCheck {
     /** The epoch-millisecond text to put in column 4 if this row's ISO timestamp was converted, else null. */
     String convertedTimestamp() {
         return convertedTimestamp;
+    }
+
+    /**
+     * True if (zero-timestamps=blank) this row's timestamp is 0 and column 4 must be written empty. It
+     * applies after any conversion, so a converted ISO timestamp at the epoch is blanked too.
+     */
+    boolean blankTimestamp() {
+        return blankTimestamp;
     }
 
     /** The form that was converted, when {@link #convertedTimestamp()} is not null. */
