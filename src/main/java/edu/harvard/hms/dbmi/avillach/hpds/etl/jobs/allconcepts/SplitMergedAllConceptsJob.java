@@ -66,7 +66,8 @@ import java.util.stream.Stream;
  * rewrites ISO-8601 timestamps to epoch milliseconds (zoneless forms as UTC, like the hpds-ingest ingest-service), and {@code bad-rows=quarantine}
  * moves rows that break the contract, plus rows of consents that cannot name a partition, to
  * {@code rejects/rejected-rows.csv} instead of failing the run, up to {@code max-reject-fraction}. Both
- * passes decide each row with the same {@link SplitRowCheck}.
+ * passes decide each row with the same {@link SplitRowCheck}. {@code zero-timestamps=blank} writes a timestamp
+ * of 0 (after any conversion) as an empty field, because CSVLoader would date it 1970-01-01.
  *
  * <p><b>Auth caveat for {@code globals=own}:</b> HPDS reads only partitions whose name equals one
  * of the user's consent strings from PSAMA, and PSAMA grants only fence-mapping keys. Own-partitions
@@ -154,6 +155,11 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                                         + "'yyyy-MM-dd HH:mm:ss[.fraction]', an ISO local date-time (2023-06-06T15:20:00) or a date "
                                         + "(2023-06-06, midnight). Anything else stays an error.",
                                 "strict"),
+                        ParamSpec.optional("zero-timestamps",
+                                "'keep' (default): a timestamp of 0 is written as is (CSVLoader turns it into 1970-01-01); "
+                                        + "'blank': a timestamp that is the integer 0 ('0', '00', '-0', or an ISO instant converted to epoch 0) "
+                                        + "is written as an empty field, which loads as no timestamp. Independent of --timestamps and --bad-rows.",
+                                "keep"),
                         ParamSpec.optional("bad-rows",
                                 "'fail' (default): any row that breaks the CSVLoader contract, or any consent value that cannot "
                                         + "name a partition, fails the run and nothing is written; 'quarantine': such rows go to "
@@ -294,9 +300,11 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         List<DroppedConsent> droppedConsents = new ArrayList<>();
         p1.invalidConsents.forEach((value, problem) ->
                 droppedConsents.add(new DroppedConsent(value, problem, p2.droppedConsentRows.getOrDefault(value, 0L))));
-        Repairs repairs = new Repairs(settings.timestampsMode(), settings.badRowsMode(), settings.maxRejectFraction(),
+        Repairs repairs = new Repairs(settings.timestampsMode(), settings.zeroTimestampsMode(), settings.badRowsMode(),
+                settings.maxRejectFraction(),
                 pass2Ran ? p2.timestampsConverted : p1.timestampsConverted,
                 convertedByFormMap(pass2Ran ? p2.convertedByForm : p1.convertedByForm),
+                pass2Ran ? p2.timestampsBlanked : p1.timestampsBlanked,
                 new TreeMap<>(pass2Ran ? p2.rejected : p1.rejected), droppedConsents, rejectsUri);
 
         Output out = new Output(inputUri, outputUri, depth, globals, consentsPath,
@@ -334,10 +342,12 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         Map<String, Long> contractRejects = new TreeMap<>(p2.rejected);
         contractRejects.remove(INVALID_CONSENT_VALUE);
         if (!contractRejects.equals(p1.rejected) || p2.timestampsConverted != p1.timestampsConverted
-                || !Arrays.equals(p2.convertedByForm, p1.convertedByForm)) {
+                || !Arrays.equals(p2.convertedByForm, p1.convertedByForm) || p2.timestampsBlanked != p1.timestampsBlanked) {
             errors.add("PASS_MISMATCH", 0, "pass 1 rejected " + p1.rejected + " and converted " + p1.timestampsConverted
-                    + " timestamp(s) " + convertedByFormMap(p1.convertedByForm) + ", pass 2 rejected " + contractRejects
+                    + " timestamp(s) " + convertedByFormMap(p1.convertedByForm) + " and blanked " + p1.timestampsBlanked
+                    + ", pass 2 rejected " + contractRejects
                     + " and converted " + p2.timestampsConverted + " " + convertedByFormMap(p2.convertedByForm)
+                    + " and blanked " + p2.timestampsBlanked
                     + ": the passes did not see the same rows");
         }
     }
@@ -384,6 +394,10 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                     row.set(4, check.convertedTimestamp());
                     p.timestampsConverted++;
                     p.convertedByForm[check.convertedForm().ordinal()]++;
+                }
+                if (check.blankTimestamp()) {
+                    row.set(4, "");
+                    p.timestampsBlanked++;
                 }
                 if (check.hasTimestamp()) {
                     long v = check.timestamp();
@@ -464,6 +478,10 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                     row.set(4, check.convertedTimestamp());
                     p2.timestampsConverted++;
                     p2.convertedByForm[check.convertedForm().ordinal()]++;
+                }
+                if (check.blankTimestamp()) {
+                    row.set(4, "");
+                    p2.timestampsBlanked++;
                 }
                 int patient = check.patient();
                 String line = formatLine(row);
@@ -655,10 +673,12 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
     private static Map<String, Object> repairsSection(Repairs r) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("timestamps", r.timestampsMode());
+        m.put("zeroTimestamps", r.zeroTimestampsMode());
         m.put("badRows", r.badRowsMode());
         m.put("maxRejectFraction", r.maxRejectFraction());
         m.put("timestampsConverted", r.timestampsConverted());
         m.put("timestampsConvertedByForm", r.timestampsConvertedByForm());
+        m.put("timestampsBlanked", r.timestampsBlanked());
         Map<String, Object> rejected = new LinkedHashMap<>();
         rejected.put("total", r.rejectedRows());
         rejected.put("byReason", new TreeMap<>(r.rejectedByReason()));
@@ -718,7 +738,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         fenceReport(o, report);
     }
 
-    /** Every repair is reported as a warning, so a run that changed or set aside data never looks clean. */
+    /** Repairs that change or set aside data are warnings, so such a run never looks clean; blanked zero timestamps are only a note. */
     private static void repairsReport(Output o, ValidationReport report) {
         Repairs r = o.repairs();
         if (r.timestampsConverted() > 0) {
@@ -732,6 +752,11 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                         + r.timestampsConvertedByForm().get(SplitRowCheck.TimestampForm.DATE_UTC.label)
                         + ") and were assumed to be UTC, as the hpds-ingest ingest-service does; a date is midnight UTC");
             }
+        }
+        if (r.timestampsBlanked() > 0) {
+            // A note, not a warning: on the legacy merged file nearly every row has timestamp 0, so a warning would fire every run.
+            report.info("TIMESTAMPS_BLANKED", r.timestampsBlanked() + " timestamp(s) of 0 were written as an empty field "
+                    + "(zero-timestamps=" + r.zeroTimestampsMode() + ")");
         }
         if (r.rejectedRows() > 0) {
             report.warning("ROWS_QUARANTINED", r.rejectedRows() + " row(s) were not written to any partition and are in "
@@ -812,9 +837,11 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 .metric("timestampZero", o.timestampZero())
                 .metric("timestampLikelySeconds", o.timestampSeconds())
                 .metric("timestampsMode", o.repairs().timestampsMode())
+                .metric("zeroTimestampsMode", o.repairs().zeroTimestampsMode())
                 .metric("badRowsMode", o.repairs().badRowsMode())
                 .metric("timestampsConverted", o.repairs().timestampsConverted())
                 .metric("timestampsConvertedByForm", o.repairs().timestampsConvertedByForm())
+                .metric("timestampsBlanked", o.repairs().timestampsBlanked())
                 .metric("rejectedRows", o.repairs().rejectedRows())
                 .metric("rejectedByReason", o.repairs().rejectedByReason())
                 .metric("droppedConsents", o.repairs().droppedConsents().size())
@@ -981,6 +1008,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         long timestampZero;
         long timestampSeconds;
         long timestampsConverted;
+        long timestampsBlanked;
         /** {@link #timestampsConverted} by {@link SplitRowCheck.TimestampForm} ordinal. */
         final long[] convertedByForm = new long[SplitRowCheck.TimestampForm.values().length];
         String headerText;
@@ -1003,6 +1031,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         final Set<String> notes = new LinkedHashSet<>();
         final Set<String> studyNodesWithoutConsents = new TreeSet<>();
         long timestampsConverted;
+        long timestampsBlanked;
         final long[] convertedByForm = new long[SplitRowCheck.TimestampForm.values().length];
         final Map<String, Long> rejected = new TreeMap<>();
         /** Per dropped consent: source rows that had a copy meant for it. */
@@ -1136,8 +1165,9 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
     }
 
     /** What the opt-in repairs did. Rejected counts include the INVALID_CONSENT_VALUE rows. */
-    public record Repairs(String timestampsMode, String badRowsMode, double maxRejectFraction, long timestampsConverted,
-                          Map<String, Long> timestampsConvertedByForm, Map<String, Long> rejectedByReason, List<DroppedConsent> droppedConsents, String rejectsUri) {
+    public record Repairs(String timestampsMode, String zeroTimestampsMode, String badRowsMode, double maxRejectFraction,
+                          long timestampsConverted, Map<String, Long> timestampsConvertedByForm, long timestampsBlanked,
+                          Map<String, Long> rejectedByReason, List<DroppedConsent> droppedConsents, String rejectsUri) {
 
         long rejectedRows() {
             return rejectedByReason.values().stream().mapToLong(Long::longValue).sum();
