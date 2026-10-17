@@ -659,6 +659,360 @@ class SplitMergedAllConceptsJobTest {
         }
     }
 
+    // ------------------------------------------------------------ opt-in repairs
+
+    private static final String EMBEDDED_HEADER_ROW = "\"subject_id\",\"concept_path\",\"nval_num\",\"tval_char\",\"timestamp\"";
+
+    /** A rejects-file line: the reason, the 1-based row number, then the original row. */
+    private static String rejectLine(String reason, int rowNum, String originalRow) {
+        return q(reason) + "," + q(String.valueOf(rowNum)) + "," + originalRow;
+    }
+
+    private List<String> rejectLines() throws IOException {
+        return Files.readAllLines(out.resolve("rejects").resolve("rejected-rows.csv"), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Rows 1-8. Row 4 is an embedded header, 5 a bad nval, 6 and 7 belong to a consent whose name has a '-'
+     * (made-up study), 8 has an ISO timestamp. 4 of 8 rows are rejected.
+     */
+    private Path messyInput() throws IOException {
+        return input(
+                consent(1, "phs123456.c1"),
+                consent(2, "tutorial-demo_one"),
+                row(1, "\\phs123456\\a\\", "5", "", "1700000000000"),
+                EMBEDDED_HEADER_ROW,
+                row(1, "\\phs123456\\b\\", "2402L", "", ""),
+                row(2, "\\tutorial-demo_one\\x\\", "1", "", ""),
+                row(2, "\\tutorial-demo_one\\y\\", "", "v", ""),
+                row(1, "\\phs123456\\c\\", "7", "", "2023-06-06T15:20:00+00:00"));
+    }
+
+    private JobResult runRepaired(Path in, String... extra) {
+        List<String> params = new ArrayList<>(List.of("timestamps", "convert-iso", "bad-rows", "quarantine",
+                "max-reject-fraction", "0.6"));
+        params.addAll(List.of(extra));
+        return run(in, params.toArray(String[]::new));
+    }
+
+    @Test
+    void by_default_an_iso_timestamp_is_still_an_error_and_nothing_is_written() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", "2023-06-06T15:20:00+00:00"));
+
+        JobResult r = run(in);
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "BAD_TIMESTAMP")).isTrue();
+        assertThat(outputFiles()).isEmpty();
+    }
+
+    @Test
+    void by_default_an_embedded_header_is_still_a_bad_patient_num_and_quarantine_alone_does_not_convert() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), EMBEDDED_HEADER_ROW,
+                row(1, "\\phs123456\\a\\", "1", "", "2023-06-06T15:20:00Z"));
+
+        JobResult strict = run(in);
+        assertThat(strict.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(hasIssue(strict.getOutputValidation().getIssues(), "BAD_PATIENT_NUM")).isTrue();
+        assertThat(outputFiles()).isEmpty();
+
+        // quarantine without convert-iso: the ISO row is quarantined as BAD_TIMESTAMP, not converted
+        JobResult q = run(in, "bad-rows", "quarantine", "max-reject-fraction", "1");
+        assertThat(q.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(manifest().at("/repairs/rejected/byReason/BAD_TIMESTAMP").asLong()).isEqualTo(1);
+        assertThat(manifest().at("/repairs/timestampsConverted").asLong()).isZero();
+    }
+
+    @Test
+    void convert_iso_rewrites_timestamps_with_an_offset_to_epoch_millis() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"),
+                row(1, "\\phs123456\\a\\", "1", "", "2023-06-06T15:20:00+00:00"),
+                row(1, "\\phs123456\\b\\", "1", "", "2023-06-06T15:20:00Z"),
+                row(1, "\\phs123456\\c\\", "1", "", "2023-06-06T15:20:00.123Z"),
+                row(1, "\\phs123456\\d\\", "1", "", "2023-06-06T17:20:00+02:00"),
+                row(1, "\\phs123456\\e\\", "1", "", "1700000000000"));
+
+        JobResult r = run(in, "timestamps", "convert-iso");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(
+                row(1, "\\phs123456\\a\\", "1", "", "1686064800000"),
+                row(1, "\\phs123456\\b\\", "1", "", "1686064800000"),
+                row(1, "\\phs123456\\c\\", "1", "", "1686064800123"),
+                row(1, "\\phs123456\\d\\", "1", "", "1686064800000"),
+                row(1, "\\phs123456\\e\\", "1", "", "1700000000000"));
+        assertThat(manifest().at("/repairs/timestamps").asText()).isEqualTo("convert-iso");
+        assertThat(manifest().at("/repairs/badRows").asText()).isEqualTo("fail");
+        assertThat(manifest().at("/repairs/timestampsConverted").asLong()).isEqualTo(4);
+        assertThat(manifest().at("/repairs/rejectsFile").isNull()).isTrue();
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "TIMESTAMPS_CONVERTED")).isTrue();
+        assertThat(r.getMetrics()).containsEntry("timestampsConverted", 4L);
+        assertThat(outputFiles()).doesNotContain("rejects");
+    }
+
+    @Test
+    void convert_iso_never_guesses_a_timestamp_without_an_offset() throws Exception {
+        for (String bad : List.of("2023-06-06T15:20:00", "2023-06-06", "2023-06-06 15:20:00+00:00", "2023-06-06T15:20:00+0000",
+                "2023-13-06T15:20:00Z", "yesterday")) {
+            Path in = input(consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", bad));
+            JobResult r = run(in, "timestamps", "convert-iso", "force", "true");
+            assertThat(r.getExitCode()).as("timestamp '%s'", bad).isEqualTo(ExitCode.VALIDATION_FAILED);
+            assertThat(hasIssue(r.getOutputValidation().getIssues(), "BAD_TIMESTAMP")).isTrue();
+        }
+    }
+
+    @Test
+    void quarantine_writes_the_good_rows_and_files_the_rest_under_rejects() throws Exception {
+        JobResult r = runRepaired(messyInput());
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(lines("phs123456.c1")).containsExactly(
+                row(1, "\\phs123456\\a\\", "5", "", "1700000000000"),
+                row(1, "\\phs123456\\c\\", "7", "", "1686064800000"));
+        assertThat(outputFiles()).containsExactly("_consents-allConcepts.csv", "phs123456.c1-allConcepts.csv", "rejects",
+                "split_manifest.json");
+        // headerless, every field quoted, reason and row number first; the file is not a partition
+        assertThat(rejectLines()).containsExactly(
+                rejectLine("EMBEDDED_HEADER", 4, EMBEDDED_HEADER_ROW),
+                rejectLine("BAD_NVAL", 5, row(1, "\\phs123456\\b\\", "2402L", "", "")),
+                rejectLine("INVALID_CONSENT_VALUE", 6, row(2, "\\tutorial-demo_one\\x\\", "1", "", "")),
+                rejectLine("INVALID_CONSENT_VALUE", 7, row(2, "\\tutorial-demo_one\\y\\", "", "v", "")));
+        assertThat(out.resolve("rejects").resolve("rejected-rows.csv").getFileName().toString())
+                .doesNotEndWith("-allConcepts.csv");
+
+        JsonNode m = manifest();
+        JsonNode rows = m.get("rows");
+        assertThat(rows.get("input").asLong()).isEqualTo(8);
+        assertThat(rows.get("study").asLong()).isEqualTo(2);
+        assertThat(rows.get("global").asLong()).isEqualTo(2);
+        assertThat(rows.get("rejected").asLong()).isEqualTo(4);
+        assertThat(rows.get("accounted").asLong()).isEqualTo(8);
+        assertThat(rows.get("balanced").asBoolean()).isTrue();
+        JsonNode repairs = m.get("repairs");
+        assertThat(repairs.get("timestamps").asText()).isEqualTo("convert-iso");
+        assertThat(repairs.get("badRows").asText()).isEqualTo("quarantine");
+        assertThat(repairs.get("maxRejectFraction").asDouble()).isEqualTo(0.6);
+        assertThat(repairs.get("timestampsConverted").asLong()).isEqualTo(1);
+        assertThat(repairs.at("/rejected/total").asLong()).isEqualTo(4);
+        assertThat(repairs.at("/rejected/byReason/EMBEDDED_HEADER").asLong()).isEqualTo(1);
+        assertThat(repairs.at("/rejected/byReason/BAD_NVAL").asLong()).isEqualTo(1);
+        assertThat(repairs.at("/rejected/byReason/INVALID_CONSENT_VALUE").asLong()).isEqualTo(2);
+        assertThat(repairs.get("droppedConsents")).hasSize(1);
+        assertThat(repairs.at("/droppedConsents/0/value").asText()).isEqualTo("tutorial-demo_one");
+        assertThat(repairs.at("/droppedConsents/0/rows").asLong()).isEqualTo(2);
+        assertThat(repairs.at("/droppedConsents/0/problem").asText()).contains("-");
+        assertThat(repairs.get("rejectsFile").asText()).isEqualTo(out.resolve("rejects").resolve("rejected-rows.csv").toString());
+        // the dropped consent made no partition, and no rejected row leaked into one
+        assertThat(manifest().get("partitions")).extracting(n -> n.get("name").asText())
+                .containsExactly("_consents", "phs123456.c1");
+        assertThat(Files.readString(out.resolve("phs123456.c1-allConcepts.csv"))).doesNotContain("2402L");
+
+        List<String> codes = r.getOutputValidation().getIssues().stream().map(ValidationIssue::code).toList();
+        assertThat(codes).contains("ROWS_QUARANTINED", "CONSENTS_DROPPED", "TIMESTAMPS_CONVERTED");
+        assertThat(r.getMetrics()).containsEntry("rejectedRows", 4L).containsEntry("balanced", true);
+        assertThat(r.getOutputValidation().hasErrors()).isFalse();
+    }
+
+    @Test
+    void a_dropped_consent_does_not_stop_the_patients_other_consents_and_counts_each_lost_copy() throws Exception {
+        Path in = input(
+                consent(1, "phs123456.c1"),
+                consent(1, "phs123456.c-9"),
+                consent(2, "phs123456.c-9"),
+                row(1, "\\phs123456\\a\\", "1", "", ""),
+                row(2, "\\phs123456\\a\\", "2", "", ""));
+
+        JobResult r = run(in, "bad-rows", "quarantine", "max-reject-fraction", "0.5");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        // patient 1 still gets the row in c1; patient 2 had only the dropped consent, so its row is rejected
+        assertThat(lines("phs123456.c1")).contains(row(1, "\\phs123456\\a\\", "1", "", ""))
+                .doesNotContain(row(2, "\\phs123456\\a\\", "2", "", ""));
+        assertThat(rejectLines()).containsExactly(rejectLine("INVALID_CONSENT_VALUE", 5, row(2, "\\phs123456\\a\\", "2", "", "")));
+        assertThat(manifest().at("/repairs/droppedConsents/0/value").asText()).isEqualTo("phs123456.c-9");
+        assertThat(manifest().at("/repairs/droppedConsents/0/rows").asLong()).isEqualTo(2); // one per patient
+        assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
+    }
+
+    @Test
+    void a_dropped_consent_in_by_patient_mode_rejects_global_rows_that_had_nowhere_else_to_go() throws Exception {
+        Path in = input(
+                consent(1, "phs123456.c1"),
+                consent(2, "demo-bad"),
+                row(1, "\\DCC\\age\\", "30", "", ""),
+                row(2, "\\DCC\\age\\", "40", "", ""));
+
+        JobResult r = run(in, "globals", "by-patient", "bad-rows", "quarantine", "max-reject-fraction", "0.5");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(rejectLines()).extracting(l -> l.substring(0, l.indexOf(',')))
+                .containsExactly(q("INVALID_CONSENT_VALUE"), q("INVALID_CONSENT_VALUE"));
+        assertThat(lines("phs123456.c1")).hasSize(2); // its own _consents row (global) and the age row
+        assertThat(manifest().at("/rows/rejected").asLong()).isEqualTo(2); // patient 2's consent row and age row
+        assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
+    }
+
+    @Test
+    void a_leading_header_is_dropped_not_rejected_when_quarantining() throws Exception {
+        Path in = input(EMBEDDED_HEADER_ROW, consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", ""));
+
+        JobResult r = run(in, "bad-rows", "quarantine");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(manifest().at("/rows/rejected").asLong()).isZero();
+        assertThat(manifest().at("/rows/input").asLong()).isEqualTo(2);
+        assertThat(manifest().at("/repairs/rejectsFile").isNull()).isTrue();
+        assertThat(out.resolve("rejects")).doesNotExist();
+    }
+
+    @Test
+    void a_bad_patient_with_a_real_concept_path_is_not_taken_for_a_header() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", ""),
+                "\"abc\",\"\\phs123456\\a\\\",\"1\",\"\",\"\"", "\"1\",\"\\phs123456\\a\\\",\"1\"");
+
+        JobResult r = run(in, "bad-rows", "quarantine", "max-reject-fraction", "0.5");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(manifest().at("/repairs/rejected/byReason/BAD_PATIENT_NUM").asLong()).isEqualTo(1);
+        assertThat(manifest().at("/repairs/rejected/byReason/BAD_FIELD_COUNT").asLong()).isEqualTo(1);
+        assertThat(manifest().at("/repairs/rejected/byReason/EMBEDDED_HEADER").isMissingNode()).isTrue();
+    }
+
+    @Test
+    void exceeding_max_reject_fraction_fails_with_nothing_written() throws Exception {
+        // default 0.01: 4 of 8 rows rejected
+        JobResult r = run(messyInput(), "timestamps", "convert-iso", "bad-rows", "quarantine");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        List<ValidationIssue> issues = r.getOutputValidation().getIssues();
+        assertThat(issues).anyMatch(i -> i.code().equals("REJECT_FRACTION_EXCEEDED") && i.message().contains("rejected 2 of 8"));
+        assertThat(hasIssue(issues, "NOTHING_WRITTEN")).isTrue();
+        assertThat(outputFiles()).isEmpty();
+    }
+
+    @Test
+    void rejects_from_dropped_consents_count_against_the_fraction_too() throws Exception {
+        List<String> lines = new ArrayList<>(List.of(consent(1, "phs123456.c1"), consent(2, "demo-bad")));
+        for (int i = 0; i < 100; i++) {
+            lines.add(row(1, "\\phs123456\\v" + i + "\\", "1", "", ""));
+        }
+        lines.add(row(2, "\\demo-bad\\x\\", "1", "", ""));
+        lines.add(row(2, "\\demo-bad\\y\\", "1", "", ""));
+        Path in = input(lines.toArray(String[]::new));
+
+        JobResult r = run(in, "bad-rows", "quarantine"); // 2 of 104 > 0.01
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(r.getOutputValidation().getIssues()).anyMatch(i -> i.code().equals("REJECT_FRACTION_EXCEEDED")
+                && i.message().contains("INVALID_CONSENT_VALUE=2"));
+        assertThat(outputFiles()).isEmpty();
+
+        assertThat(run(in, "bad-rows", "quarantine", "max-reject-fraction", "0.02", "force", "true").getExitCode())
+                .isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+    }
+
+    @Test
+    void a_fraction_of_exactly_the_limit_is_accepted() throws Exception {
+        List<String> lines = new ArrayList<>(List.of(consent(1, "phs123456.c1")));
+        for (int i = 0; i < 98; i++) {
+            lines.add(row(1, "\\phs123456\\v" + i + "\\", "1", "", ""));
+        }
+        lines.add(row(1, "\\phs123456\\bad\\", "x", "", "")); // 1 of 100 data rows
+        Path in = input(lines.toArray(String[]::new));
+
+        assertThat(run(in, "bad-rows", "quarantine").getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+    }
+
+    @Test
+    void the_repair_params_are_validated() throws Exception {
+        Path in = standardInput();
+
+        for (String bad : List.of("1.5", "-0.1", "abc", "NaN", "Infinity", "0x1p-3", "1,5")) {
+            assertThat(hasIssue(run(in, "max-reject-fraction", bad).getInputValidation().getIssues(),
+                    "INVALID_MAX_REJECT_FRACTION")).as(bad).isTrue();
+        }
+        assertThat(hasIssue(run(in, "timestamps", "iso").getInputValidation().getIssues(), "INVALID_TIMESTAMPS")).isTrue();
+        assertThat(hasIssue(run(in, "bad-rows", "skip").getInputValidation().getIssues(), "INVALID_BAD_ROWS")).isTrue();
+        assertThat(run(in, "bad-rows", "skip").getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(outputFiles()).isEmpty();
+        for (String good : List.of("0", "1", "0.5", ".25", "1e-2")) {
+            assertThat(hasIssue(run(in, "max-reject-fraction", good, "force", "true").getInputValidation().getIssues(),
+                    "INVALID_MAX_REJECT_FRACTION")).as(good).isFalse();
+        }
+    }
+
+    @Test
+    void the_default_run_reports_empty_repairs() throws Exception {
+        JobResult r = run(standardInput());
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        JsonNode repairs = manifest().get("repairs");
+        assertThat(repairs.get("timestamps").asText()).isEqualTo("strict");
+        assertThat(repairs.get("badRows").asText()).isEqualTo("fail");
+        assertThat(repairs.get("maxRejectFraction").asDouble()).isEqualTo(0.01);
+        assertThat(repairs.get("timestampsConverted").asLong()).isZero();
+        assertThat(repairs.at("/rejected/total").asLong()).isZero();
+        assertThat(repairs.get("droppedConsents")).isEmpty();
+        assertThat(repairs.get("rejectsFile").isNull()).isTrue();
+        assertThat(manifest().at("/rows/rejected").asLong()).isZero();
+    }
+
+    /** Serves different content on the second read of the input, as if the two passes saw different rows. */
+    private static final class ShiftingIo extends IoResolver {
+        private final byte[] secondRead;
+        private int reads;
+
+        ShiftingIo(String secondRead) {
+            super(null);
+            this.secondRead = secondRead.getBytes(StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public InputStream openInput(String uri, ObjectInfo pin) {
+            return ++reads == 2 ? new ByteArrayInputStream(secondRead) : super.openInput(uri, pin);
+        }
+    }
+
+    @Test
+    void a_pass_that_disagrees_with_the_first_fails_the_run_instead_of_writing() throws Exception {
+        Path in = input(consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "x", "", ""),
+                row(1, "\\phs123456\\b\\", "1", "", ""));
+        String altered = String.join("\n", consent(1, "phs123456.c1"), row(1, "\\phs123456\\a\\", "1", "", ""),
+                row(1, "\\phs123456\\b\\", "1", "", "")) + "\n";
+        SplitMergedAllConceptsJob shifting = new SplitMergedAllConceptsJob(new ShiftingIo(altered), new DelimitedReader(),
+                new FenceMappingValidator(mapper), mapper);
+
+        JobResult r = executor.run(shifting, Map.of("input", in.toString(), "output", out.toString(),
+                "fence-mapping", "none", "bad-rows", "quarantine", "max-reject-fraction", "0.5"), "t");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(hasIssue(r.getOutputValidation().getIssues(), "PASS_MISMATCH")).isTrue();
+        assertThat(outputFiles()).isEmpty();
+    }
+
+    @Test
+    void a_row_rejected_in_pass_one_is_never_written_in_pass_two() throws Exception {
+        List<String> lines = new ArrayList<>(List.of(consent(1, "phs123456.c1"), consent(2, "phs123456.c2")));
+        List<String> expectedRejects = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            lines.add(row(1 + i % 2, "\\phs123456\\ok" + i + "\\", "1", "", ""));
+            if (i % 5 == 0) {
+                String bad = row(1 + i % 2, "\\phs123456\\bad" + i + "\\", "n/a", "", "");
+                lines.add(bad);
+                expectedRejects.add(rejectLine("BAD_NVAL", lines.size(), bad));
+            }
+        }
+
+        JobResult r = run(input(lines.toArray(String[]::new)), "bad-rows", "quarantine", "max-reject-fraction", "0.5");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(rejectLines()).containsExactlyElementsOf(expectedRejects);
+        for (String partition : List.of("phs123456.c1", "phs123456.c2", "_consents")) {
+            assertThat(lines(partition)).noneMatch(l -> l.contains("bad"));
+        }
+        assertThat(manifest().at("/rows/balanced").asBoolean()).isTrue();
+    }
+
     // ------------------------------------------------------------ helpers under test
 
     @Test

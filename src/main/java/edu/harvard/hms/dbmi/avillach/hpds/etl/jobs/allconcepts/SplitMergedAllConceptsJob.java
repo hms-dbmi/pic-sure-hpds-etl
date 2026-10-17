@@ -61,6 +61,12 @@ import java.util.stream.Stream;
  * Rows are spooled to one temp file per partition and uploaded only after the whole input has
  * been read and found valid; nothing is ever deleted.
  *
+ * <p><b>Opt-in repairs</b> (off by default, always counted and reported): {@code timestamps=convert-iso}
+ * rewrites ISO-8601 timestamps that carry an offset to epoch milliseconds, and {@code bad-rows=quarantine}
+ * moves rows that break the contract, plus rows of consents that cannot name a partition, to
+ * {@code rejects/rejected-rows.csv} instead of failing the run, up to {@code max-reject-fraction}. Both
+ * passes decide each row with the same {@link SplitRowCheck}.
+ *
  * <p><b>Auth caveat for {@code globals=own}:</b> HPDS reads only partitions whose name equals one
  * of the user's consent strings from PSAMA, and PSAMA grants only fence-mapping keys. Own-partitions
  * therefore load but stay unreachable until PSAMA grants those exact names. See
@@ -76,11 +82,14 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
     public static final String MANIFEST_NAME = "split_manifest.json";
     public static final String GLOBALS_OWN = "own";
     public static final String GLOBALS_BY_PATIENT = "by-patient";
+    /** Quarantined rows: {output}/rejects/rejected-rows.csv. Deliberately not named *-allConcepts.csv, so no loader reads it. */
+    public static final String REJECTS_NAME = "rejected-rows.csv";
+    public static final String REJECTS_DIR = "rejects";
+    public static final String INVALID_CONSENT_VALUE = "INVALID_CONSENT_VALUE";
 
     /** The legacy bucket and the in-boundary mirror's key prefix. Writing under it is refused. */
     static final String MIRRORED_BUCKET_MARKER = "avillach-73-bdcatalyst-etl";
 
-    private static final Pattern TIMESTAMP = Pattern.compile("-?[0-9]*");
     private static final Pattern STUDY_ID = Pattern.compile("phs[0-9]{6}");
     private static final int MAX_OPEN_WRITERS = 128;
     private static final int MAX_SAMPLES = 5;
@@ -136,9 +145,27 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                                 DEFAULT_FENCE_MAPPING),
                         ParamSpec.optional("force",
                                 "Write into a non-empty output prefix (existing objects are overwritten, never deleted; default false)",
-                                "false")),
+                                "false"),
+                        ParamSpec.optional("timestamps",
+                                "'strict' (default): a timestamp that is not blank or an integer is an error; "
+                                        + "'convert-iso': an ISO-8601 timestamp with an explicit offset or Z "
+                                        + "(2023-06-06T15:20:00+00:00) is rewritten to epoch milliseconds and counted. "
+                                        + "Anything without an offset is never guessed.",
+                                "strict"),
+                        ParamSpec.optional("bad-rows",
+                                "'fail' (default): any row that breaks the CSVLoader contract, or any consent value that cannot "
+                                        + "name a partition, fails the run and nothing is written; 'quarantine': such rows go to "
+                                        + "{output}/rejects/" + REJECTS_NAME + " (with the reason and row number), a bad consent is "
+                                        + "dropped for every patient, and the run continues",
+                                "fail"),
+                        ParamSpec.optional("max-reject-fraction",
+                                "Largest tolerated share of data rows that may be quarantined, a decimal in [0,1] "
+                                        + "(default " + SplitRepairSettings.DEFAULT_MAX_REJECT_FRACTION
+                                        + "); above it the run fails and nothing is written. Only used with bad-rows=quarantine.",
+                                "0.01")),
                 List.of("{output}/{partition}-allConcepts.csv per consent partition (headerless, all fields quoted)",
-                        "{output}/" + MANIFEST_NAME + " with row accounting per partition"));
+                        "{output}/" + MANIFEST_NAME + " with row accounting per partition and the repairs applied",
+                        "{output}/rejects/" + REJECTS_NAME + " (only with bad-rows=quarantine and at least one rejected row)"));
     }
 
     // ---------------------------------------------------------------- validation
@@ -153,6 +180,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         if (normalize(ctx.get("consents-path", DEFAULT_CONSENTS_PATH)).isBlank()) {
             report.error("INVALID_CONSENTS_PATH", "consents-path must not be blank", "--consents-path");
         }
+        SplitRepairSettings.parse(ctx, report);
         boolean force = false;
         String forceRaw = ctx.get("force").orElse(null);
         if (forceRaw != null) {
@@ -208,6 +236,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         String globals = ctx.get("globals", GLOBALS_OWN);
         String consentsPath = normalize(ctx.get("consents-path", DEFAULT_CONSENTS_PATH));
         String fenceUri = ctx.get("fence-mapping", DEFAULT_FENCE_MAPPING);
+        SplitRepairSettings settings = SplitRepairSettings.parse(ctx, null);
 
         // Both passes must read the same bytes. Pin the object now; every later open and the checks
         // after each pass fail if it was replaced, and nothing has been uploaded by then.
@@ -215,19 +244,27 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         log.info("Input pinned: versionId={} eTag={} size={}", pin.versionId(), pin.eTag(), pin.size());
 
         Findings errors = new Findings();
-        Pass1 p1 = pass1(inputUri, pin, consentsPath, errors);
+        Pass1 p1 = pass1(inputUri, pin, consentsPath, settings, errors);
         io.verifyUnchanged(inputUri, pin);
-        validatePartitionNames(p1, errors);
+        // Stop before the second pass if the contract rejects alone already exceed the budget.
+        checkRejectFraction(p1.rejectedTotal(), p1.rows, settings, p1.rejected, errors);
+        validatePartitionNames(p1, settings, errors);
 
         Map<String, PartitionInfo> partitions = new TreeMap<>();
         Pass2 p2 = new Pass2();
-        if (errors.isEmpty()) {
+        String rejectsUri = null;
+        boolean pass2Ran = errors.isEmpty();
+        if (pass2Ran) {
             Spool spool = new Spool();
+            Spool rejectSpool = new Spool();
             try {
-                pass2(inputUri, pin, depth, GLOBALS_BY_PATIENT.equals(globals), p1, p2, spool, errors);
+                pass2(inputUri, pin, depth, GLOBALS_BY_PATIENT.equals(globals), settings, p1, p2, spool, rejectSpool, errors);
                 io.verifyUnchanged(inputUri, pin);
+                checkPassesAgree(p1, p2, errors);
+                checkRejectFraction(p2.rejectedTotal(), p1.rows, settings, p2.rejected, errors);
                 if (errors.isEmpty()) {
                     spool.closeAll();
+                    rejectSpool.closeAll();
                     for (Map.Entry<String, PartitionStats> e : new TreeMap<>(p2.partitions).entrySet()) {
                         String name = e.getKey();
                         PartitionStats s = e.getValue();
@@ -235,23 +272,36 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                         io.writeOutputFile(joinPath(outputUri, file), spool.file(name));
                         partitions.put(name, new PartitionInfo(name, s.kind, s.rows, s.patients.cardinality(), file));
                     }
+                    if (p2.rejectedTotal() > 0) {
+                        rejectsUri = joinPath(joinPath(outputUri, REJECTS_DIR), REJECTS_NAME);
+                        io.writeOutputFile(rejectsUri, rejectSpool.file(REJECTS_NAME));
+                    }
                 }
             } catch (IOException | UncheckedIOException e) {
                 // UncheckedIOException comes from closing an evicted writer inside the LRU map.
                 throw new InfrastructureException("Failed spooling split output", e);
             } finally {
                 spool.cleanUp();
+                rejectSpool.cleanUp();
             }
         }
 
         FenceCheck fence = errors.isEmpty() ? fenceCrossCheck(fenceUri, partitions.values()) : FenceCheck.skipped();
+
+        // Pass 2 is authoritative for what was repaired; if it never ran, report what pass 1 saw.
+        List<DroppedConsent> droppedConsents = new ArrayList<>();
+        p1.invalidConsents.forEach((value, problem) ->
+                droppedConsents.add(new DroppedConsent(value, problem, p2.droppedConsentRows.getOrDefault(value, 0L))));
+        Repairs repairs = new Repairs(settings.timestampsMode(), settings.badRowsMode(), settings.maxRejectFraction(),
+                pass2Ran ? p2.timestampsConverted : p1.timestampsConverted,
+                new TreeMap<>(pass2Ran ? p2.rejected : p1.rejected), droppedConsents, rejectsUri);
 
         Output out = new Output(inputUri, outputUri, depth, globals, consentsPath,
                 p1.headerText, p1.rows, p1.blankRows,
                 p2.studyRows, p2.globalRows, p2.droppedStudyNoConsent, p2.droppedGlobalNoConsent,
                 p1.timestampZero, p1.timestampSeconds, p1.consentRows, p1.consentsByPatient.size(),
                 new ArrayList<>(partitions.values()), errors.messages(), new ArrayList<>(p2.notes),
-                new ArrayList<>(p1.notes), List.copyOf(p2.studyNodesWithoutConsents), pin, fence, null);
+                new ArrayList<>(p1.notes), List.copyOf(p2.studyNodesWithoutConsents), pin, fence, repairs, null);
 
         if (errors.isEmpty()) {
             String manifestUri = joinPath(outputUri, MANIFEST_NAME);
@@ -261,10 +311,38 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         return out;
     }
 
+    /** Quarantine is a repair, not a way to halve a broken input: too many rejects fail the run. */
+    private static void checkRejectFraction(long rejected, long dataRows, SplitRepairSettings settings,
+                                            Map<String, Long> byReason, Findings errors) {
+        if (!settings.quarantine() || rejected == 0 || dataRows == 0) {
+            return;
+        }
+        double fraction = (double) rejected / dataRows;
+        if (fraction > settings.maxRejectFraction()) {
+            errors.add("REJECT_FRACTION_EXCEEDED", 0, "rejected " + rejected + " of " + dataRows + " data row(s) ("
+                    + String.format("%.4f%%", fraction * 100) + "), more than max-reject-fraction "
+                    + settings.maxRejectFraction() + " allows; by reason " + new TreeMap<>(byReason)
+                    + ". Nothing was written; look at the cause before raising --max-reject-fraction");
+        }
+    }
+
+    /** Both passes run the same {@link SplitRowCheck}; a difference means the input moved under us. */
+    private static void checkPassesAgree(Pass1 p1, Pass2 p2, Findings errors) {
+        Map<String, Long> contractRejects = new TreeMap<>(p2.rejected);
+        contractRejects.remove(INVALID_CONSENT_VALUE);
+        if (!contractRejects.equals(p1.rejected) || p2.timestampsConverted != p1.timestampsConverted) {
+            errors.add("PASS_MISMATCH", 0, "pass 1 rejected " + p1.rejected + " and converted " + p1.timestampsConverted
+                    + " timestamp(s), pass 2 rejected " + contractRejects + " and converted " + p2.timestampsConverted
+                    + ": the passes did not see the same rows");
+        }
+    }
+
     // ---------------------------------------------------------------- pass 1
 
-    private Pass1 pass1(String inputUri, IoResolver.ObjectInfo pin, String consentsPath, Findings errors) {
+    private Pass1 pass1(String inputUri, IoResolver.ObjectInfo pin, String consentsPath, SplitRepairSettings settings,
+                        Findings errors) {
         Pass1 p = new Pass1();
+        SplitRowCheck check = new SplitRowCheck(settings);
         long rowNum = 0;
         try (Stream<List<String>> rows = delimitedReader.streamRows(io.openInput(inputUri, pin), DelimitedReader.COMMA)) {
             for (List<String> row : (Iterable<List<String>>) rows::iterator) {
@@ -278,9 +356,29 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                     continue;
                 }
                 p.rows++;
-                Integer patient = checkRow(row, rowNum, errors, p);
-                if (patient == null || row.get(1).length() != consentsPath.length()
-                        || !normalize(row.get(1)).equals(consentsPath)) {
+                if (!check.run(row)) {
+                    if (settings.quarantine()) {
+                        p.rejected.merge(check.reason(), 1L, Long::sum);
+                    } else {
+                        for (int i = 0; i < check.problemCount(); i++) {
+                            errors.add(check.code(i), rowNum, check.message(i));
+                        }
+                    }
+                    continue;
+                }
+                if (check.convertedTimestamp() != null) {
+                    row.set(4, check.convertedTimestamp());
+                    p.timestampsConverted++;
+                }
+                if (check.hasTimestamp()) {
+                    long v = check.timestamp();
+                    if (v == 0) {
+                        p.timestampZero++;
+                    } else if (v > 0 && v < SECONDS_CEILING) {
+                        p.timestampSeconds++;
+                    }
+                }
+                if (row.get(1).length() != consentsPath.length() || !normalize(row.get(1)).equals(consentsPath)) {
                     continue;
                 }
                 String consent = row.get(3).trim();
@@ -289,7 +387,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                     continue;
                 }
                 p.consentRows++;
-                p.consentsByPatient.computeIfAbsent(patient, k -> new TreeSet<>()).add(consent);
+                p.consentsByPatient.computeIfAbsent(check.patient(), k -> new TreeSet<>()).add(consent);
                 p.studies.add(studyOf(consent));
             }
         }
@@ -299,56 +397,25 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         return p;
     }
 
-    /** CSVLoader contract, applied to every data row. Returns the patient number, or null if invalid. */
-    private static Integer checkRow(List<String> row, long rowNum, Findings errors, Pass1 p) {
-        if (row.size() != 5) {
-            errors.add("BAD_FIELD_COUNT", rowNum, "expected 5 fields, found " + row.size());
-            return null;
-        }
-        Integer patient = parseInt(row.get(0));
-        if (patient == null) {
-            errors.add("BAD_PATIENT_NUM", rowNum, "patient_num is not an integer: '" + abbreviate(row.get(0)) + "'");
-            return null;
-        }
-        boolean ok = true;
-        if (row.get(1).isEmpty()) {
-            errors.add("EMPTY_CONCEPT_PATH", rowNum, "concept_path is empty");
-            ok = false;
-        }
-        String nval = row.get(2);
-        if (!nval.isEmpty() && !parsesAsDouble(nval)) {
-            errors.add("BAD_NVAL", rowNum, "nval is not a number (CSVLoader aborts on Double.parseDouble): '"
-                    + abbreviate(nval) + "'");
-            ok = false;
-        }
-        String ts = row.get(4);
-        if (!TIMESTAMP.matcher(ts).matches()) {
-            errors.add("BAD_TIMESTAMP", rowNum, "timestamp must be blank or an integer (CSVLoader aborts on anything else): '"
-                    + abbreviate(ts) + "'");
-            ok = false;
-        } else if (!ts.isEmpty()) {
-            try {
-                long v = Long.parseLong(ts);
-                if (v == 0) {
-                    p.timestampZero++;
-                } else if (v > 0 && v < SECONDS_CEILING) {
-                    p.timestampSeconds++;
-                }
-            } catch (NumberFormatException e) {
-                errors.add("BAD_TIMESTAMP", rowNum, "timestamp does not fit a 64-bit integer: '" + abbreviate(ts) + "'");
-                ok = false;
-            }
-        }
-        return ok ? patient : null;
-    }
-
-    private void validatePartitionNames(Pass1 p, Findings errors) {
+    /**
+     * A consent that cannot name a partition is an error, or with bad-rows=quarantine it is dropped for
+     * every patient (renaming it would put the data where HPDS never looks).
+     */
+    private void validatePartitionNames(Pass1 p, SplitRepairSettings settings, Findings errors) {
         Set<String> seen = new HashSet<>();
         for (Set<String> consents : p.consentsByPatient.values()) {
             for (String consent : consents) {
-                if (seen.add(consent) && partitionNameProblem(consent) != null) {
-                    errors.add("INVALID_CONSENT_VALUE", 0, "consent '" + abbreviate(consent) + "' cannot name a partition: "
-                            + partitionNameProblem(consent));
+                if (!seen.add(consent)) {
+                    continue;
+                }
+                String problem = partitionNameProblem(consent);
+                if (problem == null) {
+                    continue;
+                }
+                if (settings.quarantine()) {
+                    p.invalidConsents.put(consent, problem);
+                } else {
+                    errors.add(INVALID_CONSENT_VALUE, 0, "consent '" + abbreviate(consent) + "' cannot name a partition: " + problem);
                 }
             }
         }
@@ -356,8 +423,9 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
 
     // ---------------------------------------------------------------- pass 2
 
-    private void pass2(String inputUri, IoResolver.ObjectInfo pin, int depth, boolean byPatient, Pass1 p1, Pass2 p2, Spool spool,
-                       Findings errors) throws IOException {
+    private void pass2(String inputUri, IoResolver.ObjectInfo pin, int depth, boolean byPatient, SplitRepairSettings settings,
+                       Pass1 p1, Pass2 p2, Spool spool, Spool rejectSpool, Findings errors) throws IOException {
+        SplitRowCheck check = new SplitRowCheck(settings);
         long rowNum = 0;
         Map<String, String> globalNameToNode = new HashMap<>();
         try (Stream<List<String>> rows = delimitedReader.streamRows(io.openInput(inputUri, pin), DelimitedReader.COMMA)) {
@@ -369,22 +437,42 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 if (rowNum == 1 && isHeader(row)) {
                     continue;
                 }
-                int patient = parseInt(row.get(0));
+                if (!check.run(row)) {
+                    if (settings.quarantine()) {
+                        reject(check.reason(), rowNum, row, p2, rejectSpool);
+                    } else {
+                        errors.add("PASS_MISMATCH", rowNum, "row broke the contract in pass 2 but not in pass 1");
+                    }
+                    continue;
+                }
+                if (check.convertedTimestamp() != null) {
+                    row.set(4, check.convertedTimestamp());
+                    p2.timestampsConverted++;
+                }
+                int patient = check.patient();
                 String line = formatLine(row);
                 String node = segment(row.get(1), depth);
                 Set<String> consents = p1.consentsByPatient.getOrDefault(patient, Set.of());
 
                 if (p1.studies.contains(node)) {
                     int written = 0;
+                    int invalid = 0;
                     for (String consent : consents) {
                         if (studyOf(consent).equals(node)) {
-                            written += emit(consent, "study", patient, line, p2, spool, errors, rowNum);
+                            if (p1.invalidConsents.containsKey(consent)) {
+                                invalid++;
+                                p2.droppedConsentRows.merge(consent, 1L, Long::sum);
+                            } else {
+                                written += emit(consent, "study", patient, line, p2, spool, errors, rowNum);
+                            }
                         }
                     }
-                    if (written == 0) {
-                        p2.droppedStudyNoConsent++;
-                    } else {
+                    if (written > 0) {
                         p2.studyRows++;
+                    } else if (invalid > 0) {
+                        reject(INVALID_CONSENT_VALUE, rowNum, row, p2, rejectSpool);
+                    } else {
+                        p2.droppedStudyNoConsent++;
                     }
                 } else if (byPatient) {
                     noteStudyLookingNode(node, p2);
@@ -392,10 +480,21 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                         p2.droppedGlobalNoConsent++;
                         continue;
                     }
+                    int written = 0;
+                    int invalid = 0;
                     for (String consent : consents) {
-                        emit(consent, "study", patient, line, p2, spool, errors, rowNum);
+                        if (p1.invalidConsents.containsKey(consent)) {
+                            invalid++;
+                            p2.droppedConsentRows.merge(consent, 1L, Long::sum);
+                        } else {
+                            written += emit(consent, "study", patient, line, p2, spool, errors, rowNum);
+                        }
                     }
-                    p2.globalRows++;
+                    if (written == 0 && invalid > 0) {
+                        reject(INVALID_CONSENT_VALUE, rowNum, row, p2, rejectSpool);
+                    } else {
+                        p2.globalRows++;
+                    }
                 } else {
                     if (node.isEmpty()) {
                         errors.add("EMPTY_GLOBAL_NAME", rowNum, "global variable has no segment at depth " + depth
@@ -419,6 +518,19 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 }
             }
         }
+    }
+
+    /**
+     * Files a row under {@code rejects/}: {@code reason, row, <the five fields>}, every field quoted.
+     * {@code row} is the number among non-blank rows, a leading header counting as row 1, as in error messages.
+     */
+    private static void reject(String reason, long rowNum, List<String> row, Pass2 p2, Spool rejectSpool) throws IOException {
+        p2.rejected.merge(reason, 1L, Long::sum);
+        List<String> out = new ArrayList<>(row.size() + 2);
+        out.add(reason);
+        out.add(Long.toString(rowNum));
+        out.addAll(row);
+        rejectSpool.write(REJECTS_NAME, formatLine(out));
     }
 
     /** A phsNNNNNN node that is not a study in _consents is handled as a global; surface it. */
@@ -502,6 +614,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         dropped.put("studyNoConsent", o.droppedStudyNoConsent());
         dropped.put("globalNoConsent", o.droppedGlobalNoConsent());
         rows.put("dropped", dropped);
+        rows.put("rejected", o.repairs().rejectedRows());
         rows.put("accounted", o.accountedRows());
         rows.put("balanced", o.balanced());
         rows.put("partitionLines", o.partitionLines());
@@ -511,6 +624,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         ts.put("zero", o.timestampZero());
         ts.put("likelySeconds", o.timestampSeconds());
         m.put("timestamps", ts);
+        m.put("repairs", repairsSection(o.repairs()));
         m.put("patientsWithConsents", o.patientsWithConsents());
         m.put("studyNodesWithoutConsents", o.studyNodesWithoutConsents());
         m.put("partitions", o.partitions());
@@ -520,6 +634,21 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         } catch (IOException e) {
             throw new InfrastructureException("Failed to write " + manifestUri, e);
         }
+    }
+
+    private static Map<String, Object> repairsSection(Repairs r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("timestamps", r.timestampsMode());
+        m.put("badRows", r.badRowsMode());
+        m.put("maxRejectFraction", r.maxRejectFraction());
+        m.put("timestampsConverted", r.timestampsConverted());
+        Map<String, Object> rejected = new LinkedHashMap<>();
+        rejected.put("total", r.rejectedRows());
+        rejected.put("byReason", new TreeMap<>(r.rejectedByReason()));
+        m.put("rejected", rejected);
+        m.put("droppedConsents", r.droppedConsents());
+        m.put("rejectsFile", r.rejectsUri());
+        return m;
     }
 
     // ---------------------------------------------------------------- output validation
@@ -537,8 +666,10 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         }
         if (!o.balanced()) {
             report.error("ROW_ACCOUNTING", "input rows " + o.inputRows() + " != study " + o.studyRows() + " + global "
-                    + o.globalRows() + " + dropped " + (o.droppedStudyNoConsent() + o.droppedGlobalNoConsent()));
+                    + o.globalRows() + " + dropped " + (o.droppedStudyNoConsent() + o.droppedGlobalNoConsent())
+                    + " + rejected " + o.repairs().rejectedRows());
         }
+        repairsReport(o, report);
         if (o.headerText() != null) {
             report.info("HEADER_DROPPED", "Dropped leading header row: " + abbreviate(o.headerText()));
         }
@@ -568,6 +699,25 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         report.info("PARTITIONS", o.partitions().size() + " partition(s), " + o.partitionLines() + " line(s) written, "
                 + o.patientsWithConsents() + " patient(s) with consents");
         fenceReport(o, report);
+    }
+
+    /** Every repair is reported as a warning, so a run that changed or set aside data never looks clean. */
+    private static void repairsReport(Output o, ValidationReport report) {
+        Repairs r = o.repairs();
+        if (r.timestampsConverted() > 0) {
+            report.warning("TIMESTAMPS_CONVERTED", r.timestampsConverted() + " ISO-8601 timestamp(s) were rewritten to epoch "
+                    + "milliseconds (timestamps=" + r.timestampsMode() + ")");
+        }
+        if (r.rejectedRows() > 0) {
+            report.warning("ROWS_QUARANTINED", r.rejectedRows() + " row(s) were not written to any partition and are in "
+                    + r.rejectsUri() + " (bad-rows=" + r.badRowsMode() + "), by reason " + new TreeMap<>(r.rejectedByReason()));
+        }
+        if (!r.droppedConsents().isEmpty()) {
+            List<String> described = r.droppedConsents().stream()
+                    .map(c -> "'" + abbreviate(c.value()) + "' (" + c.rows() + " row(s))").toList();
+            report.warning("CONSENTS_DROPPED", r.droppedConsents().size() + " consent value(s) cannot name a partition "
+                    + "and were dropped for every patient: " + sample(described));
+        }
     }
 
     /** The cross-check only reports: every finding is a warning or info, never an error. */
@@ -636,6 +786,13 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
                 .metric("inputETag", o.inputInfo().eTag())
                 .metric("timestampZero", o.timestampZero())
                 .metric("timestampLikelySeconds", o.timestampSeconds())
+                .metric("timestampsMode", o.repairs().timestampsMode())
+                .metric("badRowsMode", o.repairs().badRowsMode())
+                .metric("timestampsConverted", o.repairs().timestampsConverted())
+                .metric("rejectedRows", o.repairs().rejectedRows())
+                .metric("rejectedByReason", o.repairs().rejectedByReason())
+                .metric("droppedConsents", o.repairs().droppedConsents().size())
+                .metric("rejectsUri", o.repairs().rejectsUri())
                 .metric("manifestUri", o.manifestUri());
     }
 
@@ -707,6 +864,11 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         if (first.startsWith("﻿")) {
             row.set(0, first.substring(1));
         }
+        return firstColumnIsNotInteger(row);
+    }
+
+    /** The header test itself, without the BOM strip, so judging a later row never edits it. */
+    static boolean firstColumnIsNotInteger(List<String> row) {
         return parseInt(row.getFirst()) == null;
     }
 
@@ -720,7 +882,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         }
     }
 
-    private static Integer parseInt(String s) {
+    static Integer parseInt(String s) {
         if (s == null || s.isEmpty() || s.length() > 11) {
             return null;
         }
@@ -746,7 +908,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         return base.endsWith("/") ? base + name : base + "/" + name;
     }
 
-    private static String abbreviate(String s) {
+    static String abbreviate(String s) {
         return s.length() <= 80 ? s : s.substring(0, 77) + "...";
     }
 
@@ -782,13 +944,22 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
     }
 
     private static final class Pass1 {
+        long rejectedTotal() {
+            return rejected.values().stream().mapToLong(Long::longValue).sum();
+        }
+
         long rows;
         long blankRows;
         long consentRows;
         long blankConsentRows;
         long timestampZero;
         long timestampSeconds;
+        long timestampsConverted;
         String headerText;
+        /** Rows that failed {@link SplitRowCheck} under bad-rows=quarantine, by first failed check. */
+        final Map<String, Long> rejected = new TreeMap<>();
+        /** Consents that cannot name a partition (bad-rows=quarantine), with the reason. */
+        final Map<String, String> invalidConsents = new TreeMap<>();
         final Map<Integer, Set<String>> consentsByPatient = new HashMap<>();
         final Set<String> studies = new HashSet<>();
         final List<String> notes = new ArrayList<>();
@@ -803,6 +974,14 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         final Map<String, PartitionStats> partitions = new HashMap<>();
         final Set<String> notes = new LinkedHashSet<>();
         final Set<String> studyNodesWithoutConsents = new TreeSet<>();
+        long timestampsConverted;
+        final Map<String, Long> rejected = new TreeMap<>();
+        /** Per dropped consent: source rows that had a copy meant for it. */
+        final Map<String, Long> droppedConsentRows = new HashMap<>();
+
+        long rejectedTotal() {
+            return rejected.values().stream().mapToLong(Long::longValue).sum();
+        }
     }
 
     private static final class PartitionStats {
@@ -923,6 +1102,19 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         }
     }
 
+    /** A consent value that cannot name a partition and was dropped; {@code rows} counts the copies not written. */
+    public record DroppedConsent(String value, String problem, long rows) {
+    }
+
+    /** What the opt-in repairs did. Rejected counts include the INVALID_CONSENT_VALUE rows. */
+    public record Repairs(String timestampsMode, String badRowsMode, double maxRejectFraction, long timestampsConverted,
+                          Map<String, Long> rejectedByReason, List<DroppedConsent> droppedConsents, String rejectsUri) {
+
+        long rejectedRows() {
+            return rejectedByReason.values().stream().mapToLong(Long::longValue).sum();
+        }
+    }
+
     public record Output(
             String inputUri,
             String outputUri,
@@ -947,6 +1139,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
             List<String> studyNodesWithoutConsents,
             IoResolver.ObjectInfo inputInfo,
             FenceCheck fence,
+            Repairs repairs,
             String manifestUri) {
 
         long partitionLines() {
@@ -954,7 +1147,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
         }
 
         long accountedRows() {
-            return studyRows + globalRows + droppedStudyNoConsent + droppedGlobalNoConsent;
+            return studyRows + globalRows + droppedStudyNoConsent + droppedGlobalNoConsent + repairs.rejectedRows();
         }
 
         boolean balanced() {
@@ -970,7 +1163,7 @@ public class SplitMergedAllConceptsJob extends AbstractJob<SplitMergedAllConcept
             return new Output(inputUri, outputUri, depth, globals, consentsPath, headerText, inputRows, blankRows,
                     studyRows, globalRows, droppedStudyNoConsent, droppedGlobalNoConsent, timestampZero,
                     timestampSeconds, consentRows, patientsWithConsents, partitions, errors, splitNotes,
-                    inputNotes, studyNodesWithoutConsents, inputInfo, fence, uri);
+                    inputNotes, studyNodesWithoutConsents, inputInfo, fence, repairs, uri);
         }
     }
 }
