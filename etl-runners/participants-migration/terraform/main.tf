@@ -40,8 +40,13 @@ module "etl_runner" {
       managed_inputs = var.managed_inputs_uri
       data_folder    = var.data_folder_uri
       batch_size     = var.batch_size
+      parallelism    = var.parallelism
     },
-    var.study_filter != "" ? { study_filter = var.study_filter } : {}
+    var.study_filter != "" ? { study_filter = var.study_filter } : {},
+    # The earlier run's report prefix, as terraform-modules/etl-runner lays it out.
+    var.resume_from_run_id != "" ? {
+      resume_from = "s3://${var.stack_s3_bucket}/etl-runner/reports/participants-migration/${var.resume_from_run_id}/"
+    } : {}
   )
 
   tags = merge({

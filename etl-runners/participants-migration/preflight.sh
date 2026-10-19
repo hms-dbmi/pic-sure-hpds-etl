@@ -11,6 +11,7 @@
 #   TF_VAR_managed_inputs_uri   required   the --managed-inputs CSV
 #   TF_VAR_data_folder_uri      required   the --data-folder folder
 #   AWS_REGION                  optional   default us-east-1
+#   PREFLIGHT_PARALLELISM       optional   studies probed at once, default 16
 #
 # Exit: 0 clean | 10 clean but with warnings | 1 problems found
 set -uo pipefail
@@ -24,6 +25,7 @@ MANAGED_INPUTS="$(trim "$MANAGED_INPUTS")"
 DATA_FOLDER="${TF_VAR_data_folder_uri:?TF_VAR_data_folder_uri is required}"
 DATA_FOLDER="$(trim "$DATA_FOLDER")"
 REGION="${AWS_REGION:-us-east-1}"
+PARALLELISM="${PREFLIGHT_PARALLELISM:-16}"
 
 DATA_FOLDER="${DATA_FOLDER%/}"
 
@@ -69,7 +71,8 @@ if ! uri_exists "$MANAGED_INPUTS"; then
 fi
 
 MANIFEST=$(mktemp)
-trap 'rm -f "$MANIFEST"' EXIT
+PROBES=$(mktemp -d)
+trap 'rm -rf "$MANIFEST" "$PROBES"' EXIT
 read_uri "$MANAGED_INPUTS" > "$MANIFEST"
 
 # Parsed with python3's csv module rather than awk: the study list is a spreadsheet export, so
@@ -115,52 +118,105 @@ READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
 check "at least one study is marked ready" test "$READY_COUNT" -gt 0
 note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
 
-# --- shared GLOBAL_allConcepts_merged.csv --------------------------------
-# Required unconditionally: execute() reads it before looking at any study, so a missing
-# one aborts the entire run rather than just the studies that would have used it.
-ALL_CONCEPTS="$DATA_FOLDER/general/completed/GLOBAL_allConcepts_merged.csv"
-check "shared GLOBAL_allConcepts_merged.csv exists (read before any study is processed): $ALL_CONCEPTS" uri_exists "$ALL_CONCEPTS"
 # --- per-study files -----------------------------------------------------
-# Layout: {base}/{abv_lowercase}/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{abv_lowercase}/rawData/SSTR_*{studyId}*.txt (optional)
-echo ""
-echo "  Per-study inputs:"
-SSTR_STUDIES=0
-DIRECT_STUDIES=0
+# Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
+#         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
+# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+# not a failure: the job still migrates every other study and reports the ones it could not.
+# Probing is two S3 round trips per study (~3s), and done one study at a time it took 28 minutes
+# for ~580 studies. probe_study runs PARALLELISM at once, each writing $PROBES/<n>; the results
+# are then printed in managed-inputs order, so the output reads exactly as a serial run's.
+# A probe record is \037-separated (an empty field must survive `read`): sstr file, Subject.MULTI,
+# Sample.MULTI, data dict, and 1/0 for whether the patient mapping exists.
+US=$'\037'
+READY_STUDIES="$PROBES/ready.tsv"
+awk -F'\t' '$3=="ready"' <<<"$STUDIES" > "$READY_STUDIES"
 
-while IFS=$'\t' read -r abv sid state; do
-  [[ "$state" != "ready" ]] && continue
+probe_study() {
+  local n="$1" abv sid state abv_upper mapping listing sstr_file subject_multi sample_multi data_dict mapping_ok
+  IFS=$'\t' read -r abv sid state < <(sed -n "${n}p" "$READY_STUDIES")
 
-  abv_lower=$(printf '%s' "$abv" | tr '[:upper:]' '[:lower:]')
   abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
-  mapping="$DATA_FOLDER/${abv_lower}/data/${abv_upper}_PatientMapping.v2.csv"
+  mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
 
-  # Find SSTR file by listing the rawData directory for a file matching SSTR_*{studyId}*.txt
-  raw_data_dir="$DATA_FOLDER/${abv_lower}/rawData"
+  listing=$(uri_ls "$DATA_FOLDER/${sid}/rawData" 2>/dev/null || true)
   # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
   # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
   # case-insensitively, preferring the canonical name -- mirrors the job's discovery.
-  sstr_file=$(uri_ls "$raw_data_dir" 2>/dev/null | grep -iF "$sid" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
+  sstr_file=$(grep -iF "$sid" <<<"$listing" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
               | awk '{ key = (tolower($0) ~ /^sstr_[^_]/) ? 0 : 1; print key "\t" $0 }' | sort | head -1 | cut -f2- || true)
+  # ParticipantsMigrationJob.isSubjectMultiFileFor / isSampleMultiFileFor / isSubjectDataDictFor.
+  # Only presence matters here; when several match, the job picks the newest and reports it.
+  subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
+  sample_multi=$(grep -iE "^${sid}.*sample\.multi\.txt$" <<<"$listing" | head -1 || true)
+  data_dict=$(grep -iE "^${sid}.*subject\.data_dict\.xml$" <<<"$listing" | head -1 || true)
+  uri_exists "$mapping" && mapping_ok=1 || mapping_ok=0
+
+  # Written whole, then renamed, so a probe that dies midway leaves no record at all.
+  printf '%s\n' "$sstr_file$US$subject_multi$US$sample_multi$US$data_dict$US$mapping_ok" > "$PROBES/$n.tmp" \
+    && mv "$PROBES/$n.tmp" "$PROBES/$n"
+}
+export -f probe_study uri_ls uri_exists
+export READY_STUDIES PROBES DATA_FOLDER REGION US
+
+READY_LINES=$(grep -c . "$READY_STUDIES" || true)
+if (( READY_LINES > 0 )); then
+  seq 1 "$READY_LINES" | xargs -P "$PARALLELISM" -I{} bash -c 'probe_study "$1"' _ {}
+fi
+
+# --- per-study files -----------------------------------------------------
+# Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
+#         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
+# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+# not a failure: the job still migrates every other study and reports the ones it could not.
+echo ""
+echo "  Per-study inputs:"
+SSTR_STUDIES=0
+MULTI_STUDIES=0
+NO_SOURCE_STUDIES=0
+n=0
+
+while IFS=$'\t' read -r abv sid state; do
+  n=$((n + 1))
+  abv_upper=$(printf '%s' "$abv" | tr '[:lower:]' '[:upper:]')
+  mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
+  raw_data_dir="$DATA_FOLDER/${sid}/rawData"
+
+  if [[ ! -f "$PROBES/$n" ]]; then
+    fail "$sid ($abv): could not probe its input files"
+    continue
+  fi
+  IFS="$US" read -r sstr_file subject_multi sample_multi data_dict mapping_ok < "$PROBES/$n"
 
   if [[ -n "$sstr_file" ]]; then
     SSTR_STUDIES=$((SSTR_STUDIES + 1))
     route="sstr"
     note "$sid ($abv): found SSTR file '$sstr_file'"
+    [[ -z "$subject_multi" ]] && note "$sid ($abv): no Subject.MULTI fallback -- the study fails if its SSTR is malformed"
+  elif [[ -n "$subject_multi" ]]; then
+    MULTI_STUDIES=$((MULTI_STUDIES + 1))
+    route="multi"
+    note "$sid ($abv): no SSTR; will load from '$subject_multi'"
+    [[ -z "$sample_multi" ]] && note "$sid ($abv): no Sample.MULTI file -- no samples will be loaded"
+    [[ -z "$data_dict" ]] && note "$sid ($abv): no Subject.data_dict.xml -- consent abbreviations will be blank"
   else
-    DIRECT_STUDIES=$((DIRECT_STUDIES + 1))
-    route="direct"
+    NO_SOURCE_STUDIES=$((NO_SOURCE_STUDIES + 1))
+    route="none"
+    warn "$sid ($abv): no SSTR and no Subject.MULTI in $raw_data_dir -- this study will fail"
   fi
 
-  # Required on both routes; the sstr route needs it to emit old-hpds-id -> new-hpds-id pairs.
-  check "$sid ($abv, $route): $mapping" uri_exists "$mapping"
-done <<<"$STUDIES"
+  # Required on every route; it supplies the old-hpds-id -> new-hpds-id pairs.
+  check "$sid ($abv, $route): $mapping" test "$mapping_ok" = 1
+done < "$READY_STUDIES"
 
 echo ""
-note "$SSTR_STUDIES study/studies will load via the sstr sub-job, $DIRECT_STUDIES via direct population"
-if (( DIRECT_STUDIES > 0 )); then
-  note "the $DIRECT_STUDIES direct study/studies also need a GLOBAL_allConcepts_merged.csv row per legacy hpds id, "
-  note "formatted {studyid}.c{code} -- ids with no row are skipped with a log warning only"
-fi
+note "$SSTR_STUDIES study/studies will load from their SSTR, $MULTI_STUDIES from their MULTI files, "
+note "$NO_SOURCE_STUDIES have no participant source and will fail"
 
 summary

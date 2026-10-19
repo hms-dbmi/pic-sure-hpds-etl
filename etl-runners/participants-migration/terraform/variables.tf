@@ -105,8 +105,9 @@ variable "managed_inputs_uri" {
 variable "data_folder_uri" {
   type        = string
   description = <<-EOT
-    --data-folder: folder containing, per study, an optional {studyid}_sstr.tsv and a
-    {ABV}_PatientMapping.v2.csv, plus one shared consents.csv. Local path or s3:// URI.
+    --data-folder: root of the per-study folders. Per study: {study_id}/rawData/sstr_{study_id}.{v}.txt
+    or, as a fallback, {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt and
+    *Subject.data_dict.xml); and {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv. Local path or s3:// URI.
   EOT
 }
 
@@ -114,6 +115,12 @@ variable "batch_size" {
   type        = string
   default     = "1000"
   description = "--batch-size: rows per batch insert"
+}
+
+variable "parallelism" {
+  type        = string
+  default     = "4"
+  description = "--parallelism: studies migrated at once (1-8); each holds one database connection"
 }
 
 variable "image_tar" {
@@ -130,6 +137,21 @@ variable "study_filter" {
   type        = string
   default     = ""
   description = "--study-filter: comma-separated study ids to process; blank processes every ready study"
+}
+
+variable "resume_from_run_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    --resume-from: run id of an earlier participants-migration run over the same data folder.
+    Studies it migrated successfully are copied from its reports instead of migrated again.
+    Blank migrates every study.
+  EOT
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]*$", var.resume_from_run_id))
+    error_message = "resume_from_run_id must be a run id: letters, digits, '.', '_' and '-' only."
+  }
 }
 
 variable "java_opts" {

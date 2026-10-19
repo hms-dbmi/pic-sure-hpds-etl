@@ -10,25 +10,32 @@
 //
 // What the job does
 //   Moves every ready study's participant identities off the legacy system into the
-//   participants / consents / samples RDS tables. Per study:
-//     - {studyid}_sstr.tsv present: SstrPopulateRdsParticipantsJob loads RDS and this job only
-//       resolves legacy-hpds-id -> new-hpds-id pairs
-//     - otherwise: this job populates participants/consents itself, joining
-//       {ABV}_PatientMapping.v2.csv against the shared GLOBAL_allConcepts_merged.csv
+//   participants / consents / samples RDS tables. Per study, from exactly one source:
+//     - {study_id}/rawData/sstr_{study_id}.{v}.txt, always preferred: SstrPopulateRdsParticipantsJob
+//     - else, or if that SSTR is malformed: {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional
+//       *Sample.MULTI.txt and *Subject.data_dict.xml): MultiPopulateRdsParticipantsJob
+//     - neither: the study fails
+//   then resolves legacy-hpds-id -> new-hpds-id pairs from {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv.
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).
 //
 // Inputs
 //   --managed-inputs   study list CSV        (params.MANAGED_INPUTS)
-//   --data-folder      per-study file folder (params.DATA_FOLDER)
+//   --data-folder      root of the per-study folders (params.DATA_FOLDER)
 //   --batch-size       rows per batch insert (params.BATCH_SIZE)
+//   --parallelism      studies migrated at once (params.PARALLELISM)
 //   RDS credentials    read by the runner at boot from the SSM parameter
 //                      /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
 //   RDS rows in participants / consents / samples
 //   participants-migration-<runId>.json                       the JobResult
-//   sstr-populate-rds-participants-<runId>-<study>-sstr.json   per sstr-routed study
-//   <studyId>_hpds_id_mapping.csv                             per succeeded study
+//   sstr-populate-rds-participants-<runId>-<study>-sstr.json   per study with an SSTR
+//   multi-populate-rds-participants-<runId>-<study>-multi.json per study that fell back to MULTI
+//   <studyId>_hpds_id_mapping.csv                             per succeeded study (header-only
+//                                                             for one flagged STUDY_NEEDS_DATA_REVIEW)
+//   participants_migration_sources.csv / _file_issues.csv / _file_report.md
+//                                                             which source each study used, and
+//                                                             every problem found in those files
 //   All archived on this build and left in S3 under the runner's report prefix.
 //
 // Exit codes (see ExitCode.java)
@@ -54,26 +61,31 @@ pipeline {
         // Two concurrent migrations would write the same RDS tables from different
         // snapshots of the legacy export. Never allow it.
         disableConcurrentBuilds()
-        timeout(time: 4, unit: 'HOURS')
+        // Above JOB_TIMEOUT_SECONDS plus build, tests and provisioning: 600+ studies, growing monthly.
+        timeout(time: 14, unit: 'HOURS')
     }
 
     parameters {
         string(name: 'MANAGED_INPUTS',
-               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
                description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
         string(name: 'DATA_FOLDER',
-               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/current',
-               description: '--data-folder: folder holding {studyid}_sstr.tsv, {ABV}_PatientMapping.v2.csv, and the shared GLOBAL_allConcepts_merged.csv')
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
+               description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/ holding sstr_{study_id}.{v}.txt or, as a fallback, {study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt, *Subject.data_dict.xml); and {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: '--study-filter: comma-separated study ids to process; blank processes every ready study')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
+        string(name: 'PARALLELISM', defaultValue: '4',
+               description: '--parallelism: studies migrated at once, 1-8. Each holds one participant-DB connection.')
+        string(name: 'RESUME_FROM_RUN_ID', defaultValue: '',
+               description: 'Run id of an earlier run over the same DATA_FOLDER (e.g. one that timed out). Studies it migrated successfully are copied from its reports instead of migrated again; the rest are migrated. Blank migrates every study.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG. Appears in the report filename and the S3 report prefix.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
-               description: 'Runner instance type. Memory-bound: a study mapping file and GLOBAL_allConcepts_merged.csv are joined in memory.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
-               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+               description: 'Runner instance type. Memory-bound: a study\'s patient mapping and its SSTR or MULTI subject ids are joined in memory.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '43200',
+               description: 'How long to wait for the runner before giving up (monitor exits 124). Generous: every ready study, 600+ and growing, runs in this one job.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
@@ -95,6 +107,7 @@ pipeline {
         TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
         TF_VAR_data_folder_uri           = "${params.DATA_FOLDER.trim()}"
         TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_parallelism               = "${params.PARALLELISM.trim()}"
         TF_VAR_study_filter              = "${params.STUDY_FILTER.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
         TF_VAR_name_suffix        = "${env.BUILD_NUMBER}"
@@ -118,7 +131,14 @@ pipeline {
                     env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
 
+                    // Set here, not in environment {}: a retry replaces it, and environment {}
+                    // values cannot be reassigned from a script.
+                    env.TF_VAR_resume_from_run_id = (params.RESUME_FROM_RUN_ID ?: '').trim()
+
                     echo "run id: ${env.BASE_RUN_ID}"
+                    if (env.TF_VAR_resume_from_run_id) {
+                        echo "resuming from run ${env.TF_VAR_resume_from_run_id}"
+                    }
                     echo "image:  ${env.IMAGE_TAR}"
                 }
                 sh '''
@@ -213,7 +233,10 @@ pipeline {
                             break
                         }
 
-                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        // The failed attempt uploaded what it finished, including studies it copied
+                        // from RESUME_FROM_RUN_ID, so the retry carries on from it.
+                        env.TF_VAR_resume_from_run_id = env.EFFECTIVE_RUN_ID
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying from ${env.EFFECTIVE_RUN_ID}"
                         sh(returnStatus: true,
                            script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
                         sleep time: 60, unit: 'SECONDS'
@@ -298,6 +321,11 @@ pipeline {
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }

@@ -32,6 +32,7 @@ etl-runners/
 ├── pipeline-report/                    the permanent pipeline's end-of-run report (not a runner)
 ├── participants-migration/             TEMPORARY (JobType.MIGRATION)
 ├── split-allconcepts/                  TEMPORARY (JobType.MIGRATION)
+├── runner-pool/                        Long-lived worker instances that run job after job (split stage)
 ├── sstr-populate-rds-participants/     PERMANENT (JobType.PERMANENT)
 ├── generate-global-all-concepts/       PERMANENT (JobType.PERMANENT)
 ├── create-vcf-indexes/                 PERMANENT (JobType.PERMANENT)

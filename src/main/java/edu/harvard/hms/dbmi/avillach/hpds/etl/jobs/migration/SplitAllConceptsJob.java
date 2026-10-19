@@ -10,6 +10,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
@@ -24,10 +25,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -75,13 +78,13 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                                 "FHS"),
                         ParamSpec.required("input",
                                 "S3 URI of the study's allConcepts CSV",
-                                "s3://avillach-73-bdcatalyst-etl/fhs/completed/phs000123/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
+                                "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/phs000123/legacy/allConcepts/phs000123_allConcepts_new_search_with_data_analyzer.csv"),
                         ParamSpec.required("mapping",
                                 "S3 URI of the hpds_id_mapping.csv from participants-migration (columns: old_hpds_id, new_hpds_id, common_dbgap_id)",
-                                "s3://bucket/reports/phs000123_hpds_id_mapping.csv"),
+                                "s3://bucket/phs000123/mappings/<build-tag>/phs000123_hpds_id_mapping.csv"),
                         ParamSpec.required("output",
-                                "Output directory for split files (local path or s3:// URI). "
-                                        + "Structure: {output}/split_allconcepts/{study_id}/c{code}/{ABV}_allConcepts_c{code}.csv",
+                                "Root of the per-study folders (local path or s3:// URI). "
+                                        + "Structure: {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv",
                                 "./output")),
                 List.of("Per-consent allConcepts files with new hpds IDs replacing legacy hpds IDs"));
     }
@@ -90,13 +93,11 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
     protected void validateInput(JobContext ctx, ValidationReport report) {
         String studyId = ctx.require("study-id");
         if (!studyId.matches("^phs\\d{6}$")) {
-            report.error("INVALID_STUDY_ID",
+            report.error("BAD_STUDY_ID",
                     "study-id must match phs###### (exactly 6 digits), got: " + studyId, "--study-id");
         }
-        String abbreviation = ctx.require("abbreviation");
-        if (abbreviation.isBlank()) {
-            report.error("BLANK_ABBREVIATION", "abbreviation must not be blank", "--abbreviation");
-        }
+        // A blank --abbreviation needs no check here: JobContext treats blank as absent, so it
+        // already fails MISSING_PARAM.
     }
 
     @Override
@@ -125,9 +126,13 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         Map<String, Path> tmpByConsent = new LinkedHashMap<>();
         Map<String, BufferedWriter> writerByConsent = new LinkedHashMap<>();
         Map<String, Long> rowsPerConsent = new LinkedHashMap<>();
+        // Distinct new hpds ids written to each consent partition: the participant count that is
+        // compared against production's, per consent group.
+        Map<String, Set<String>> participantsByConsent = new HashMap<>();
         long totalRows = 0;
         long unmappedIds = 0;
         long noConsentRows = 0;
+        long malformedRows = 0;
         List<String> unmappedSample = new ArrayList<>();
 
         try {
@@ -135,12 +140,14 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             try (Stream<List<String>> rows = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
                 for (List<String> row : (Iterable<List<String>>) rows::iterator) {
                     if (row.size() < 5) {
+                        malformedRows++;
                         continue;
                     }
                     totalRows++;
 
                     String oldHpdsId = Strings.trimToNull(row.get(0));
                     if (oldHpdsId == null) {
+                        malformedRows++;
                         continue;
                     }
 
@@ -170,21 +177,26 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                     writer.write(line);
                     writer.write('\n');
                     rowsPerConsent.merge(consentCode, 1L, Long::sum);
+                    participantsByConsent.computeIfAbsent(consentCode, c -> new HashSet<>()).add(newHpdsId);
                 }
             }
             for (BufferedWriter writer : writerByConsent.values()) {
                 writer.close();
             }
 
-            log.info("Read {} row(s): {} mapped to consents, {} unmapped id(s), {} no-consent row(s)",
+            log.info("Read {} row(s): {} mapped to consents, {} unmapped id(s), {} no-consent row(s), "
+                            + "{} malformed row(s)",
                     totalRows, rowsPerConsent.values().stream().mapToLong(Long::longValue).sum(),
-                    unmappedIds, noConsentRows);
+                    unmappedIds, noConsentRows, malformedRows);
 
             if (!unmappedSample.isEmpty()) {
                 log.warn("Sample unmapped hpds ids (up to 10): {}", unmappedSample);
             }
 
-            String abvUpper = abbreviation.toUpperCase(Locale.ROOT);
+            Map<String, Long> participantsPerConsent = new LinkedHashMap<>();
+            rowsPerConsent.keySet().forEach(code ->
+                    participantsPerConsent.put(code, (long) participantsByConsent.get(code).size()));
+
             Map<String, String> outputPaths = new LinkedHashMap<>();
 
             for (Map.Entry<String, Path> entry : tmpByConsent.entrySet()) {
@@ -193,16 +205,17 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 String consentLabel = "c" + code;
 
                 String outputUri = joinPath(outputBase,
-                        "split_allconcepts", studyId, consentLabel,
-                        abvUpper + "_allConcepts_" + consentLabel + ".csv");
+                        studyId, "allConcepts", consentLabel,
+                        studyId + "_allConcepts_" + consentLabel + ".csv");
 
                 io.writeOutputFile(outputUri, tmp);
-                log.info("Wrote {} row(s) ({} bytes) to {}", rowsPerConsent.get(code), Files.size(tmp), outputUri);
+                log.info("Wrote {} row(s) for {} participant(s) ({} bytes) to {}", rowsPerConsent.get(code),
+                        participantsPerConsent.get(code), Files.size(tmp), outputUri);
                 outputPaths.put(code, outputUri);
             }
 
-            return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows,
-                    rowsPerConsent, outputPaths);
+            return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows, malformedRows,
+                    List.copyOf(unmappedSample), rowsPerConsent, participantsPerConsent, outputPaths);
         } catch (IOException e) {
             throw new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException(
                     "Failed spooling split output for study " + studyId, e);
@@ -280,16 +293,24 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         }
         if (output.unmappedIds() > 0) {
             double pct = 100.0 * output.unmappedIds() / Math.max(output.totalRows(), 1);
-            report.warning("UNMAPPED_IDS",
+            report.add(ValidationIssue.warning("UNMAPPED_IDS",
                     output.unmappedIds() + " row(s) (" + String.format("%.1f%%", pct)
-                            + ") had hpds IDs not found in the mapping CSV");
+                            + ") had hpds IDs not found in the mapping CSV. First: " + output.unmappedSample(),
+                    Map.of("count", output.unmappedIds(),
+                            "percent", Math.round(pct * 10) / 10.0,
+                            "firstOldHpdsIds", output.unmappedSample())));
+        }
+        if (output.malformedRows() > 0) {
+            report.warning("MALFORMED_ROWS", output.malformedRows()
+                    + " row(s) had fewer than 5 columns or a blank hpds id and were skipped");
         }
         if (output.noConsentRows() > 0) {
             report.warning("NO_CONSENT",
                     output.noConsentRows() + " row(s) had hpds IDs with no consent assignment in the database");
         }
         output.rowsPerConsent().forEach((code, count) ->
-                report.info("CONSENT_ROWS", "c" + code + ": " + count + " row(s)"));
+                report.info("CONSENT_ROWS", "c" + code + ": " + count + " row(s), "
+                        + output.participantsPerConsent().get(code) + " participant(s)"));
     }
 
     @Override
@@ -299,7 +320,9 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 .metric("totalRows", output.totalRows())
                 .metric("unmappedIds", output.unmappedIds())
                 .metric("noConsentRows", output.noConsentRows())
+                .metric("malformedRows", output.malformedRows())
                 .metric("rowsPerConsent", output.rowsPerConsent())
+                .metric("participantsPerConsent", output.participantsPerConsent())
                 .metric("outputPaths", output.outputPaths());
     }
 
@@ -309,7 +332,10 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             long totalRows,
             long unmappedIds,
             long noConsentRows,
+            long malformedRows,
+            List<String> unmappedSample,
             Map<String, Long> rowsPerConsent,
+            Map<String, Long> participantsPerConsent,
             Map<String, String> outputPaths
     ) {
     }
