@@ -1,0 +1,40 @@
+{
+  "jobName": "create-vcf-indexes",
+  "jobType": "PERMANENT",
+  "runId": "t-vcf-indexes",
+  "exitCode": "SUCCESS_WITH_WARNINGS",
+  "status": "SUCCESS",
+  "startedAt": "2026-10-16T00:00:00Z",
+  "finishedAt": "2026-10-16T00:10:00Z",
+  "durationMillis": 600000,
+  "inputValidation": {
+    "phase": "input",
+    "issues": [],
+    "counts": {
+      "error": 0,
+      "warning": 0,
+      "info": 0
+    }
+  },
+  "outputValidation": {
+    "phase": "output",
+    "issues": [
+      {
+        "severity": "WARNING",
+        "code": "NO_VCF_FILES",
+        "message": "phs000005 has no VCF files",
+        "location": null,
+        "context": {}
+      }
+    ],
+    "counts": {
+      "error": 0,
+      "warning": 1,
+      "info": 0
+    }
+  },
+  "metrics": {
+    "studiesProcessed": 4
+  },
+  "errorMessage": null
+}
