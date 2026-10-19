@@ -287,6 +287,11 @@ EOF
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }

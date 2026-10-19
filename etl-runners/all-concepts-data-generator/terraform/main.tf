@@ -34,12 +34,13 @@ module "etl_runner" {
   uses_participant_db = true
   environment         = var.environment
 
+  # Keys use underscores like every other runner; run-job.sh maps them to --study-id etc.
   job_params = {
-    study-id      = var.study_id
-    data-dir      = var.data_dir
+    study_id      = var.study_id
+    data_dir      = var.data_dir
     mapping       = var.mapping_uri
     output        = var.output_uri
-    skip-analysis = var.skip_analysis
+    skip_analysis = var.skip_analysis
   }
 
   tags = merge({

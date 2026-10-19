@@ -70,6 +70,7 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
                 .containsEntry("distinctParticipants", 2L)
                 .containsEntry("participantsInserted", 2L)
                 .containsEntry("consentsWritten", 2L)
+                .containsEntry("samplesSeen", 3L)
                 .containsEntry("samplesInserted", 3L)
                 .containsEntry("submittedSamplesInserted", 3L);
         assertThat(participants.count()).isEqualTo(2);
@@ -121,6 +122,8 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(second.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(second.getMetrics())
                 .containsEntry("participantsInserted", 0L)
+                // a reload sees the same samples but inserts none (ON CONFLICT DO NOTHING)
+                .containsEntry("samplesSeen", 1L)
                 .containsEntry("samplesInserted", 0L)
                 .containsEntry("submittedSamplesInserted", 0L);
         assertThat(participants.count()).isEqualTo(1);

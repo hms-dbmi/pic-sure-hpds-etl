@@ -36,7 +36,7 @@ class EtlApplicationTest {
     void context_loads_and_enabled_jobs_are_registered() {
         assertThat(registry.contains("participants-migration")).isTrue();
         assertThat(registry.contains("sstr-populate-rds-participants")).isTrue();
-        assertThat(registry.contains("single-consent-data-populate-rds-participants")).isTrue();
+        assertThat(registry.contains("generate-global-all-concepts")).isTrue();
     }
 
     @Test

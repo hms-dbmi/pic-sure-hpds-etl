@@ -11,11 +11,13 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetBucketVersioningRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
@@ -64,6 +66,30 @@ public class IoResolver {
 
     public boolean isS3(String uri) {
         return uri != null && uri.startsWith(S3_PREFIX);
+    }
+
+    /**
+     * Fails unless the bucket of an {@code s3://} location has versioning {@code Enabled}, for
+     * jobs that overwrite or delete in place and rely on versioning to keep the previous version
+     * recoverable. S3 only; callers skip it for local outputs. Same contract as merge-allconcepts'
+     * {@code AllConceptsFolders.requireVersioning} (added later in the merge work), which could
+     * delegate here.
+     */
+    public void requireVersioning(String uri) {
+        if (!isS3(uri)) {
+            throw new ConfigException("Versioning check needs an s3:// location, got: " + uri);
+        }
+        String bucket = S3Uri.parsePrefix(uri).bucket();
+        BucketVersioningStatus status;
+        try {
+            status = s3.getBucketVersioning(GetBucketVersioningRequest.builder().bucket(bucket).build()).status();
+        } catch (RuntimeException e) {
+            throw new InfrastructureException("Could not read the versioning status of bucket " + bucket, e);
+        }
+        if (status != BucketVersioningStatus.ENABLED) {
+            throw new ConfigException("Bucket " + bucket + " must have versioning Enabled (is "
+                    + (status == null ? "never enabled" : status) + ")");
+        }
     }
 
     /** Opens an input stream for reading. Caller must close it. */

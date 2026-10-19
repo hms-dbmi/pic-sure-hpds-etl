@@ -18,7 +18,6 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SingleConsentDataPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.ConceptPaths;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
@@ -105,6 +104,8 @@ import java.util.stream.Stream;
 public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJob.Output> {
 
     private static final String ALL_CONCEPTS_FILE_NAME = "GLOBAL_allConcepts_merged.csv";
+    /** Consent code stored for open-access (public) studies, which have no consent group. */
+    static final String PUBLIC_CONSENT_CODE = "public";
     private static final String OPEN_ACCESS_1000_GENOMES_ABV = "open_access-1000Genomes";
     private static final String SSTR_COL_SUBJECT_ID = "SUBJECT_ID";
     private static final String SSTR_COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
@@ -474,7 +475,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      *       code is the suffix;</li>
      *   <li>an open-access study has no consent group and therefore no suffix — its consent value
      *       is the bare study id. Those rows take
-     *       {@link SingleConsentDataPopulateRdsParticipantsJob#PUBLIC_CONSENT_CODE}.</li>
+     *       {@link #PUBLIC_CONSENT_CODE}.</li>
      * </ul>
      */
     private ConsentData readAllConceptsCsv(String path) {
@@ -520,8 +521,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                         unparseableRows++;
                         continue;
                     }
-                    String prev = hpdsIdToCode.put(hpdsId, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
-                    if (prev != null && !prev.equals(SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE)) {
+                    String prev = hpdsIdToCode.put(hpdsId, PUBLIC_CONSENT_CODE);
+                    if (prev != null && !prev.equals(PUBLIC_CONSENT_CODE)) {
                         log.warn("{}: hpds id '{}' already mapped to consent code '{}'; overwritten with public code "
                                 + "(from value '{}')", ALL_CONCEPTS_FILE_NAME, hpdsId, prev, nonNumericValue);
                     }
@@ -551,7 +552,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 ALL_CONCEPTS_FILE_NAME, totalRows, hpdsIdToCode.size(), hpdsIdToAbbreviation.size());
         if (publicRows > 0) {
             log.info("{}: {} row(s) had no consent-group suffix and were read as open access (code '{}')",
-                    ALL_CONCEPTS_FILE_NAME, publicRows, SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE);
+                    ALL_CONCEPTS_FILE_NAME, publicRows, PUBLIC_CONSENT_CODE);
         }
         if (unparseableRows > 0) {
             log.warn("{}: {} row(s) were skipped as unparseable", ALL_CONCEPTS_FILE_NAME, unparseableRows);
@@ -676,7 +677,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         if (output.consentData().publicRows() > 0) {
             report.info("OPEN_ACCESS_CONSENT_VALUES", output.consentData().publicRows()
                     + " row(s) in " + ALL_CONCEPTS_FILE_NAME + " had no consent-group suffix and were read as "
-                    + "open access (code '" + SingleConsentDataPopulateRdsParticipantsJob.PUBLIC_CONSENT_CODE + "')");
+                    + "open access (code '" + PUBLIC_CONSENT_CODE + "')");
         }
     }
 

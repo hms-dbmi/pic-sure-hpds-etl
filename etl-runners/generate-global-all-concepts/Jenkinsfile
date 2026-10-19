@@ -6,8 +6,8 @@
 // writes one CSV with concept rows for _consents, _source_subject_id, _source_sample_id,
 // and _studies_consents.
 //
-// This job runs AFTER the database has been populated by the SSTR and single-consent
-// loaders. It is triggered by the permanent orchestrator's "Generate global AllConcepts"
+// This job runs AFTER the database has been populated by the SSTR
+// loader. It is triggered by the permanent orchestrator's "Generate global AllConcepts"
 // stage (/Jenkinsfile) or can be run standalone.
 //
 // Inputs
@@ -24,6 +24,12 @@
 // Exit codes (see ExitCode.java)
 //   0 success | 2 validation | 3 data | 4 infrastructure | 5 config | 1 unknown |
 //   124 monitor timeout
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The permanent orchestrator (/Jenkinsfile) builds the image once and passes it as
+//   PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball, and leaves
+//   deleting it to the orchestrator.
 // =============================================================================
 
 pipeline {
@@ -53,6 +59,8 @@ pipeline {
                description: 'Runner instance type.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
@@ -93,8 +101,14 @@ pipeline {
 
                     env.TF_VAR_name_suffix = "all-concepts-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} all-concepts"
                     echo "output: ${params.OUTPUT}"
@@ -112,7 +126,9 @@ pipeline {
             }
         }
 
+        // A pre-built image already contains the JAR.
         stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' } }
             steps {
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
@@ -139,7 +155,23 @@ pipeline {
 
         stage('Package runner image') {
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
             }
         }
 
@@ -252,12 +284,18 @@ pipeline {
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }

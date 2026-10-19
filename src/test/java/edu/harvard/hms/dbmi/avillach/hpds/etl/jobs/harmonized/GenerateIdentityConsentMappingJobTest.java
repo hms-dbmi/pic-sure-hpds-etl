@@ -203,6 +203,6 @@ class GenerateIdentityConsentMappingJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getInputValidation().getIssues())
-                .anyMatch(i -> i.code().equals("BAD_PER_STUDY"));
+                .anyMatch(i -> i.code().equals("BAD_BOOLEAN"));
     }
 }
