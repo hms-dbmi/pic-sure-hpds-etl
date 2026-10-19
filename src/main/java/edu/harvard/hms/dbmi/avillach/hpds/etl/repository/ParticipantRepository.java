@@ -6,7 +6,6 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 import org.springframework.stereotype.Repository;
 
 import java.util.Collection;
@@ -31,11 +30,8 @@ import java.util.Optional;
 @Repository
 public class ParticipantRepository {
 
-    private static final String UPSERT = """
-            INSERT INTO participants (source_id, source)
-            VALUES (:sourceId, :source)
-            ON CONFLICT (source_id, source) DO NOTHING
-            """;
+    private static final String INSERT_INTO = "INSERT INTO participants (source_id, source)";
+    private static final String ON_CONFLICT = "ON CONFLICT (source_id, source) DO NOTHING";
 
     private final NamedParameterJdbcTemplate jdbc;
 
@@ -127,24 +123,7 @@ public class ParticipantRepository {
      * @return the number of rows inserted; existing rows are not counted
      */
     private int batchInsert(List<String> sourceIds, String source) {
-        if (sourceIds.isEmpty()) {
-            return 0;
-        }
-        SqlParameterSource[] batch = sourceIds.stream()
-                .map(id -> new MapSqlParameterSource()
-                        .addValue("sourceId", id)
-                        .addValue("source", source))
-                .toArray(SqlParameterSource[]::new);
-        try {
-            int[] counts = jdbc.batchUpdate(UPSERT, batch);
-            int inserted = 0;
-            for (int c : counts) {
-                inserted += Math.max(c, 0);
-            }
-            return inserted;
-        } catch (DataAccessException e) {
-            throw new InfrastructureException("Batch upsert into participants failed", e);
-        }
+        return insert(sourceIds.stream().map(id -> new Participant(0L, id, source)).toList());
     }
 
     /**
@@ -156,21 +135,16 @@ public class ParticipantRepository {
      * @return the number of rows inserted; existing rows are not counted
      */
     public int batchUpsert(List<Participant> participants) {
+        return insert(participants);
+    }
+
+    private int insert(List<Participant> participants) {
         if (participants.isEmpty()) {
             return 0;
         }
-        SqlParameterSource[] batch = participants.stream()
-                .map(p -> new MapSqlParameterSource()
-                        .addValue("sourceId", p.sourceId())
-                        .addValue("source", p.source()))
-                .toArray(SqlParameterSource[]::new);
         try {
-            int[] counts = jdbc.batchUpdate(UPSERT, batch);
-            int inserted = 0;
-            for (int c : counts) {
-                inserted += Math.max(c, 0);
-            }
-            return inserted;
+            return MultiRowInsert.execute(jdbc.getJdbcTemplate(), INSERT_INTO, ON_CONFLICT, 2, participants,
+                    p -> new Object[]{p.sourceId(), p.source()});
         } catch (DataAccessException e) {
             throw new InfrastructureException("Batch upsert into participants failed", e);
         }

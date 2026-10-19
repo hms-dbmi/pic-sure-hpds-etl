@@ -90,6 +90,23 @@ public abstract class AbstractJob<O> implements Job {
         return result.exitCode(exitCode).finishedAt(Instant.now()).errorMessage(error).build();
     }
 
+    /**
+     * Reports {@code BAD_BOOLEAN} if {@code --name} is present but not a literal
+     * {@link JobContext#getBoolean} accepts. Call from {@link #validateInput} for every boolean param,
+     * so a misspelt flag fails before any work starts instead of being read as false or surfacing as a
+     * CONFIG_ERROR mid-run.
+     */
+    protected static void validateBooleanParam(JobContext ctx, ValidationReport report, String name) {
+        ctx.get(name).ifPresent(raw -> {
+            if (!JobContext.isBooleanLiteral(raw)) {
+                report.error("BAD_BOOLEAN",
+                        name + " must be " + JobContext.acceptedBooleanLiterals() + ", got: '" + raw
+                                + "'. It was NOT interpreted as false.",
+                        "--" + name);
+            }
+        });
+    }
+
     /** Auto-checks presence of every {@code required} param declared in {@link #expectations()}. */
     private void validateRequiredParams(JobContext ctx, ValidationReport report) {
         for (ParamSpec spec : expectations().inputs()) {

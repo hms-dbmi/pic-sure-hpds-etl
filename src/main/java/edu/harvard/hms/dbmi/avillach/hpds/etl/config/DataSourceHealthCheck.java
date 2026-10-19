@@ -18,8 +18,9 @@ class DataSourceHealthCheck {
     @EventListener(ApplicationReadyEvent.class)
     void checkDatasource() {
         if (datasourceUrl.contains("//unset")) {
-            log.warn("RDS_URL is not set — database jobs will fail with INFRASTRUCTURE_ERROR. "
-                    + "Set RDS_URL, RDS_USERNAME, and RDS_PASSWORD to connect to Postgres.");
+            log.warn("Neither DB_URL nor RDS_URL is set — database jobs will fail with INFRASTRUCTURE_ERROR. "
+                    + "Set DB_URL, DB_USERNAME, and DB_PASSWORD (or the transitional RDS_* equivalents) "
+                    + "to connect to Postgres.");
         }
     }
 }
