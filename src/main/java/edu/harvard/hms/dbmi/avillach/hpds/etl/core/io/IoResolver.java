@@ -71,9 +71,8 @@ public class IoResolver {
     /**
      * Fails unless the bucket of an {@code s3://} location has versioning {@code Enabled}, for
      * jobs that overwrite or delete in place and rely on versioning to keep the previous version
-     * recoverable. S3 only; callers skip it for local outputs. Same contract as merge-allconcepts'
-     * {@code AllConceptsFolders.requireVersioning} (added later in the merge work), which could
-     * delegate here.
+     * recoverable. S3 only; callers skip it for local outputs. merge-allconcepts' and the manifest's
+     * {@code AllConceptsFolders.requireVersioning} delegates here.
      */
     public void requireVersioning(String uri) {
         if (!isS3(uri)) {

@@ -1,0 +1,328 @@
+// =============================================================================
+// PERMANENT -- generate-allconcepts-manifest (JobType.PERMANENT)
+//
+// Writes {INPUT}/allConcepts_manifest.csv for production ingestion
+// (partition, s3_uri, version_id, last_updated, md5): first a "global" row for the current version
+// of global_AllConcepts.csv, then one row per consent group of every study marked ready in managed
+// inputs, partition {study_id}.c{code}, naming its MERGED allConcepts file.
+//
+// Runs last in both orchestrators, after merge-allconcepts. Before writing it verifies that every
+// ready consent group has a MERGED file built from exactly its current source files (the S3 version
+// ids the merge recorded) and carrying its md5, and that the global file exists and is non-empty
+// (its md5 is computed from that exact version). If any check fails, NO manifest is written, the
+// previous version stays current, and the build fails listing every problem. The bucket must be
+// versioned: each run's manifest is a new version of the same key.
+//
+// Some consent folders are left out with a WARNING (the build is UNSTABLE) while the rest is still
+// published: a folder with no allConcepts files; one holding only merged output and no source files
+// (ONLY_MERGED_COPIES / MERGED_WITHOUT_SOURCES: the per-study allConcepts output for that study and
+// consent is missing, so check its all-concepts-data-generator run, or in the migration its
+// split-allconcepts run); and one whose MERGED file is empty (MERGED_EMPTY). A ready study left
+// with no listed consent folder is named (STUDY_NOT_IN_MANIFEST); if no consent group is left at
+// all, nothing is written (NO_CONSENT_GROUPS).
+//
+// Inputs
+//   --input                data root (s3://, versioned bucket)
+//   --global-allconcepts   generate-global-all-concepts' --output (s3://, versioned bucket)
+//   --managed-inputs   managed inputs CSV; its ready studies are listed
+//
+// Outputs
+//   {INPUT}/allConcepts_manifest.csv (new S3 version), plus a copy in the archived reports.
+//   generate-allconcepts-manifest-<runId>.json report.
+//
+// Exit codes (see ExitCode.java)
+//   0 success (warnings make the build UNSTABLE) | 1 unknown | 2 validation (manifest not written) |
+//   3 data | 4 infrastructure (retried once when RETRY_ON_INFRA) | 5 config (incl. bucket not
+//   versioned) | 124 monitor timeout (not retried)
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The permanent orchestrator (/Jenkinsfile) builds the image once and passes it as
+//   PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball, and leaves
+//   deleting it to the orchestrator.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk-25'
+    }
+
+    options {
+        timestamps()
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
+        copyArtifactPermission('*')
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
+        disableConcurrentBuilds()
+        timeout(time: 2, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'INPUT', defaultValue: '',
+               description: 'REQUIRED. --input: data root (s3://, versioned bucket) holding {study_id}/allConcepts/c{consent}/ folders. allConcepts_manifest.csv is written here.')
+        string(name: 'GLOBAL_ALLCONCEPTS', defaultValue: '',
+               description: 'REQUIRED. --global-allconcepts: the global AllConcepts output (s3://, versioned bucket), global_AllConcepts.csv or its folder (generate-global-all-concepts OUTPUT). Always the manifest\'s first row.')
+        string(name: 'MANAGED_INPUTS', defaultValue: '',
+               description: '--managed-inputs: CSV whose studies marked ready are listed (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
+        string(name: 'RUN_ID', defaultValue: '',
+               description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
+        string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
+               description: 'Runner instance type.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '1800',
+               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false,
+               description: 'Skip the JAR test suites.')
+        booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
+               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
+    }
+
+    environment {
+        ENV             = "${params.ENV ?: 'development'}"
+        AWS_REGION      = 'us-east-1'
+
+        RUNNER_DIR = 'etl-runners/generate-allconcepts-manifest'
+
+        TF_VAR_input_uri                 = "${params.INPUT.trim()}"
+        TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
+        TF_VAR_global_allconcepts_uri    = "${params.GLOBAL_ALLCONCEPTS.trim()}"
+        TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
+
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                script {
+                    // The workspace persists between builds, and post { always } archives reports/**
+                    // even when this build never fetched any (say, a failed apply): start empty, so an
+                    // earlier build's report is never archived, or copied by an orchestrator, as this one's.
+                    sh "rm -rf ${RUNNER_DIR}/reports"
+                    if (!params.INPUT?.trim()) {
+                        error('INPUT is required: the s3:// data root the manifest is written to.')
+                    }
+                    if (!params.GLOBAL_ALLCONCEPTS?.trim()) {
+                        error('GLOBAL_ALLCONCEPTS is required: the global AllConcepts output the manifest always lists.')
+                    }
+
+                    def base = (params.RUN_ID?.trim())
+                        ?: "generate-allconcepts-manifest-${env.BUILD_NUMBER}"
+                    env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
+
+                    env.TF_VAR_name_suffix = "generate-allconcepts-manifest-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
+
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} generate-allconcepts-manifest"
+                    echo "input: ${params.INPUT}"
+                    echo "run id: ${env.BASE_RUN_ID}"
+                }
+                sh '''
+                    set -e
+                    echo "--- tool versions ---"
+                    make -s -C $RUNNER_DIR ensure-terraform
+                    aws --version
+                    docker --version
+                    jq --version
+                    java -version 2>&1 | head -1
+                '''
+            }
+        }
+
+        // A pre-built image already contains the JAR.
+        stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Pre-flight') {
+            steps {
+                script {
+                    env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
+                    }
+                }
+            }
+        }
+
+        stage('Package runner image') {
+            steps {
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
+            }
+        }
+
+        stage('Provision, run and monitor') {
+            steps {
+                script {
+                    int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
+                    int rc = 1
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                        env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
+                                                              : "${env.BASE_RUN_ID}-r${attempt}"
+                        env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                        env.TF_VAR_name_suffix = "generate-allconcepts-manifest-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
+                        env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/generate-allconcepts-manifest/${env.EFFECTIVE_RUN_ID}.tfstate"
+
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+
+                        sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
+                        env.TF_INITIALISED = 'true'
+
+                        rc = sh(returnStatus: true, script: """
+                            cd ${RUNNER_DIR}
+                            TF=\$(make -s tf-path)
+                            ../common/monitor-runner.sh \
+                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
+                        """)
+
+                        env.JOB_EXIT_CODE = "${rc}"
+                        if (rc != 4 || attempt == maxAttempts) {
+                            break
+                        }
+
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        sh(returnStatus: true,
+                           script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                        sleep time: 60, unit: 'SECONDS'
+                    }
+
+                    if (rc != 0) {
+                        String meaning = [
+                            1  : 'UNKNOWN (unclassified failure)',
+                            2  : 'VALIDATION_FAILED (manifest NOT written: the global file or a ready consent group is missing or stale; see the report)',
+                            3  : 'DATA_ERROR',
+                            4  : 'INFRASTRUCTURE_ERROR (S3/network)',
+                            5  : 'CONFIG_ERROR (missing or invalid parameter, or the bucket is not versioned)',
+                            124: 'TIMEOUT (runner did not finish in time)',
+                        ].get(rc, "unmapped code ${rc}")
+                        env.FAILURE_MEANING = meaning
+                        echo "Job exited ${rc}: ${meaning}"
+                    }
+                }
+            }
+        }
+
+        stage('Fetch reports') {
+            when { expression { env.TF_INITIALISED == 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+            }
+        }
+
+        stage('Validate') {
+            when { expression { env.TF_INITIALISED == 'true' } }
+            steps {
+                script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/generate-allconcepts-manifest-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
+                    int rc = sh(returnStatus: true, script:
+                        "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
+
+                    if (env.JOB_EXIT_CODE != '0') {
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
+                    }
+                    if (rc == 10) {
+                        unstable('Validation passed with warnings')
+                    } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
+                        error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
+                    }
+                    echo "allConcepts manifest written and validated."
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "${RUNNER_DIR}/reports/**",
+                             allowEmptyArchive: true, fingerprint: true
+            script {
+                if (env.TF_INITIALISED == 'true') {
+                    int rc = sh(returnStatus: true,
+                                script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                    if (rc != 0) {
+                        echo "WARNING: terraform destroy returned ${rc}."
+                    }
+                }
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
+                    sh(returnStatus: true, script: """
+                        aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          --region ${AWS_REGION} || true
+                    """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
+                }
+            }
+        }
+        failure {
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "generate-allconcepts-manifest FAILED: ${currentBuild.description}. Reports are archived on this build."
+        }
+        unstable {
+            echo 'generate-allconcepts-manifest completed WITH WARNINGS (e.g. a consent folder with no allConcepts files). Check the report.'
+        }
+        success {
+            echo "generate-allconcepts-manifest completed (run ${env.EFFECTIVE_RUN_ID})."
+        }
+    }
+}
