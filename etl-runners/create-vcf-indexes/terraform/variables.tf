@@ -26,9 +26,33 @@ variable "instance_type" {
   description = "Instance type. The job holds index data in memory; m5.large covers most deployments."
 }
 
+variable "aws_account_id" {
+  type        = string
+  description = "Account the environment lives in; the provider refuses any other"
+}
+
+variable "vpc_id" {
+  type        = string
+  default     = ""
+  description = "VPC to launch in; its lowest-id subnet is used when subnet_id is blank"
+}
+
 variable "subnet_id" {
   type        = string
-  description = "Subnet to launch the runner in. Must have a route to RDS and to S3."
+  default     = ""
+  description = "Subnet to launch the runner in. Must reach the participant DB and S3. Blank = looked up from vpc_id."
+}
+
+variable "iam_role_name" {
+  type        = string
+  default     = "bdc-etl-jenkins-role"
+  description = "Instance profile role; the job does all S3 work as this role"
+}
+
+variable "iam_instance_profile_name" {
+  type        = string
+  default     = ""
+  description = "Pre-existing instance profile to attach (environments/<ENV>.tfvars). Blank creates one around iam_role_name."
 }
 
 variable "vpc_security_group_ids" {
@@ -43,33 +67,9 @@ variable "root_volume_size" {
   description = "Root EBS size in GiB. Holds the container image and the index output."
 }
 
-variable "rds_secret_id" {
+variable "environment" {
   type        = string
-  description = "Secrets Manager id holding the RDS credentials"
-}
-
-variable "rds_secret_arn" {
-  type        = string
-  default     = ""
-  description = "Secret ARN; only needed when manage_secret_access is true"
-}
-
-variable "manage_secret_access" {
-  type        = bool
-  default     = false
-  description = "Let this run attach a GetSecretValue policy to the instance role"
-}
-
-variable "rds_host" {
-  type        = string
-  default     = ""
-  description = "RDS endpoint hostname, used when the secret contains only username/password"
-}
-
-variable "rds_dbname" {
-  type        = string
-  default     = ""
-  description = "RDS database name, used when the secret contains only username/password"
+  description = "ETL environment (common.mk sets TF_VAR_environment from ENV). Names the participant DB credentials' SSM parameter, /hpds-etl/<environment>/participant-db/app-credentials."
 }
 
 variable "tags" {
@@ -94,12 +94,6 @@ variable "name_suffix" {
 variable "output_uri" {
   type        = string
   description = "--output: where vcfIndex.tsv and SampleIds.csv are written (local path or s3:// URI)"
-}
-
-variable "container_assume_role_arn" {
-  type        = string
-  default     = ""
-  description = "Cross-account IAM role ARN for the container to assume when accessing S3 inputs."
 }
 
 variable "image_tar" {

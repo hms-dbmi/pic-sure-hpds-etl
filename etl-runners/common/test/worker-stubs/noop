@@ -1,0 +1,3 @@
+#!/bin/bash
+# Stub for dnf, systemctl and shutdown: records the call.
+echo "$(basename "$0") $*" >> "$W/calls"

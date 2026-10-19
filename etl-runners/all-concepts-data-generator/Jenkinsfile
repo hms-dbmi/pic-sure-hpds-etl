@@ -3,7 +3,7 @@
 //
 // Generates per-consent allConcepts CSV files for a single study. Reads decoded
 // data CSVs and a mapping file, resolves participant/consent associations from
-// the RDS database, runs data type analysis, and writes one
+// the participant database, runs data type analysis, and writes one
 // {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv per consent group.
 //
 // This job replaces the legacy "ETL - Generate DBGAP All Concepts with Data Type
@@ -14,7 +14,8 @@
 //   --data-dir     decoded data CSVs (local path or s3:// URI)
 //   --mapping      mapping CSV (local path or s3:// URI)
 //   --output       output directory for per-consent allConcepts files
-//   RDS credentials fetched on the runner from Secrets Manager by instance role
+//   participant DB credentials read by the runner at boot from the SSM parameter
+//                              /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
 //   {output}/{study_id}/c{code}/{study_id}_allConcepts_c{code}.csv per consent group
@@ -34,6 +35,8 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the permanent orchestrator (/Jenkinsfile) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         timeout(time: 4, unit: 'HOURS')
     }
@@ -59,16 +62,13 @@ pipeline {
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/all-concepts-data-generator'
 
@@ -77,7 +77,6 @@ pipeline {
         TF_VAR_mapping_uri               = "${params.MAPPING.trim()}"
         TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
         TF_VAR_skip_analysis             = "${params.SKIP_ANALYSIS}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -87,14 +86,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     if (!params.STUDY_ID?.trim()) {
                         error('STUDY_ID is required: the dbGaP study id (phs######).')
@@ -153,13 +144,11 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc})")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
                     }
                 }
             }
@@ -174,6 +163,12 @@ EOF
         stage('Provision, run and monitor') {
             steps {
                 script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
 
@@ -214,7 +209,7 @@ EOF
                             1  : 'UNKNOWN (unclassified failure)',
                             2  : 'VALIDATION_FAILED (bad study-id or missing data)',
                             3  : 'DATA_ERROR (no concept rows, no consents/participants)',
-                            4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
+                            4  : 'INFRASTRUCTURE_ERROR (participant DB/S3/network)',
                             5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
                             124: 'TIMEOUT (runner did not finish in time)',
                         ].get(rc, "unmapped code ${rc}")
@@ -236,15 +231,24 @@ EOF
             when { expression { env.TF_INITIALISED == 'true' } }
             steps {
                 script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/all-concepts-data-generator-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
                     int rc = sh(returnStatus: true, script:
                         "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
                     }
                     echo "allConcepts files generated for ${params.STUDY_ID}."
@@ -275,8 +279,12 @@ EOF
             }
         }
         failure {
-            echo "all-concepts-data-generator FAILED at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''} Reports are archived on this build."
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "all-concepts-data-generator FAILED: ${currentBuild.description}. Reports are archived on this build."
         }
         unstable {
             echo 'all-concepts-data-generator completed WITH WARNINGS. ' +

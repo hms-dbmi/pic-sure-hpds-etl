@@ -35,8 +35,8 @@ LOCAL_TF       := $(LOCAL_TF_DIR)/terraform
 # Recursively expanded (=) so it picks up the local binary after ensure-terraform runs.
 TF = $(if $(wildcard $(LOCAL_TF)),$(LOCAL_TF),terraform)
 
-# Environment: switch with ENV=staging, ENV=production, etc.
-ENV         ?= integration
+# Environment: switch with ENV=<name> to load environments/<name>.tfvars.
+ENV         ?= development
 ENV_TFVARS  := $(abspath ../environments/$(ENV).tfvars)
 
 JAR         := $(REPO_ROOT)/target/hpds-etl.jar
@@ -52,6 +52,12 @@ S3_IMAGE_URI    := s3://$(STACK_S3_BUCKET)/etl-runner/container/$(IMAGE_TAR)
 # state; the default is the single-run-at-a-time path.
 STATE_KEY   ?= tf_backend/etl-runners/hpds-etl/$(NAME)/terraform.tfstate
 
+# Every stack gets the environment name. DB-backed runners derive from it the SSM parameter they
+# read the participant DB credentials from at boot (/hpds-etl/<ENV>/participant-db/app-credentials,
+# written by participant-db-start), so no credential passes through Terraform or this Makefile.
+# Exported so it reaches every terraform target, destroy included.
+export TF_VAR_environment := $(ENV)
+
 REPORTS_DIR ?= $(CURDIR)/reports
 SKIP_TESTS  ?= false
 
@@ -63,7 +69,7 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  jar            - ./mvnw package at the repo root (SKIP_TESTS=true to skip)"
-	@echo "  image          - docker build the runner image from the repo root"
+	@echo "  image          - docker buildx build the runner image from the repo root"
 	@echo "  package        - image + save + upload the tarball to S3"
 	@echo ""
 	@echo "Deploy / run:"
@@ -87,7 +93,7 @@ jar:
 
 image:
 	@test -f $(JAR) || { echo "ERROR: $(JAR) not found -- run 'make jar' first"; exit 1; }
-	cd $(REPO_ROOT) && docker build --platform linux/amd64 \
+	cd $(REPO_ROOT) && docker buildx build --platform linux/amd64 --load \
 		-f etl-runners/Dockerfile -t $(IMAGE_NAME) .
 
 image-save: image

@@ -1,0 +1,109 @@
+#!/bin/bash
+# Test stub for the docker CLI: simulates one Postgres container in $STUB_STATE.
+#   container      present while the container exists
+#   running        true|false
+#   accepting      false makes pg_isready fail even while running
+#   version        server_version_num of the running server (new containers get $NEW_VERSION)
+#   app_password   the app role's password, as last set through psql
+#   volume         present while the data volume exists
+#   run_not_accepting  a container created by `run` never accepts connections
+#   fail_live_state_after_run  once `run` is called, uploads of live_state.json fail (aws stub)
+#   ssl, hba_file  the running server's settings (run sets them from its -c arguments)
+#   conf_volume    present while the config volume exists; pg_hba.conf what the setup wrote
+#   setup_rc       exit status of the one-off config setup container (run --rm)
+#   conn_error     the app role's TCP login fails with "Connection refused"
+#   pg_dump_rc, pg_restore_rc, psql_rc, start_ok, no_toc   failure switches
+S="$STUB_STATE"
+echo "docker $*" >> "$S/docker.log"
+f() { [[ -f "$S/$1" ]] && cat "$S/$1" || echo "$2"; }
+volfile() { [[ "$1" == *-data ]] && echo "$S/volume" || echo "$S/conf_volume"; }
+
+cmd="$1"; shift
+case "$cmd" in
+  info|pull|logs) exit 0 ;;
+  volume)
+    case "$1" in
+      inspect) [[ -f "$(volfile "$2")" ]] ;;
+      create) touch "$(volfile "$2")" ;;
+      rm) v="$2"; [[ "$v" == -f ]] && v="$3"; rm -f "$(volfile "$v")"
+          [[ "$v" == *-data ]] && rm -f "$S/app_password" ;;
+    esac
+    exit ;;
+  container)
+    [[ -f "$S/container" ]] || exit 1
+    if [[ "$2" == "-f" ]]; then f running false; fi
+    exit 0 ;;
+  run)
+    if [[ " $* " == *" --rm "* ]]; then
+      # The one-off config setup: pg_hba.conf arrives on stdin.
+      [[ -f "$S/conf_volume" ]] || { echo "setup: no config volume" >&2; exit 1; }
+      cat > "$S/pg_hba.conf"
+      exit "$(f setup_rc 0)"
+    fi
+    echo present > "$S/container"; echo true > "$S/running"; rm -f "$S/accepting"
+    touch "$S/volume"
+    [[ " $* " == *" -c ssl=on "* ]] && echo on > "$S/ssl" || echo off > "$S/ssl"
+    sed -n 's/.* -c hba_file=\([^ ]*\).*/\1/p' <<<"$*" > "$S/hba_file"
+    [[ -f "$S/run_not_accepting" ]] && echo false > "$S/accepting"
+    [[ -f "$S/fail_live_state_after_run" ]] && echo live_state.json > "$S/upload_error_key"
+    f new_version 160004 > "$S/version.tmp"; mv "$S/version.tmp" "$S/version"
+    exit 0 ;;
+  stop) [[ -f "$S/container" ]] && echo false > "$S/running"; exit 0 ;;
+  # The role and its password live in the data volume, so they survive a container rm.
+  rm) rm -f "$S/container" "$S/running" "$S/version"; exit 0 ;;
+  start)
+    [[ -f "$S/container" ]] || exit 1
+    [[ "$(f start_ok true)" == true ]] && echo true > "$S/running"
+    exit 0 ;;
+  exec) ;;
+  *) echo "docker stub: unhandled $cmd" >&2; exit 2 ;;
+esac
+
+# exec: skip options up to the container name.
+while [[ "$1" == -* ]]; do
+  case "$1" in -u|-e|-w) shift 2 ;; *) shift ;; esac
+done
+shift   # container
+[[ "$(f running false)" == true ]] || { echo "container not running" >&2; exit 1; }
+prog="$1"; shift
+all="$*"
+case "$prog" in
+  pg_isready) [[ "$(f accepting true)" != false ]] ;;
+  psql)
+    if [[ "$all" == *"SHOW server_version_num"* ]]; then f version 160004
+    elif [[ "$all" == *"current_setting('ssl')"* ]]; then echo "$(f ssl off) $(f hba_file '')"
+    elif [[ "$all" == *"pg_database_size"* ]]; then echo 1000
+    elif [[ "$all" == *"information_schema.schemata"* ]]; then echo 1
+    elif [[ "$all" == *"participants="* ]]; then echo "participants=1 consents=1 samples=1"
+    elif [[ "$all" == *"-c "*"ALTER ROLE"* || "$all" == *"search_path"* ]]; then exit "$(f psql_rc 0)"
+    else
+      input=$(cat)
+      echo "$input" >> "$S/psql.log"
+      pw=$(sed -n "s/.*PASSWORD '\([0-9a-f]*\)'.*/\1/p" <<<"$input" | tail -1)
+      [[ -n "$pw" ]] && echo "$pw" > "$S/app_password"
+      exit "$(f psql_rc 0)"
+    fi ;;
+  sh)
+    if [[ "$all" == *PGPASSWORD* ]]; then
+      given=$(cat)
+      echo "$given" >> "$S/checked_passwords"
+      if [[ -f "$S/conn_error" ]]; then
+        echo 'psql: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused' >&2; exit 2
+      fi
+      [[ "$all" == *PGSSLMODE=require* ]] || { echo 'psql: error: FATAL:  no pg_hba.conf entry for host "127.0.0.1", user "hpds_etl", no encryption' >&2; exit 2; }
+      if ! [[ -f "$S/app_password" && "$given" == "$(cat "$S/app_password")" ]]; then
+        echo 'psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  password authentication failed for user "hpds_etl"' >&2; exit 2
+      fi
+    else
+      exit 0
+    fi ;;
+  df) printf 'Filesystem 1024-blocks Used Available Capacity Mounted\noverlay 1 1 %s 1%% /\n' "$(f free_kb 100000000)" ;;
+  pg_dump) exit "$(f pg_dump_rc 0)" ;;
+  pg_restore) exit "$(f pg_restore_rc 0)" ;;
+  tar) [[ "$all" == *"-xf -"* ]] && cat >/dev/null; exit 0 ;;
+  stat) echo 4242 ;;
+  cat) printf 'DUMPBYTES' ;;
+  find) [[ -f "$S/no_toc" ]] || echo /tmp/pdb-restore/participant_db/toc.dat ;;
+  rm) exit 0 ;;
+  *) echo "docker stub: unhandled exec $prog" >&2; exit 2 ;;
+esac
