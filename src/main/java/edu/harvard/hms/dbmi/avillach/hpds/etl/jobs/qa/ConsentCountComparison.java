@@ -68,7 +68,8 @@ final class ConsentCountComparison {
      * @param rawVersion the managed inputs' Version cell as given
      * @param db         normalized consent code to its DB count; empty if the DB holds none
      * @param load       normalized consent code to participants loaded this run, or null when this run's
-     *                   load report does not cover the study (then nothing is compared against it)
+     *                   load report does not cover the study (then nothing is compared against it); a
+     *                   null count leaves just that consent uncompared
      * @param loadSource where the load report says the participants came from (e.g. "sstr", "multi"), or null
      */
     record StudyInput(String studyId, String abv, String version, String rawVersion, Map<String, DbConsent> db,
@@ -204,8 +205,9 @@ final class ConsentCountComparison {
 
             Long loaded = null;
             if (in.load() != null) {
-                loaded = in.load().getOrDefault(code, 0L);
-                if (loaded != dbCount) {
+                // Absent: the run loaded the study without this group, so 0. Null: listed, not loaded this run.
+                loaded = in.load().containsKey(code) ? in.load().get(code) : Long.valueOf(0L);
+                if (loaded != null && loaded != dbCount) {
                     statuses.add(Status.REPORT_DB_MISMATCH);
                     notes.add("this run's load report says " + loaded + " but the DB holds " + dbCount);
                 }

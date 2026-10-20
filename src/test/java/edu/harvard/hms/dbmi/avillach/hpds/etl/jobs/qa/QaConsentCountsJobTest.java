@@ -495,6 +495,30 @@ class QaConsentCountsJobTest {
     }
 
     @Test
+    void a_blank_load_count_means_not_loaded_this_run_and_is_not_compared() throws IOException {
+        // The migration report's migration_consent_counts.csv: extra columns, and participants_loaded blank
+        // for a study (or one group) this run only split.
+        managedInputs(study("A", "phs000001", "v1", true), study("B", "phs000002", "v1", true));
+        dbCounts("phs000001", "1", 5, "phs000002", "1", 6, "phs000002", "2", 7);
+        answers.put("phs000001.v1", found("phs000001", 1, 1, 5));
+        answers.put("phs000002.v1", found("phs000002", 1, 1, 6, 2, 7));
+        String loadCounts = Files.writeString(tempDir.resolve("migration_consent_counts.csv"),
+                "study_id,abv,consent_code,partition,participants_loaded,participants_split\n"
+                        + "phs000001,A,1,phs000001.c1,,5\n"
+                        + "phs000002,B,1,phs000002.c1,6,6\n"
+                        + "phs000002,B,2,phs000002.c2,,7\n").toString();
+
+        JobResult r = run(job(), Map.of("load-counts", loadCounts));
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER,
+                "phs000001,v1,1,G1,5,5,,,MATCH,",
+                "phs000002,v1,1,G1,6,6,6,,MATCH,",
+                "phs000002,v1,2,G2,7,7,,,MATCH,");
+        assertThat(reportJson().at("/metrics/studiesWithLoadCounts").asInt()).isEqualTo(1);
+    }
+
+    @Test
     void malformed_load_counts_are_a_data_error() throws IOException {
         managedInputs(study("A", "phs000001", "v1", true));
         dbCounts();

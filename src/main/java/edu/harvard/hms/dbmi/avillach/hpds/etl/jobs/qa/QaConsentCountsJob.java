@@ -43,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -142,8 +143,10 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                         ParamSpec.optional("load-counts",
                                 "This run's participants loaded per consent group: a CSV with columns "
                                         + "study_id,consent_code,participants_loaded[,source] (local path or s3:// URI; "
-                                        + "participants_migration_consent_counts.csv qualifies). Studies it does not "
-                                        + "list are compared DB vs dbGaP only. Blank skips the load-report check.",
+                                        + "participants_migration_consent_counts.csv and migration_consent_counts.csv "
+                                        + "qualify; other columns are ignored). Studies it does not list, and groups with "
+                                        + "a blank participants_loaded (not loaded this run), are compared DB vs dbGaP "
+                                        + "only. Blank skips the load-report check.",
                                 "s3://bucket/etl-runner/reports/permanent-pipeline/<tag>/qa_load_counts.csv"),
                         ParamSpec.optional("study-filter",
                                 "Comma-separated study ids to check; blank checks every ready study", "phs000200,phs001412"),
@@ -308,7 +311,10 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         return byStudy;
     }
 
-    /** Participants loaded this run, per study and normalized consent code, and each study's source. */
+    /**
+     * Participants loaded this run, per study and normalized consent code (null: listed, but this run did
+     * not load it), and each study's source.
+     */
     record LoadCounts(Map<String, Map<String, Long>> counts, Map<String, String> sources) {
         static final LoadCounts NONE = new LoadCounts(Map.of(), Map.of());
     }
@@ -332,18 +338,30 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                 String sid = Strings.trimToNull(row.get(COL_STUDY_ID));
                 String code = Strings.trimToNull(row.get(COL_CONSENT_CODE));
                 String n = Strings.trimToNull(row.get(COL_PARTICIPANTS_LOADED));
-                if (sid == null || code == null || n == null || !n.matches("\\d{1,18}")) {
+                if (sid == null || code == null || (n != null && !n.matches("\\d{1,18}"))) {
                     throw new DataException("--load-counts " + uri + " line " + line + ": need a study_id, a "
-                            + "consent_code and a whole-number participants_loaded, got " + row);
+                            + "consent_code and a whole-number (or blank) participants_loaded, got " + row);
                 }
-                counts.computeIfAbsent(sid, k -> new LinkedHashMap<>())
-                        .merge(ConsentCountComparison.normalizeConsent(code), Long.parseLong(n), Long::sum);
+                // Blank: this run did not load the consent group (e.g. the migration split a study whose
+                // participants an earlier run loaded), so there is no load count to compare.
+                Long loaded = n == null ? null : Long.parseLong(n);
+                Map<String, Long> byCode = counts.computeIfAbsent(sid, k -> new LinkedHashMap<>());
+                String key = ConsentCountComparison.normalizeConsent(code);
+                if (loaded == null || (byCode.containsKey(key) && byCode.get(key) == null)) {
+                    byCode.put(key, null);
+                } else {
+                    byCode.merge(key, loaded, Long::sum);
+                }
                 String source = Strings.trimToNull(row.get(COL_SOURCE));
                 if (source != null) {
                     sources.putIfAbsent(sid, source);
                 }
             }
         }
+        // A study with no count at all was not loaded this run: leave it out, as if it were not listed.
+        // Elsewhere an unknown count stays null, so only that consent goes uncompared.
+        counts.values().removeIf(byCode -> byCode.values().stream().allMatch(Objects::isNull));
+        sources.keySet().retainAll(counts.keySet());
         log.info("Read load counts for {} study/studies from {}", counts.size(), uri);
         return new LoadCounts(counts, sources);
     }

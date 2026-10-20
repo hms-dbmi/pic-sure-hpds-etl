@@ -70,7 +70,7 @@ pipeline {
         string(name: 'MANAGED_INPUTS', defaultValue: '',
                description: '--managed-inputs: CSV whose studies marked ready are checked, by Study Identifier and Version (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
         string(name: 'LOAD_COUNTS', defaultValue: '',
-               description: '--load-counts: this run\'s participants loaded per consent group, a CSV with study_id,consent_code,participants_loaded[,source] (s3:// URI). Studies it does not list are compared DB vs dbGaP only. Blank skips the load-report check.')
+               description: '--load-counts: this run\'s participants loaded per consent group, a CSV with study_id,consent_code,participants_loaded[,source] (s3:// URI). Other columns are ignored, so the migration report\'s migration_consent_counts.csv also works. Studies it does not list, or lists with a blank participants_loaded, are compared DB vs dbGaP only. Blank skips the load-report check.')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: '--study-filter: comma-separated study ids to check. Blank checks every ready study.')
         string(name: 'CONCURRENCY', defaultValue: '4',
