@@ -17,8 +17,10 @@ public final class BatchOps {
     }
 
     /**
-     * Upserts {@code items} in {@code keyOrder}. Transactions that write overlapping keys (two
-     * studies sharing a participant) in one global order wait on each other rather than deadlock.
+     * Upserts {@code items} in {@code keyOrder}. Transactions that write overlapping keys in one
+     * global order wait on each other rather than deadlock. Which loads overlap depends on the
+     * table: sample keys (and participant source ids) can be shared by two studies' loads, while
+     * consent keys include study_id, so only two concurrent loads of the same study overlap there.
      */
     public static <T> long upsertInChunks(ToIntFunction<List<T>> upsert, List<T> items, int batchSize,
                                           Comparator<? super T> keyOrder) {

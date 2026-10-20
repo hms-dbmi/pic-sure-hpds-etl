@@ -1,9 +1,12 @@
 // =============================================================================
 // SHARED -- participant-db-start
 //
-// Makes sure the participant database (participants / consents / samples) is up, then saves its
-// connection details to a 600-mode file on this Jenkins server (etl-runners/common/
-// db-credentials-path.sh), which the DB-backed runner jobs read.
+// Makes sure the participant database (participants / consents / samples) is up, then publishes
+// its connection details to the SSM SecureString /hpds-etl/<ENV>/participant-db/app-credentials
+// (etl-runners/common/db-credentials-path.sh). DB-backed runners fetch it at boot. With RUN_ID set,
+// a kept database's app password is rotated first. The server accepts the app role only over TLS.
+// The Jenkins role needs ssm:PutParameter/GetParameter on that parameter, plus KMS on its key
+// (docs/PARTICIPANT_DB.md, Credentials).
 //
 // The database is a long-lived PostgreSQL 16 container on the Jenkins host (started through the
 // host's podman socket), with its data in a named volume. It is NOT torn down between runs;
@@ -17,7 +20,14 @@
 //   last run failed               IF_LAST_RUN_FAILED=restore-clean (default): replaced from the
 //                                 clean backup, saved first. =continue: kept with that run's data
 //   not PostgreSQL 16             saved, recreated on 16, and restored from that save
-//   not up                        created from RESTORE_FROM, else the latest clean backup
+//   not up                        started and saved first, then created from RESTORE_FROM, else
+//                                 the latest clean backup. If it can't be started and saved, the
+//                                 job fails and its volume is kept, unless OVERWRITE=true
+//   last replace did not finish   the partial restore is replaced (not saved) from RESTORE_FROM,
+//                                 else from what that replace was restoring
+//
+// With RUN_ID set (the orchestrators pass one), the live database is recorded dirty for that run,
+// so only the run's promoted backup records it clean again.
 //
 // Dumps: s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backups/
 // =============================================================================
@@ -41,7 +51,7 @@ pipeline {
         choice(name: 'IF_LAST_RUN_FAILED', choices: ['restore-clean', 'continue'],
                description: 'When the last pipeline run failed (its writes are still in the live database): restore-clean replaces it from the latest clean backup (the failed state is already saved as participant_db_not_promoted.tar); continue keeps working on it.')
         string(name: 'RUN_ID', defaultValue: '',
-               description: 'Correlation id. Blank derives one from BUILD_NUMBER; orchestrators pass their BUILD_TAG.')
+               description: 'The pipeline run this start is for; orchestrators pass their BUILD_TAG. When set, the live database is recorded dirty ("run in progress") until that run\'s promoted backup records it clean, so a run killed before its backup still counts as failed. Leave blank for a standalone start.')
         choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
@@ -57,9 +67,12 @@ pipeline {
                 script {
                     currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}" + (params.OVERWRITE ? ' (overwrite)' : '')
                 }
+                sh 'rm -f pdb-error.txt'
                 withEnv(["OVERWRITE=${params.OVERWRITE}",
                          "RESTORE_FROM=${params.RESTORE_FROM?.trim() ?: ''}",
-                         "IF_LAST_RUN_FAILED=${params.IF_LAST_RUN_FAILED}"]) {
+                         "IF_LAST_RUN_FAILED=${params.IF_LAST_RUN_FAILED}",
+                         "RUN_ID=${params.RUN_ID?.trim() ?: ''}",
+                         "PDB_ERROR_FILE=${env.WORKSPACE}/pdb-error.txt"]) {
                     sh 'etl-runners/participant-db/start.sh "$ENV"'
                 }
             }
@@ -77,9 +90,20 @@ pipeline {
             echo "Participant database is up in '${env.ENV}'. It stays up; participant-db-backup saves it at the end of each pipeline run."
         }
         failure {
+            script {
+                // Every pdb_die message (lib.sh), innermost first: a failed helper's own reason is
+                // often followed by its caller's more general one.
+                def lines = fileExists('pdb-error.txt') ? readFile('pdb-error.txt').trim().readLines().findAll { it.trim() } : []
+                currentBuild.description = lines ? lines.join('; ') : 'failed; see the console'
+            }
             echo 'participant-db-start FAILED. If the log says the database was replaced but not brought back up, ' +
-                 'its previous contents are in participant_db_pre_overwrite.tar: re-run with OVERWRITE=true ' +
+                 're-run this job: it retries that restore without saving the partial one. To restore the ' +
+                 'replaced database instead (if it was saved), re-run with OVERWRITE=true ' +
                  'RESTORE_FROM=participant_db_pre_overwrite.tar.'
+        }
+        cleanup {
+            // Never read by a later build that fails before its own rm.
+            sh 'rm -f pdb-error.txt'
         }
     }
 }

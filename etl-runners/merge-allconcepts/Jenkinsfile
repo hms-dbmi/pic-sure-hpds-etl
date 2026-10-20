@@ -6,23 +6,39 @@
 // MERGED file, re-merges one whose sources were added, overwritten or deleted since (detected from
 // the S3 version ids recorded on the MERGED file), and skips the rest. The bucket must be versioned.
 //
-// This job runs AFTER per-consent allConcepts files have been generated. It is
-// triggered by both the permanent and migration orchestrators as their final stage,
-// or can be run standalone.
+// This job runs AFTER per-consent allConcepts files have been generated. Both the permanent and
+// migration orchestrators run it just before generate-allconcepts-manifest (their final stage);
+// it can also be run standalone.
 //
 // Inputs
 //   --input            S3 prefix (versioned bucket) containing {study_id}/allConcepts/c{consent}/ folders
 //   --managed-inputs   managed inputs CSV; its ready studies are merged
-//   --study-ids        optional: these studies instead of the ready ones
+//   --study-ids        optional: these studies (comma-separated phs######) instead of the ready ones
 //   --parallelism      consent folders merged at once (params.PARALLELISM)
 //
 // Outputs
 //   One MERGED CSV per consent folder that needed updating.
 //   merge-allconcepts-<runId>.json report.
+//   merge-allconcepts-<runId>-folders.json, only when the run fails: every folder's outcome,
+//   the failed ones as FAILED (the report of a failed run carries no metrics).
 //
 // Exit codes (see ExitCode.java)
-//   0 success | 2 validation | 3 data | 4 infrastructure | 5 config | 1 unknown |
-//   124 monitor timeout
+//   0 success | 1 unknown | 2 validation (input not s3://, BAD_PARALLELISM, BAD_STUDY_ID) |
+//   3 data | 4 infrastructure (retried once when RETRY_ON_INFRA) | 5 config (incl. bucket not
+//   versioned) | 124 monitor timeout (not retried)
+//
+// Timeout
+//   The build timeout (9h) covers two attempts at the default JOB_TIMEOUT_SECONDS (4h each) plus
+//   1h for building, provisioning and teardown. A retry's monitor timeout is also capped to what
+//   is left of that budget (less 30 min to provision it, fetch reports and tear down), and it is
+//   skipped when under 10 min would remain, so a raised JOB_TIMEOUT_SECONDS cannot have Jenkins
+//   abort a retry mid-run.
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The permanent orchestrator (/Jenkinsfile) builds the image once and passes it as
+//   PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball, and leaves
+//   deleting it to the orchestrator.
 // =============================================================================
 
 pipeline {
@@ -34,11 +50,11 @@ pipeline {
 
     options {
         timestamps()
-        // Lets the migration orchestrator (Jenkinsfile.migration) copy this job's reports.
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
         copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
-        timeout(time: 6, unit: 'HOURS')
+        timeout(time: 9, unit: 'HOURS') // keep BUILD_TIMEOUT_HOURS below in step
     }
 
     parameters {
@@ -47,7 +63,7 @@ pipeline {
         string(name: 'MANAGED_INPUTS', defaultValue: '',
                description: '--managed-inputs: CSV whose studies marked ready are merged (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
         string(name: 'STUDY_IDS', defaultValue: '',
-               description: 'Optional comma-separated study ids to merge instead of every ready study (manual runs only).')
+               description: 'Optional comma-separated study ids (phs######) to merge instead of every ready study (manual runs only).')
         string(name: 'PARALLELISM', defaultValue: '8',
                description: '--parallelism: consent folders merged at once, 1-16.')
         string(name: 'RUN_ID', defaultValue: '',
@@ -55,7 +71,9 @@ pipeline {
         string(name: 'INSTANCE_TYPE', defaultValue: 'c5.xlarge',
                description: 'Runner instance type.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '14400',
-               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+               description: 'How long to wait for the runner before giving up (monitor exits 124). A retry gets at most what is left of the 9h build timeout.')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
@@ -84,6 +102,10 @@ pipeline {
         stage('Init') {
             steps {
                 script {
+                    // The workspace persists between builds, and post { always } archives reports/**
+                    // even when this build never fetched any (say, a failed apply): start empty, so an
+                    // earlier build's report is never archived, or copied by an orchestrator, as this one's.
+                    sh "rm -rf ${RUNNER_DIR}/reports"
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// prefix containing study/consent allConcepts folders.')
                     }
@@ -95,8 +117,14 @@ pipeline {
 
                     env.TF_VAR_name_suffix = "merge-allconcepts-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} merge-allconcepts"
                     echo "input: ${params.INPUT}"
@@ -114,7 +142,9 @@ pipeline {
             }
         }
 
+        // A pre-built image already contains the JAR.
         stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' } }
             steps {
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
@@ -141,7 +171,23 @@ pipeline {
 
         stage('Package runner image') {
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
             }
         }
 
@@ -150,6 +196,12 @@ pipeline {
                 script {
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
+                    // Must match options { timeout }; see "Timeout" in the header.
+                    final long BUILD_TIMEOUT_HOURS = 9
+                    final long TEARDOWN_MARGIN_SECONDS = 1800
+                    final long MIN_RETRY_SECONDS = 600
+                    long deadlineMillis = currentBuild.startTimeInMillis + BUILD_TIMEOUT_HOURS * 3600 * 1000
+                    long monitorTimeout = Long.parseLong(env.PIPELINE_TIMEOUT)
 
                     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
                         env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
@@ -158,24 +210,35 @@ pipeline {
                         env.TF_VAR_name_suffix = "merge-allconcepts-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
                         env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/merge-allconcepts/${env.EFFECTIVE_RUN_ID}.tfstate"
 
-                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID} (monitor timeout ${monitorTimeout}s)"
 
                         sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
                         env.TF_INITIALISED = 'true'
 
-                        rc = sh(returnStatus: true, script: """
-                            cd ${RUNNER_DIR}
-                            TF=\$(make -s tf-path)
-                            ../common/monitor-runner.sh \
-                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
-                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
-                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
-                        """)
+                        withEnv(["PIPELINE_TIMEOUT=${monitorTimeout}"]) {
+                            rc = sh(returnStatus: true, script: """
+                                cd ${RUNNER_DIR}
+                                TF=\$(make -s tf-path)
+                                ../common/monitor-runner.sh \
+                                  "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                                  "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                                  "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
+                            """)
+                        }
 
                         env.JOB_EXIT_CODE = "${rc}"
                         if (rc != 4 || attempt == maxAttempts) {
                             break
                         }
+
+                        // Checked before tearing down, so a skipped retry leaves this attempt's
+                        // reports and state for the stages below. 60 s: the pause before retrying.
+                        long remaining = (deadlineMillis - System.currentTimeMillis()) / 1000 - 60 - TEARDOWN_MARGIN_SECONDS
+                        if (remaining < MIN_RETRY_SECONDS) {
+                            echo "Exit 4, but not retrying: only ${remaining}s of the ${BUILD_TIMEOUT_HOURS}h build timeout would be left for the run"
+                            break
+                        }
+                        monitorTimeout = Math.min(Long.parseLong(env.PIPELINE_TIMEOUT), remaining)
 
                         echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
                         sh(returnStatus: true,
@@ -186,7 +249,7 @@ pipeline {
                     if (rc != 0) {
                         String meaning = [
                             1  : 'UNKNOWN (unclassified failure)',
-                            2  : 'VALIDATION_FAILED (input not an S3 URI)',
+                            2  : 'VALIDATION_FAILED (input not an S3 URI, or bad PARALLELISM or STUDY_IDS)',
                             3  : 'DATA_ERROR',
                             4  : 'INFRASTRUCTURE_ERROR (S3/network)',
                             5  : 'CONFIG_ERROR (missing or invalid parameter, or the bucket is not versioned)',
@@ -248,12 +311,18 @@ pipeline {
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }

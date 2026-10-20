@@ -7,7 +7,8 @@
 #   TF_VAR_managed_inputs_uri   optional  managed inputs CSV; its ready studies are listed
 #
 # Generate locally:
-#   export TF_VAR_run_id=local-1 TF_VAR_input_uri=s3://bucket/data/ TF_VAR_name_suffix=local1
+#   export TF_VAR_run_id=local-1 TF_VAR_input_uri=s3://bucket/data/ \
+#          TF_VAR_global_allconcepts_uri=s3://bucket/global_allconcepts/ TF_VAR_name_suffix=local1
 #   make package && make run && make fetch-reports && make validate
 NAME := generate-allconcepts-manifest
 

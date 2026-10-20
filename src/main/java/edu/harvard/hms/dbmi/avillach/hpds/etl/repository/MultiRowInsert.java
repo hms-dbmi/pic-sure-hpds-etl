@@ -32,7 +32,20 @@ final class MultiRowInsert {
      */
     static <T> int execute(JdbcTemplate jdbc, String insertInto, String onConflict, int columnCount,
                            List<T> rows, Function<T, Object[]> values) {
-        int rowsPerStatement = MAX_PARAMS / columnCount;
+        return execute(jdbc, insertInto, onConflict, columnCount, rows, values, MAX_PARAMS);
+    }
+
+    /** As above, with the per-statement parameter limit as an argument so tests can make it tiny. */
+    static <T> int execute(JdbcTemplate jdbc, String insertInto, String onConflict, int columnCount,
+                           List<T> rows, Function<T, Object[]> values, int maxParams) {
+        if (columnCount <= 0) {
+            throw new IllegalArgumentException("columnCount must be positive, got " + columnCount);
+        }
+        if (maxParams < columnCount) {
+            throw new IllegalArgumentException(
+                    "maxParams (" + maxParams + ") cannot fit one row of " + columnCount + " columns");
+        }
+        int rowsPerStatement = maxParams / columnCount;
         String tuple = "(" + String.join(", ", Collections.nCopies(columnCount, "?")) + ")";
         int affected = 0;
         for (int i = 0; i < rows.size(); i += rowsPerStatement) {
@@ -40,8 +53,14 @@ final class MultiRowInsert {
             String sql = insertInto + " VALUES " + String.join(", ", Collections.nCopies(chunk.size(), tuple))
                     + " " + onConflict;
             List<Object> args = new ArrayList<>(chunk.size() * columnCount);
-            for (T row : chunk) {
-                Collections.addAll(args, values.apply(row));
+            for (int r = 0; r < chunk.size(); r++) {
+                Object[] row = values.apply(chunk.get(r));
+                // A short or long row would shift every later row's values into the wrong columns.
+                if (row == null || row.length != columnCount) {
+                    throw new IllegalArgumentException("Row " + (i + r) + " has "
+                            + (row == null ? "no" : String.valueOf(row.length)) + " values; expected " + columnCount);
+                }
+                Collections.addAll(args, row);
             }
             affected += jdbc.update(sql, args.toArray());
         }

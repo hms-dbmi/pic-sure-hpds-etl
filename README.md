@@ -9,8 +9,9 @@ input/output expectations, and exits with a meaningful code so an orchestrator
 
 - **Java 25**, **Spring Boot 4.1**, packaged as a single fat JAR (`target/hpds-etl.jar`)
 - **Spring `NamedParameterJdbcTemplate`** for bulk, idempotent upserts into the **participant
-  database**: Postgres on an ephemeral EC2 server that each pipeline run starts and stops, persisted
-  between runs as `pg_dump`s in S3 (see [docs/PARTICIPANT_DB.md](docs/PARTICIPANT_DB.md))
+  database**: a long-lived PostgreSQL 16 container on the Jenkins host, which each pipeline run
+  makes sure is up and backs up to S3 as a `pg_dump` at its end (see
+  [docs/PARTICIPANT_DB.md](docs/PARTICIPANT_DB.md))
 - **AWS SDK v2 S3** + local filesystem behind one `IoResolver` (`s3://` or local paths)
 - **Jackson** for JSON and CSV/TSV
 - **JUnit 5 + Testcontainers** (Postgres + LocalStack) for integration tests
@@ -33,11 +34,11 @@ java -jar target/hpds-etl.jar --pipeline=migrate-all --input=./participants.csv
 
 Configuration (DB, AWS, reports dir) is environment-driven — see
 [`application.yml`](src/main/resources/application.yml). Nothing is hard-coded. In production
-each job runs on an ephemeral EC2 runner. DB-backed runners receive the participant database
-credentials (`DB_URL` / `DB_USERNAME` / `DB_PASSWORD`) through their user data: `participant-db-start`
-copies them from the DB instance to a `600`-mode file on the Jenkins server, and each runner's
-Terraform apply passes them in. They exist only while the database is up, and the password is never
-printed to the Jenkins console. See [docs/PARTICIPANT_DB.md](docs/PARTICIPANT_DB.md#credentials).
+each job runs on an ephemeral EC2 runner. DB-backed runners read the participant database
+credentials (`DB_URL` / `DB_USERNAME` / `DB_PASSWORD`) at boot from the SSM SecureString
+`/hpds-etl/<ENV>/participant-db/app-credentials`, which `participant-db-start` rotates on every
+start; connections require TLS, and the password never passes through Terraform state, user data
+or the Jenkins console. See [docs/PARTICIPANT_DB.md](docs/PARTICIPANT_DB.md#credentials).
 
 ## Pipelines
 
@@ -57,7 +58,13 @@ the Jenkins host; see [`docs/PARTICIPANT_DB.md`](docs/PARTICIPANT_DB.md).
 
 Each orchestrator stage triggers that job's own pipeline under [`etl-runners/`](etl-runners/),
 which provisions a self-terminating EC2 runner with Terraform, runs the JAR in a container,
-publishes the exit code and JSON report to S3, and tears itself down.
+publishes the exit code and JSON report to S3, and tears itself down. Both pipelines finish with
+a QA stage (`qa-consent-counts`) that compares every ready study's participants per consent group
+in the participant database, and this run's loads, with dbGaP's counts for that study version
+(the dbGaP SSTR API; its runner needs HTTPS egress to `www.ncbi.nlm.nih.gov`), and end every run
+with a consolidated report (`downstream-artifacts/pipeline-report/` or `migration-report/`, also in
+S3) that opens with the QA's discrepancies; see
+[docs/PERMANENT_PIPELINE.md](docs/PERMANENT_PIPELINE.md#stage-11-qa-consent-counts).
 
 The pattern follows [`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — the same
 `terraform-modules/etl-runner` shape and `s3://<stack>/etl-runner/…` layout — with Java in place
@@ -122,8 +129,6 @@ etl/
    ├─ template/TemplateJob                            COPY-ME plug-and-play example
    ├─ participants/
    │  ├─ SstrPopulateRdsParticipantsJob                permanent: dbGaP SSTR TSV → participant DB
-   │  ├─ SingleConsentDataPopulateRdsParticipantsJob   permanent: subject-id CSV → participant DB,
-   │  │                                                one uniform consent per run
    │  └─ Telemetry                                     SSTR row (dbgap ids, consent)
    ├─ allconcepts/
    │  ├─ AllConceptsDataGeneratorJob                   permanent: per-study, per-consent allConcepts
@@ -133,6 +138,10 @@ etl/
    │  └─ AllConceptsFolders                            versioned consent-folder scan, fingerprints
    ├─ genomic/CreateVCFIndexesJob                      permanent: vcfIndex.tsv + SampleIds.csv
    ├─ harmonized/GenerateIdentityConsentMappingJob     permanent: DMC drop → identity/consent CSV
+   ├─ qa/
+   │  ├─ QaConsentCountsJob                            permanent QA: DB/load consent counts vs dbGaP
+   │  ├─ ConsentCountComparison                        the comparison rules (pure)
+   │  └─ DbgapStudyClient                              dbGaP SSTR API client with retry/backoff
    └─ migration/
       ├─ ParticipantsMigrationJob                      temporary: legacy ids → participant DB
       └─ SplitAllConceptsJob                           temporary: legacy allConcepts → per consent
@@ -147,8 +156,13 @@ terraform-modules/etl-runner/     self-terminating EC2 runner module
 etl-runners/                      one dir per job: Jenkinsfile, Makefile, terraform/,
                                   preflight.sh, validate.sh  (+ shared Dockerfile,
                                   run-job.sh, common.mk, common/)
-etl-runners/participant-db/       the per-run Postgres server: Jenkinsfile.start/.stop,
-                                  terraform/, backup and wait scripts
+etl-runners/participant-db/       the long-lived Postgres container on the Jenkins host:
+                                  Jenkinsfile.start/.backup, start and backup scripts
+etl-runners/common/orchestrator.groovy  the permanent orchestrator's stage logic (loaded)
+etl-runners/pipeline-report/      the permanent pipeline's end-of-run report
+etl-runners/migration-report/     the migration pipeline's end-of-run report (TEMPORARY)
+etl-runners/qa-consent-counts/    the consent count QA runner, its load-counts builder, and the
+                                  reports' shared QA section (qa_report.py)
 etl-runners/environments/         per-environment tfvars (development.tfvars)
 docs/JENKINS.md                   architecture, validation, AWS setup, runbook
 docs/PARTICIPANT_DB.md            participant database lifecycle, dumps, seeding

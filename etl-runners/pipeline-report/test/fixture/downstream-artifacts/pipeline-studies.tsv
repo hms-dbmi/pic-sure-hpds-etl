@@ -1,0 +1,7 @@
+study_id	abv	plan	reason	decoded_bytes	csv_count	sstr_input
+phs000001	ONE	load		2147483648	3	s3://b/r/phs000001/rawData/sstr_phs000001.v1.txt
+phs000002	TWO	load		1000	1	s3://b/r/phs000002/rawData/sstr_phs000002.v2.txt
+phs000003	THREE	load		5000	2	s3://b/r/phs000003/rawData/sstr_phs000003.v1.txt
+phs000004	FOUR	excluded	no decoded data CSVs in s3://b/r/phs000004/decoded_data/; no concept mapping at s3://b/r/phs000004/mappings/mapping2.csv			
+phs000005	FIVE	already_processed				
+phs000006	SIX	load		10	1	s3://b/r/phs000006/rawData/sstr_phs000006.v1.txt

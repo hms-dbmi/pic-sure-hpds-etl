@@ -1,0 +1,43 @@
+{
+  "jobName": "sstr-populate-rds-participants",
+  "jobType": "PERMANENT",
+  "runId": "t-phs000002",
+  "exitCode": "SUCCESS_WITH_WARNINGS",
+  "status": "SUCCESS",
+  "startedAt": "2026-10-16T00:00:00Z",
+  "finishedAt": "2026-10-16T00:10:00Z",
+  "durationMillis": 600000,
+  "inputValidation": {
+    "phase": "input",
+    "issues": [],
+    "counts": {
+      "error": 0,
+      "warning": 0,
+      "info": 0
+    }
+  },
+  "outputValidation": {
+    "phase": "output",
+    "issues": [
+      {
+        "severity": "WARNING",
+        "code": "NO_NEW_PARTICIPANTS",
+        "message": "0 new participants: a reload?",
+        "location": null,
+        "context": {
+          "studyId": "phs000002"
+        }
+      }
+    ],
+    "counts": {
+      "error": 0,
+      "warning": 1,
+      "info": 0
+    }
+  },
+  "metrics": {
+    "distinctParticipants": 40,
+    "participantsInserted": 0
+  },
+  "errorMessage": null
+}

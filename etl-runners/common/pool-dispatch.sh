@@ -1,7 +1,8 @@
 #!/bin/bash
 #
-# Hands one job run to a runner-pool worker (etl-runners/runner-pool) through its S3 mailbox, then
-# prints where that run will publish, for monitor-runner.sh and fetch-reports.
+# Hands one run of any hpds-etl job to a runner-pool worker (etl-runners/runner-pool; the
+# etl-runner module's worker mode) through its S3 mailbox, then prints where that run will
+# publish, for monitor-runner.sh and fetch-reports.
 #
 # The worker publishes the run exactly as a single runner would: reports and the status.json
 # sentinel under etl-runner/reports/<module>/<run-id>/, the log at
@@ -10,11 +11,18 @@
 # Usage:
 #   pool-dispatch.sh <instance-id> <mailbox-s3-prefix> <module> <job> <run-id> [param=value ...]
 #
-#   instance-id        the worker, e.g. i-0123456789abcdef0
+#   instance-id        the worker, e.g. i-0123456789abcdef0 (runner-pool output instance_ids)
 #   mailbox-s3-prefix  the pool's mailbox root (runner-pool output mailbox_s3_prefix)
-#   module             reports/log naming, e.g. split-allconcepts
+#   module             reports/log naming, as a single runner's module_name would be
 #   job, run-id        --job and --run-id for the container
-#   param=value        job parameters: study_id=phs000001 becomes --study-id=phs000001
+#   param=value        job parameters, as a single runner's job_params:
+#                      study_id=phs000001 becomes --study-id=phs000001
+#
+# Environment: AWS_REGION (default us-east-1); DISPATCH_CHECK_ATTEMPTS (default 3) and
+# DISPATCH_CHECK_DELAY (seconds, default 5) for the unclaimed-task check.
+#
+# Writes <mailbox>/<instance-id>/task.json:
+#   {runId, module, reportsPrefix, logKey, env: {ETL_JOB, ETL_RUN_ID, ETL_PARAM_<key>...}}
 #
 # Prints (stdout, one per line): STATUS_URI=..., REPORTS_URI=..., LOG_URI=...
 #
@@ -74,12 +82,20 @@ for (( n = 1; ; n++ )); do
   sleep "${DISPATCH_CHECK_DELAY:-5}"
 done
 
-# A sentinel left by an earlier attempt with the same run id would read as this run's result.
-aws s3 rm "s3://$BUCKET/$REPORTS_PREFIX/status.json" --region "$REGION" --only-show-errors >/dev/null 2>&1 || true
+# A sentinel left by an earlier attempt with the same run id would read as this run's result, so
+# it must be gone before the task is written. (Other reports of that attempt are not removed: use
+# a fresh run id per attempt to keep them apart.)
+STATUS_KEY="$REPORTS_PREFIX/status.json"
+aws s3 rm "s3://$BUCKET/$STATUS_KEY" --region "$REGION" --only-show-errors >/dev/null 2>&1
+if err=$(aws s3api head-object --bucket "$BUCKET" --key "$STATUS_KEY" --region "$REGION" 2>&1 >/dev/null); then
+  die "could not remove the earlier sentinel s3://$BUCKET/$STATUS_KEY; refusing to dispatch over it"
+elif [[ "$err" != *"(404)"* && "$err" != *"Not Found"* ]]; then
+  die "could not confirm s3://$BUCKET/$STATUS_KEY is gone: $(tr '\n' ' ' <<<"$err")"
+fi
 
-task=$(jq -n --arg run "$RUN_ID" --arg reports "$REPORTS_PREFIX" --arg log "$LOG_KEY" \
-             --argjson env "$env_json" \
-             '{runId: $run, reportsPrefix: $reports, logKey: $log, env: $env}')
+task=$(jq -n --arg run "$RUN_ID" --arg module "$MODULE" --arg reports "$REPORTS_PREFIX" \
+             --arg log "$LOG_KEY" --argjson env "$env_json" \
+             '{runId: $run, module: $module, reportsPrefix: $reports, logKey: $log, env: $env}')
 printf '%s\n' "$task" | aws s3 cp - "$TASK_URI" --region "$REGION" --only-show-errors \
     || die "could not write $TASK_URI"
 

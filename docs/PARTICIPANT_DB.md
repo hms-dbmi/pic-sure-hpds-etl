@@ -36,7 +36,9 @@ upgrades.
 |------|------|
 | Container | `hpds-etl-participant-db-<ENV>`, image `docker.io/library/postgres:16`, `--restart=unless-stopped` |
 | Data | named volume `hpds-etl-participant-db-<ENV>-data` |
-| Port | host port `5432`, which runners connect to over the VPC |
+| Config | named volume `hpds-etl-participant-db-<ENV>-conf`, mounted read-only at `/etc/pdb`: TLS certificate and key, superuser password file, `pg_hba.conf` |
+| Port | host port `5432`, which runners connect to over the VPC, **TLS only** (`ssl=on`; runners use `sslmode=require`) |
+| App credentials | SSM SecureString `/hpds-etl/<ENV>/participant-db/app-credentials` (see [Credentials](#credentials)) |
 | Database / role / schema | `etl_db` / `hpds_etl` / `etl` |
 | Dumps | `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backups/` |
 
@@ -46,7 +48,34 @@ Nothing is installed on the Jenkins host or in the Jenkins container: jobs canno
 there, and anything installed in the Jenkins container would vanish when it is recreated.
 
 Admin work (creating the role, restores, dumps) runs as the `postgres` superuser over the
-container's local socket. No superuser password is stored anywhere.
+container's local socket (`docker exec -u postgres`, peer authentication).
+
+**Access rules** (`pg_hba.conf`, which `lib.sh` rewrites in the config volume on every container
+run and points the server at with `-c hba_file=…`):
+
+| Who | How |
+|-----|-----|
+| `postgres` (superuser) | local socket only (`peer`). Every network login is rejected, over TLS or not. |
+| `hpds_etl` (app role) | `hostssl`, database `etl_db`, `scram-sha-256`. Plain-text connections are rejected. |
+| anyone else | rejected |
+
+**TLS.** On first use, `lib.sh` generates a self-signed certificate (RSA 2048, 10 years,
+CN = the container name) into the config volume as `server.crt` / `server.key`. The key is mode
+`600`, owned by the image's `postgres` user. It runs `openssl` inside a one-off `postgres:16`
+container, so nothing is installed on the host. The certificate is kept across replaces. Runners
+use `sslmode=require`: the connection is encrypted, but the certificate is not verified. A
+missing certificate or key is regenerated the next time a container is created. A kept container
+is recreated (on the same data volume) only when its `ssl` or `hba_file` setting is wrong. That happens once, on the first start after upgrading from a version without TLS, and it restarts Postgres, dropping open connections (and plain-text clients cannot reconnect). Run that start when no DB-backed job is running.
+
+**The superuser password.** The image will not initialise a data directory without one. A random
+one is generated *inside* the config volume (`superuser-password`, mode `600`, owned by
+`postgres`), and the image reads it through `POSTGRES_PASSWORD_FILE`. So it is not on any command
+line, nor in `docker inspect` / `podman inspect`, nor in Jenkins. It is stored: in that file, and
+(hashed) in the database. It is never used, because network logins as `postgres` are rejected.
+Anyone who can read the volume or `docker exec` into the container is already root-equivalent on
+the host. A data volume created by an earlier version keeps the password it was initialised with
+(that version passed it with `-e`, so it was visible in `inspect` until the container was
+recreated); it is equally unusable over the network now.
 
 ---
 
@@ -58,22 +87,25 @@ orchestrator (/Jenkinsfile or /Jenkinsfile.migration)
   ▸ Start participant DB ── participant-db-start
   │     is it up, on PostgreSQL 16, holding clean data?  keep it
   │     otherwise (or OVERWRITE_DB):  save the live DB ▸ recreate the container ▸ restore
-  │     write host/port/dbname/username/password to the Jenkins-side credentials file
-  ▸ … DB-backed runner stages (each gets the credentials in its user data) …
+  │     give hpds_etl a new password (kept: ALTER ROLE; replaced: the new role's)
+  │     publish host/port/dbname/username/password to SSM (SecureString, overwritten)
+  │     record the live database dirty: "run <RUN_ID> in progress"
+  ▸ … DB-backed runner stages (each runner fetches the credentials from SSM at boot) …
   post { always }
   ▸ participant-db-backup   (only if this build's start succeeded)
         pg_dump --format=d ▸ tar ▸ upload ▸ verify size and dumped-at
              SUCCESS or UNSTABLE:  overwrite participant_db.tar               (latest clean backup)
              otherwise:            overwrite participant_db_not_promoted.tar  (failed or aborted run)
-        record the live database as clean / dirty in live_state.json
+        record the live database as clean (promoted) / dirty in live_state.json
         the database stays up
 ```
 
 | Property | How it holds |
 |----------|--------------|
 | **A failed run never becomes the clean backup** | Only a SUCCESS/UNSTABLE build overwrites `participant_db.tar`. A failed or aborted run's dump goes to `participant_db_not_promoted.tar`. |
-| **A failed run's writes don't silently carry over** | Its backup marks the live database *dirty*. By default the next start replaces it from the clean backup (`IF_LAST_RUN_FAILED=restore-clean`); `continue` keeps building on it. |
-| **Nothing is replaced unsaved** | Before a live database is replaced, it is dumped to `participant_db_pre_overwrite.tar` and the upload verified. If that fails, nothing is touched. |
+| **A failed run's writes don't silently carry over** | The start records the live database *dirty* for the run, and only the run's promoted backup records it *clean*. So a run that fails, is aborted, or never reaches its backup (killed, agent lost, backup failed) leaves it dirty. By default the next start replaces it from the clean backup (`IF_LAST_RUN_FAILED=restore-clean`); `continue` keeps building on it. |
+| **Nothing is replaced unsaved** | Before a live database is replaced, it is dumped to `participant_db_pre_overwrite.tar` and the upload verified. If that fails, nothing is touched. A stopped or recovering database that doesn't come up to be saved is not removed (the start fails) unless `OVERWRITE=true`. |
+| **A failed replace can be retried safely** | A replace records the live database as *replacing* before it removes anything. The next start neither keeps nor saves that partial restore, so `participant_db_pre_overwrite.tar` still holds the database it replaced. `participant-db-backup` refuses to dump it. |
 | **A bad restore source changes nothing** | The source is resolved (and checked to exist) before the container is removed. |
 | **No lost history** | Every dump overwrites a fixed key on a versioned bucket. Both jobs refuse to run if versioning is not `Enabled`. |
 
@@ -99,7 +131,7 @@ Locally, from `etl-runners/participant-db/` on a machine with the socket and AWS
 ```bash
 make start                                 # OVERWRITE=true RESTORE_FROM=… IF_LAST_RUN_FAILED=continue
 make backup PROMOTE=false                  # dump to participant_db_not_promoted.tar
-make status                                # is it up, with credentials saved?
+make status                                # is it up, with working credentials published?
 make test                                  # the scripts' tests (no runtime or AWS needed)
 ```
 
@@ -109,24 +141,48 @@ make test                                  # the scripts' tests (no runtime or A
 
 `RESTORE_FROM` can be blank (the latest clean backup, `participant_db.tar`), `none` (an empty
 schema from `schema.sql`), a file under `backups/` (for example `participant_db_not_promoted.tar`
-or `participant_db_pre_overwrite.tar`), or a full `s3://` URI to a tarred `pg_dump --format=d`
-dump.
+or `participant_db_pre_overwrite.tar`), or a full `s3://<bucket>/<key>` URI to a tarred
+`pg_dump --format=d` dump. Surrounding whitespace is trimmed. Anything with other characters than
+letters, digits and `. _ / : @ + = , -` (spaces, quotes, …) is rejected before anything changes.
+
+A restore needs free disk of about **2 × (dump + database)**: the staged dump plus the restored
+database, with the same 2× margin a dump uses. Every dump this tooling makes records the
+database's size (`db-bytes` metadata). For a dump without it (a hand-made seed), the database is
+assumed to be `RESTORE_SIZE_FACTOR` (5) times the compressed dump. `participant-db-start` checks
+this twice. The first check runs before anything is removed, counting the space the live database
+will free; if it fails, nothing is changed. The second runs in the new container, before the
+download; if it fails, the database is *replacing* (free space and re-run). Either way the error
+says "not enough space … to restore".
 
 | The database is… | `participant-db-start` |
 |---|---|
-| up, on 16, clean | **keeps it**; refreshes the saved credentials. `RESTORE_FROM` is ignored without `OVERWRITE`. |
+| up, on 16, clean | **keeps it**; rotates the password (with `RUN_ID`) and republishes the credentials. A container running without TLS or the managed `pg_hba.conf` is recreated on the same data volume first (nothing is dumped or restored). `RESTORE_FROM` is ignored without `OVERWRITE`. |
 | up, and `OVERWRITE=true` | saves it to `participant_db_pre_overwrite.tar`, then **replaces it** from `RESTORE_FROM` (blank = the latest clean backup) |
 | up, holding a failed run | `IF_LAST_RUN_FAILED=restore-clean` (default): saves it, then **replaces it from the latest clean backup**. `continue`: **keeps it**. |
 | up, but not PostgreSQL 16 | saves it, **recreates it on 16**, and restores that save (or, if it holds a failed run and `restore-clean`, the clean backup) |
-| stopped (container present) | starts it and saves it if it comes back, then **creates it** from `RESTORE_FROM`, else the latest clean backup |
+| stopped, or running but not accepting connections | starts it and waits up to `RESTART_STOPPED_TIMEOUT_SECONDS` (600) for it, saves it, then **creates it** from `RESTORE_FROM`, else the latest clean backup. If it doesn't come up, **the start fails and nothing is removed**; `OVERWRITE=true` discards it instead. |
+| absent, but its data volume exists | runs a container on that volume, then as stopped |
 | absent | **creates it** from `RESTORE_FROM`, else the latest clean backup; after a failed run with `continue`, from `participant_db_not_promoted.tar` |
+| *replacing*: the last start's replace did not finish | **replaces the partial restore without saving it**, from `RESTORE_FROM`, else from what that replace was restoring |
+
+`RESTORE_FROM=participant_db_pre_overwrite.tar` is refused when the start would first save the live
+database to that same file (nothing is changed); copy it under another name and restore that. After
+a failed replace this doesn't apply, since the partial restore is not saved.
 
 If there is no `participant_db.tar` yet, a new database gets an empty schema. That's right for
 a brand-new environment and **wrong** for one with history: [seed it first](#supplying-the-initial-dump).
 Any S3 error other than "not found" stops the start instead of falling back to an empty schema.
 
-A database restored from the clean backup, a chosen file or a fresh schema is recorded *clean*.
-One restored from `participant_db_not_promoted.tar` because of `continue` stays *dirty*.
+With `RUN_ID` set (the orchestrators pass `<BUILD_TAG>-db`), a start always ends by recording the
+live database *dirty* ("run … in progress"), whether it kept or replaced it; that run's
+`participant-db-backup` with `PROMOTE_BACKUP=true` records it *clean*. A standalone start (blank
+`RUN_ID`) records a database restored from the clean backup, a chosen file or a fresh schema
+*clean*, keeps one restored from `participant_db_not_promoted.tar` because of `continue` *dirty*,
+and leaves a kept database's state as it was.
+
+`live_state.json` missing means "no recorded state" (a kept database is then recorded clean). Any
+other S3 error reading it, or a record with no known state, stops the start: guessing could erase a
+*dirty* or *replacing* marker.
 
 ---
 
@@ -137,7 +193,8 @@ s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backup
 ├─ participant_db.tar                 the latest clean backup: what a start restores by default
 ├─ participant_db_not_promoted.tar    the most recent failed or aborted run's dump
 ├─ participant_db_pre_overwrite.tar   the live database, saved just before a start replaced it
-└─ live_state.json                    {"state": "clean"|"dirty", reason, at, build}
+└─ live_state.json                    {"state": "clean"|"dirty"|"replacing", reason, at, build}
+                                      (+ source, next while replacing: what the retry restores)
 ```
 
 Each key is overwritten in place, and the bucket's versioning keeps every earlier version. Every
@@ -174,24 +231,37 @@ One-time, by someone with access to the host and its AWS account. Jobs cannot do
 1. **Runners must reach the host's port 5432.**
    - The Jenkins host's security group allows TCP 5432 from the runners' security group
      (`sg-0932143f21f7c533b` in `development`).
-   - The host firewall allows it. The SRCE golden image's nftables drops unlisted ports:
+   - The host firewall allows it, **from the runners' network only**. The SRCE golden image's
+     nftables drops unlisted ports. Use the runner subnet's CIDR (or the VPC's), not an open rule:
      ```bash
-     sudo nft add rule inet filter input tcp dport 5432 accept
+     RUNNER_CIDR=10.x.y.0/24     # the runner subnet (or VPC) CIDR in this environment
+     sudo nft add rule inet filter input ip saddr "$RUNNER_CIDR" tcp dport 5432 accept
      sudo sh -c 'nft list ruleset > /etc/nftables/nftables.rules'
      ```
+     The container publishes 5432 on all host interfaces, so the security group and this rule
+     are what keep it to the VPC. Even so, only the app role can log in over the network, and
+     only over TLS.
 2. **Runners need the host's address.** Set `participant_db_host` (the Jenkins host's private IP
    or DNS name) in `etl-runners/environments/<ENV>.tfvars`. Without it, `participant-db-start`
    asks instance metadata, which a container can reach only if the instance's metadata hop limit
    is at least 2.
-3. **The container should come back after a host reboot.** `--restart=unless-stopped` needs
-   podman's restart service on the host: `sudo systemctl enable podman-restart.service`. Without
-   it, the next `participant-db-start` finds the container stopped and recreates it from the
-   latest backup.
+3. **After a host reboot.** Podman has no daemon, so `--restart=unless-stopped` only restarts the
+   container when it exits while podman is running. On boot, only `podman-restart.service` starts
+   containers (`sudo systemctl enable podman-restart.service`), and only those whose restart
+   policy matches its filter. Check it with `systemctl cat podman-restart.service`: many podman
+   versions start only `restart-policy=always`, so this container stays stopped. Either way, the
+   next `participant-db-start` finds it stopped, starts it, waits up to
+   `RESTART_STOPPED_TIMEOUT_SECONDS` for crash recovery, saves it, and recreates it from the latest
+   backup. If it does not come up, it fails with the volume untouched. DB-backed runner jobs run
+   on their own fail at `require-db.sh` until then.
 4. **Disk.** The volume holds the database, and each dump or restore is staged in the container
-   (about twice the database size while it runs). The backup checks free space first.
+   (about twice the database size while it runs). The backup checks free space first, and so does
+   a restore (see [Start Rules](#start-rules)).
+5. **IAM for the Jenkins instance role** (the jobs run with it). See [Credentials](#credentials).
 
 The Jenkins user must also be able to use the podman socket (it already must, to build runner
-images), and the instance role needs S3 access to the dumps prefix (it already has it).
+images), and the instance role needs S3 access to the dumps prefix (it already has it), plus the
+SSM and KMS permissions under [Credentials](#credentials).
 
 ---
 
@@ -247,23 +317,58 @@ above the migrated ones.
 
 ## Credentials
 
-`participant-db-start` generates the `hpds_etl` role's password when it creates the database and
-writes the connection details, mode `600` (directory `700`), to
-`${HPDS_ETL_CREDENTIALS_DIR:-$HOME/.hpds-etl}/participant-db-<ENV>.json` on the Jenkins server:
+The `hpds_etl` role's connection details are published to an **SSM SecureString**, the only copy
+anywhere:
+
+```
+/hpds-etl/<ENV>/participant-db/app-credentials        (etl-runners/common/db-credentials-path.sh <ENV>)
+```
 
 ```json
 { "engine": "postgres", "host": "<participant_db_host>", "port": 5432, "dbname": "etl_db",
   "schema": "etl", "username": "hpds_etl", "password": "…", "container": "hpds-etl-participant-db-<ENV>" }
 ```
 
-`etl-runners/common.mk` hands that file to each DB-backed runner as `TF_VAR_db_credentials_json`.
-On every start of a kept database, the file is checked by logging in with it. If it is missing or
-its password no longer works (for example after the Jenkins home was rebuilt), the role gets a new
-password and the file is rewritten. The password is passed to `psql` on stdin, never on a command
-line, and is never printed.
+DB-backed runners fetch it at boot (instance role: `ssm:GetParameter` and `kms:Decrypt`) and
+connect with `sslmode=require`. It is not in user data or Terraform state.
 
-Every job that uses the file (start, backup, and every DB-backed runner job) must run on this
-Jenkins node, since it is a local file. With one node, `agent any` already guarantees that.
+**When it is written.** `participant-db-start` overwrites it (`put-parameter --type SecureString
+--overwrite`) on every successful start, after the password is set:
+
+| Start | Password |
+|-------|----------|
+| replaces the database | new: the role is created again with a random password |
+| keeps it, with `RUN_ID` (every orchestrator run) | **rotated** (`ALTER ROLE … PASSWORD`). Runners of an earlier run are finished by then (the two pipelines never run at the same time). |
+| keeps it, standalone (blank `RUN_ID`) | unchanged if the published one logs in, and republished (refreshing the host). A new one only if the server **rejects** it, or nothing usable is published. A connection failure, timeout or SSM error fails the start without changing the password, so a standalone start never rotates the password under running jobs. (The one-time TLS recreation above still restarts the server.) |
+
+If publishing fails (after retries), the start fails. The value goes to the AWS CLI through a
+`600`-mode temp file (`--value file://…`), never on a command line. It reaches `psql` on stdin, and
+is never printed. Each SSM call is tried up to `AWS_ATTEMPTS` (4) times with a growing pause, and a
+missing parameter is not retried.
+
+Earlier versions kept a copy in `~/.hpds-etl/participant-db-<ENV>.json` on the Jenkins server.
+`participant-db-start` deletes it.
+
+**Required IAM for the Jenkins instance role**, on
+`arn:aws:ssm:<region>:<account>:parameter/hpds-etl/<ENV>/participant-db/app-credentials`:
+
+| Action | Used by |
+|--------|---------|
+| `ssm:PutParameter` | `participant-db-start` (publish) |
+| `ssm:GetParameter` | `participant-db-start` (check a kept database's password), `require-db.sh` (every DB-backed runner job) |
+| `kms:Encrypt`, `kms:Decrypt` (and `kms:GenerateDataKey`) | on the parameter's key: the AWS-managed `alias/aws/ssm` by default (allowed through SSM for principals with the SSM permissions above, via `kms:ViaService = ssm.<region>.amazonaws.com`), or the key set as `SSM_KMS_KEY_ID` in `participant-db.conf`, whose key policy must then allow the role |
+
+Example policy statement:
+
+```json
+{ "Effect": "Allow",
+  "Action": ["ssm:PutParameter", "ssm:GetParameter"],
+  "Resource": "arn:aws:ssm:us-east-1:<account>:parameter/hpds-etl/development/participant-db/app-credentials" },
+{ "Effect": "Allow",
+  "Action": ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"],
+  "Resource": "<arn of the key: aws/ssm's key ARN, or SSM_KMS_KEY_ID>",
+  "Condition": { "StringEquals": { "kms:ViaService": "ssm.us-east-1.amazonaws.com" } } }
+```
 
 ---
 
@@ -271,7 +376,8 @@ Jenkins node, since it is a local file. With one node, `agent any` already guara
 
 Run `participant-db-start` (it leaves the database up), then the runner job. Each DB-backed
 runner's `require-db.sh` check fails fast, before provisioning anything, if the container isn't
-accepting connections or the credentials file is missing. Run `participant-db-backup` afterwards
+accepting connections, nothing usable is published in SSM, or the published credentials don't log
+in (for example after a failed replace). Run `participant-db-backup` afterwards
 if the runner's writes should be saved; otherwise the next pipeline run's backup captures them.
 
 ---
@@ -280,11 +386,17 @@ if the runner's writes should be saved; otherwise the next pipeline run's backup
 
 | Symptom | What to do |
 |---|---|
-| A start failed after "Removing hpds-etl-participant-db-…" | The database was replaced but not brought back. Its previous contents are in `participant_db_pre_overwrite.tar` (if it was up): run `participant-db-start` with `OVERWRITE=true RESTORE_FROM=participant_db_pre_overwrite.tar`. |
+| A start failed after "Removing hpds-etl-participant-db-…" | The database was replaced but not brought back, and is recorded *replacing*. Re-run `participant-db-start` to retry the same restore. To get the replaced database back instead, run it with `OVERWRITE=true RESTORE_FROM=participant_db_pre_overwrite.tar` (if it was saved); the partial restore is not saved over that file. |
+| A start failed with "did not accept connections … Nothing was removed" | The container is stopped or still recovering (for example after a host reboot), and its data is still in its volume. Check `docker logs hpds-etl-participant-db-<ENV>` and re-run once it accepts connections. To discard that data and restore a backup, re-run with `OVERWRITE=true` (and `RESTORE_FROM`). |
+| A start failed with "cannot read …/live_state.json" or "cannot check …" | S3 access or credentials problem; nothing was changed. Fix it and re-run. |
 | `participant-db-backup … ended FAILURE` at the end of a run | That run's writes are only in the live database. Fix the cause (versioning, disk space, S3 access) and re-run `participant-db-backup` with the same `PROMOTE_BACKUP`. |
 | You want a failed run's data back after the next start replaced it | It's in `participant_db_not_promoted.tar`: `OVERWRITE=true RESTORE_FROM=participant_db_not_promoted.tar`. |
 | `cannot reach the container runtime` | The podman socket is not mounted in the Jenkins container, or the Jenkins user can't open it. |
-| Runners fail to connect | Check the [host prerequisites](#prerequisites-on-the-jenkins-host): security group, host nftables rule, and `participant_db_host`. |
+| Runners fail to connect | Check the [host prerequisites](#prerequisites-on-the-jenkins-host): security group, host nftables rule, and `participant_db_host`. Clients must use TLS (`sslmode=require`); a plain-text connection gets "no pg_hba.conf entry … no encryption". |
+| A start failed with "could not check the published credentials … The password was not changed" | The database didn't answer the login check (not a rejected password). Check `docker logs` and re-run. |
+| A start failed with "could not publish the connection details to SSM" or "cannot read SSM parameter" | SSM or KMS permissions (see [Credentials](#credentials)) or throttling. A kept database's password may already be rotated; re-running the start publishes a fresh one. |
+| A start failed with "not enough space … to restore" | Free disk on the Jenkins host and re-run `participant-db-start` (the database is *replacing*, so it retries the restore). |
+| A start failed with "could not prepare the TLS certificate …" | The one-off `postgres:16` setup container failed (volume, image, or `openssl` missing from the image). See the log above the error. |
 | `versioning … is not Enabled` | Enable versioning on the bucket; dumps overwrite fixed keys. |
 
 To inspect the live database: `docker exec -it -u postgres hpds-etl-participant-db-<ENV> psql etl_db`.
@@ -300,8 +412,15 @@ To inspect the live database: `docker exec -it -u postgres hpds-etl-participant-
 - `start.sh`, `backup.sh` and `require-db.sh` end to end, against stub `docker` and `aws`
   commands that simulate the container and a versioned bucket.
 
-The failure cases include an unversioned bucket, S3 errors, a missing backup, a failed or
-unverifiable pre-overwrite dump, a failed restore, a dump without `toc.dat`, too little disk, and
-the database being down.
+They also cover password rotation per run (and none on a connection failure or SSM error), the
+SSM publish (contract, retries, failure fails the start), TLS and pg_hba arguments, the superuser
+password not being on the command line, recreating a pre-TLS container on its volume, the restore
+free-space check, and `RESTORE_FROM` trimming and validation.
+
+The failure cases include an unversioned bucket, S3 errors (including reading `live_state.json`),
+a missing backup, a failed or unverifiable pre-overwrite dump, a failed restore and its recovery
+(the pre-overwrite dump is not overwritten), a dump without `toc.dat`, too little disk, a database
+that is down or won't come back (its volume is kept), an orphaned data volume, and a run that
+never reaches its backup (the database stays dirty).
 
 They need only bash and jq.

@@ -14,7 +14,8 @@
 #          - any other failure (infrastructure, timeout, unknown, config) or a study that never
 #            started is the run's problem: an ERROR (STUDY_FAILED / STUDY_NOT_STARTED), listed in
 #            metrics.rerunStudyIds, and the stage fails.
-#        A study with warnings is a WARNING issue; ../common/validate-report.sh reads it too.
+#        A study with warnings is a WARNING issue; ../common/validate-report.sh reads it too, and
+#        exits 10 (UNSTABLE) for any WARNING issue, an excluded study's included.
 #   split-allconcepts-report-<run-id>.md    the same, to read: totals, then each failed study with
 #        its reason, job error, failed checks, logs, artifacts and the re-run setting, then the
 #        studies that did not start or had warnings, then a table of every study.

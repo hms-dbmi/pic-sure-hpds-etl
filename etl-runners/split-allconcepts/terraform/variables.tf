@@ -71,11 +71,9 @@ variable "root_volume_size" {
   description = "Root EBS size in GiB (Jenkins ROOT_VOLUME_GB). Holds the container image plus the per-consent temp spool, which totals roughly the input size (phs000200's legacy allConcepts is 34 GiB). The migration orchestrator passes twice the input plus 50 GiB, at least 100, for studies of SPLIT_LARGE_STUDY_GB or more; smaller studies run on the runner pool."
 }
 
-variable "db_credentials_json" {
+variable "environment" {
   type        = string
-  default     = ""
-  sensitive   = true
-  description = "Participant DB credentials, from the Jenkins server's saved copy (common.mk sets TF_VAR_db_credentials_json)"
+  description = "ETL environment (common.mk sets TF_VAR_environment from ENV). Names the participant DB credentials' SSM parameter, /hpds-etl/<environment>/participant-db/app-credentials."
 }
 
 variable "tags" {

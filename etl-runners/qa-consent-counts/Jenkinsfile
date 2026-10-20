@@ -1,0 +1,362 @@
+// =============================================================================
+// PERMANENT QA -- qa-consent-counts (JobType.PERMANENT)
+//
+// For every study marked ready in managed inputs, counts the distinct participants per consent
+// group in the participant database and compares them with dbGaP's subject counts for that study
+// version (the dbGaP SSTR API, GET {DBGAP_BASE_URL}/{phs}.{v}/summary). With LOAD_COUNTS -- this
+// run's participants loaded per consent group -- it also checks the database holds what the loads
+// reported; the database is authoritative. Read-only. Runs last in both orchestrators (/Jenkinsfile
+// and Jenkinsfile.migration), or standalone.
+//
+// Findings (each a WARNING; the build is UNSTABLE): COUNT_MISMATCH, MISSING_IN_DB (dbGaP lists
+// subjects in a group the DB lacks; consent 0 included), MISSING_IN_DBGAP, DBGAP_COUNT_MISSING,
+// REPORT_DB_MISMATCH, NO_VERSION (no usable Version in managed inputs; not looked up),
+// VERSION_NOT_FOUND (dbGaP answers HTTP 400 error_code 2) and VERSION_MISMATCH (dbGaP answered for
+// another version).
+//
+// dbGaP outages: each study is retried up to DBGAP_MAX_ATTEMPTS times with exponential backoff
+// (DBGAP_INITIAL_BACKOFF_SECONDS doubling to DBGAP_MAX_BACKOFF_SECONDS, Retry-After honoured) on 429,
+// 5xx, timeouts, connection errors and unparseable 200s. A study still unanswered fails the job
+// with exit 4 -- DBGAP_GIVE_UP_AFTER studies failing in a row, or DBGAP_DEADLINE_SECONDS passing,
+// stops further lookups so an outage ends in minutes, not in a monitor timeout -- after every other study was compared and both CSVs and the report were written,
+// its rows UNVERIFIED -- and RETRY_ON_INFRA reruns it once.
+//
+// Network: the runner's security group must allow HTTPS (443) egress to www.ncbi.nlm.nih.gov,
+// besides the participant DB and S3. See docs/JENKINS.md.
+//
+// Inputs
+//   --managed-inputs   managed inputs CSV; its ready studies (Study Identifier + Version) are checked
+//   --load-counts      optional CSV study_id,consent_code,participants_loaded[,source]
+//   RDS credentials read by the runner at boot from the SSM parameter
+//                   /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
+//
+// Outputs (in the archived reports)
+//   qa_consent_counts.csv, qa_consent_count_discrepancies.csv
+//     study_id,version,consent_code,consent_short_name,dbgap_subjects,db_participants,
+//     load_participants,load_source,status,note
+//   qa-consent-counts-<runId>.json report: studiesChecked, studiesVerified, consentsCompared,
+//     consentsMatching, discrepancies, discrepanciesByType, studiesWithDiscrepancies,
+//     unverifiedStudies, apiAttempts, apiRetries.
+//
+// Exit codes (see ExitCode.java)
+//   0 success (discrepancies make the build UNSTABLE) | 1 unknown | 2 validation (bad parameter) |
+//   3 data (malformed LOAD_COUNTS) | 4 infrastructure (dbGaP or the DB unavailable; retried once
+//   when RETRY_ON_INFRA) | 5 config | 124 monitor timeout (not retried)
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The orchestrators pass an image they already built as PREBUILT_IMAGE_TAR; this build then skips
+//   both build stages, uses that tarball, and leaves deleting it to the orchestrator.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk-25'
+    }
+
+    options {
+        timestamps()
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
+        copyArtifactPermission('*')
+        buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
+        disableConcurrentBuilds()
+        // Two attempts of up to JOB_TIMEOUT_SECONDS each (RETRY_ON_INFRA), plus provisioning.
+        timeout(time: 5, unit: 'HOURS')
+    }
+
+    parameters {
+        string(name: 'MANAGED_INPUTS', defaultValue: '',
+               description: '--managed-inputs: CSV whose studies marked ready are checked, by Study Identifier and Version (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
+        string(name: 'LOAD_COUNTS', defaultValue: '',
+               description: '--load-counts: this run\'s participants loaded per consent group, a CSV with study_id,consent_code,participants_loaded[,source] (s3:// URI). Studies it does not list are compared DB vs dbGaP only. Blank skips the load-report check.')
+        string(name: 'STUDY_FILTER', defaultValue: '',
+               description: '--study-filter: comma-separated study ids to check. Blank checks every ready study.')
+        string(name: 'CONCURRENCY', defaultValue: '4',
+               description: '--concurrency: studies looked up in dbGaP at once, 1-16 (each call takes ~10 s).')
+        string(name: 'DBGAP_BASE_URL', defaultValue: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study',
+               description: '--dbgap-base-url: the dbGaP SSTR study endpoint; {phs}.{v}/summary is appended.')
+        string(name: 'DBGAP_MAX_ATTEMPTS', defaultValue: '5',
+               description: '--dbgap-max-attempts: requests per study, retries included, 1-20.')
+        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', defaultValue: '2',
+               description: '--dbgap-initial-backoff-seconds: wait after the first failed request, doubling per retry, 0-600.')
+        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', defaultValue: '60',
+               description: '--dbgap-max-backoff-seconds: longest wait between retries, 1-3600 (a Retry-After header is honoured instead, up to 5 minutes).')
+        string(name: 'DBGAP_TIMEOUT_SECONDS', defaultValue: '60',
+               description: '--dbgap-timeout-seconds: per-request timeout, 1-600.')
+        string(name: 'DBGAP_GIVE_UP_AFTER', defaultValue: '3',
+               description: '--dbgap-give-up-after: stop asking dbGaP once this many studies in a row got no usable answer (1-1000), so an outage ends with exit 4 and the report in minutes; the rest are UNVERIFIED.')
+        string(name: 'DBGAP_DEADLINE_SECONDS', defaultValue: '5400',
+               description: '--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Keep it well inside JOB_TIMEOUT_SECONDS, so a slow dbGaP still ends with the report written rather than a monitor timeout (exit 124, no report).')
+        string(name: 'RUN_ID', defaultValue: '',
+               description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
+        string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
+               description: 'Runner instance type.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
+               description: 'How long to wait for the runner before giving up (monitor exits 124). ~600 studies at 4 at a time take ~30 minutes when dbGaP is healthy.')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false,
+               description: 'Skip the JAR test suites.')
+        booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
+               description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR), e.g. dbGaP still not answering for a study after its own retries.')
+        choice(name: 'ENV', choices: ['development'],
+               description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
+    }
+
+    environment {
+        ENV             = "${params.ENV ?: 'development'}"
+        AWS_REGION      = 'us-east-1'
+
+        RUNNER_DIR = 'etl-runners/qa-consent-counts'
+
+        TF_VAR_managed_inputs_uri            = "${params.MANAGED_INPUTS.trim()}"
+        TF_VAR_load_counts_uri               = "${params.LOAD_COUNTS.trim()}"
+        TF_VAR_study_filter                  = "${params.STUDY_FILTER.trim()}"
+        TF_VAR_concurrency                   = "${params.CONCURRENCY.trim()}"
+        TF_VAR_dbgap_base_url                = "${params.DBGAP_BASE_URL.trim()}"
+        TF_VAR_dbgap_max_attempts            = "${params.DBGAP_MAX_ATTEMPTS.trim()}"
+        TF_VAR_dbgap_initial_backoff_seconds = "${params.DBGAP_INITIAL_BACKOFF_SECONDS.trim()}"
+        TF_VAR_dbgap_max_backoff_seconds     = "${params.DBGAP_MAX_BACKOFF_SECONDS.trim()}"
+        TF_VAR_dbgap_timeout_seconds         = "${params.DBGAP_TIMEOUT_SECONDS.trim()}"
+        TF_VAR_dbgap_give_up_after           = "${params.DBGAP_GIVE_UP_AFTER.trim()}"
+        TF_VAR_dbgap_deadline_seconds        = "${params.DBGAP_DEADLINE_SECONDS.trim()}"
+        TF_VAR_instance_type                 = "${params.INSTANCE_TYPE.trim()}"
+
+        PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
+    }
+
+    stages {
+
+        stage('Init') {
+            steps {
+                script {
+                    // The workspace persists between builds, and post { always } archives reports/**
+                    // even when this build never fetched any (say, a failed apply): start empty, so an
+                    // earlier build's report is never archived, or copied by an orchestrator, as this one's.
+                    sh "rm -rf ${RUNNER_DIR}/reports"
+
+                    def base = (params.RUN_ID?.trim())
+                        ?: "qa-consent-counts-${env.BUILD_NUMBER}"
+                    env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
+                    env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
+
+                    env.TF_VAR_name_suffix = "qa-consent-counts-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
+
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} qa-consent-counts"
+                    echo "managed inputs: ${params.MANAGED_INPUTS ?: '<configured default>'}"
+                    echo "load counts:    ${params.LOAD_COUNTS ?: '<none>'}"
+                    echo "run id: ${env.BASE_RUN_ID}"
+                }
+                sh '''
+                    set -e
+                    echo "--- tool versions ---"
+                    make -s -C $RUNNER_DIR ensure-terraform
+                    aws --version
+                    docker --version
+                    jq --version
+                    java -version 2>&1 | head -1
+                '''
+            }
+        }
+
+        // A pre-built image already contains the JAR.
+        stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Pre-flight') {
+            steps {
+                script {
+                    env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
+                    }
+                }
+            }
+        }
+
+        stage('Package runner image') {
+            steps {
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
+            }
+        }
+
+        stage('Provision, run and monitor') {
+            steps {
+                script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
+                    int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
+                    int rc = 1
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                        env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
+                                                              : "${env.BASE_RUN_ID}-r${attempt}"
+                        env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
+                        env.TF_VAR_name_suffix = "qa-consent-counts-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
+                        env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/qa-consent-counts/${env.EFFECTIVE_RUN_ID}.tfstate"
+
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+
+                        sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
+                        env.TF_INITIALISED = 'true'
+
+                        rc = sh(returnStatus: true, script: """
+                            cd ${RUNNER_DIR}
+                            TF=\$(make -s tf-path)
+                            ../common/monitor-runner.sh \
+                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
+                        """)
+
+                        env.JOB_EXIT_CODE = "${rc}"
+                        if (rc != 4 || attempt == maxAttempts) {
+                            break
+                        }
+
+                        echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
+                        sh(returnStatus: true,
+                           script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                        sleep time: 60, unit: 'SECONDS'
+                    }
+
+                    if (rc != 0) {
+                        String meaning = [
+                            1  : 'UNKNOWN (unclassified failure)',
+                            2  : 'VALIDATION_FAILED (an invalid parameter or a missing LOAD_COUNTS; see the report)',
+                            3  : 'DATA_ERROR (LOAD_COUNTS is malformed)',
+                            4  : 'INFRASTRUCTURE_ERROR (dbGaP gave no usable answer for some study after its retries, or the DB/S3 failed; the report and CSVs list what was compared)',
+                            5  : 'CONFIG_ERROR (missing or invalid parameter/credential, or no managed inputs)',
+                            124: 'TIMEOUT (runner did not finish in time)',
+                        ].get(rc, "unmapped code ${rc}")
+                        env.FAILURE_MEANING = meaning
+                        echo "Job exited ${rc}: ${meaning}"
+                    }
+                }
+            }
+        }
+
+        stage('Fetch reports') {
+            when { expression { env.TF_INITIALISED == 'true' } }
+            steps {
+                sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+            }
+        }
+
+        stage('Validate') {
+            when { expression { env.TF_INITIALISED == 'true' } }
+            steps {
+                script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/qa-consent-counts-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
+                    int rc = sh(returnStatus: true, script:
+                        "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
+
+                    if (env.JOB_EXIT_CODE != '0') {
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
+                    }
+                    if (rc == 10) {
+                        unstable('Validation passed with warnings')
+                    } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
+                        error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
+                    }
+                    echo "Every ready study's consent counts were checked against dbGaP."
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "${RUNNER_DIR}/reports/**",
+                             allowEmptyArchive: true, fingerprint: true
+            script {
+                if (env.TF_INITIALISED == 'true') {
+                    int rc = sh(returnStatus: true,
+                                script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
+                    if (rc != 0) {
+                        echo "WARNING: terraform destroy returned ${rc}."
+                    }
+                }
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
+                    sh(returnStatus: true, script: """
+                        aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
+                          etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
+                          --region ${AWS_REGION} || true
+                    """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
+                }
+            }
+        }
+        failure {
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "qa-consent-counts FAILED: ${currentBuild.description}. Reports are archived on this build."
+        }
+        unstable {
+            echo 'qa-consent-counts completed WITH WARNINGS: consent counts disagree with dbGaP or the load reports. ' +
+                 'qa_consent_count_discrepancies.csv (archived) lists each one.'
+        }
+        success {
+            echo "qa-consent-counts: every consent count matches (run ${env.EFFECTIVE_RUN_ID})."
+        }
+    }
+}

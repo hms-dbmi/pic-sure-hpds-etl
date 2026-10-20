@@ -21,8 +21,9 @@ public class SampleRepository {
     private static final String ON_CONFLICT = "ON CONFLICT (hpds_id, source_sample_id, sample_source) DO NOTHING";
 
     /**
-     * The conflict key's order. Concurrent loads that write rows in one shared order cannot
-     * deadlock on each other's uncommitted rows; pass it to {@code BatchOps.upsertInChunks}.
+     * The conflict key's order; pass it to {@code BatchOps.upsertInChunks}. The key has no
+     * study_id, so two studies' loads sharing a participant can write the same rows; written in
+     * one shared order they wait on each other's uncommitted rows rather than deadlock.
      */
     public static final Comparator<Sample> KEY_ORDER = Comparator.comparingLong(Sample::hpdsId)
             .thenComparing(Sample::sourceSampleId)

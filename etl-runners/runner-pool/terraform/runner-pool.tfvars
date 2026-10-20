@@ -1,12 +1,11 @@
 # Pool-wide settings. Shared infra (account, region, VPC, security group, instance role) comes from
 # environments/<ENV>.tfvars, loaded automatically by common.mk.
-
-# instance_type is NOT set here: a -var-file value outranks TF_VAR_instance_type. Its default lives
-# in variables.tf. Same root volume as the single split runner.
-root_volume_size = 50
+#
+# instance_type, root_volume_size and uses_participant_db are NOT set here: a -var-file value
+# outranks TF_VAR_*, and each caller sizes its pool for its own job. Their defaults live in
+# variables.tf.
 
 tags = {
   Project     = "PIC-SURE HPDS ETL"
   Environment = "etl"
-  Temporary   = "true"
 }

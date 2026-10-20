@@ -5,6 +5,10 @@
 // /Jenkinsfile so that scheduling, retention, notification, and the decision to delete
 // stay independent between the two.
 //
+// Last stage: QA consent counts (etl-runners/qa-consent-counts/, a PERMANENT job that stays) checks
+// every ready study's participants per consent group against dbGaP; a discrepancy makes the build
+// UNSTABLE, and the migration report lists each one at its top.
+//
 // When the migration is complete, delete:
 //   - this file
 //   - etl-runners/participants-migration/                (runner, Terraform, validation)
@@ -102,7 +106,9 @@ pipeline {
         string(name: 'MERGE_ALLCONCEPTS_INPUT', defaultValue: '',
                description: 'S3 prefix to scan for {study_id}/allConcepts/c{code}/ folders to merge. Blank defaults to DATA_ROOT.')
         string(name: 'ALLCONCEPTS_MANIFEST_JOB', defaultValue: 'generate-allconcepts-manifest',
-               description: 'Jenkins job that writes the versioned allConcepts_manifest.csv at DATA_ROOT (last stage)')
+               description: 'Jenkins job that writes the versioned allConcepts_manifest.csv at DATA_ROOT (before QA consent counts)')
+        string(name: 'QA_CONSENT_COUNTS_JOB', defaultValue: 'qa-consent-counts',
+               description: 'Jenkins job that checks every ready study\'s participants per consent group (participant DB and participants-migration\'s load counts) against dbGaP (last stage). Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov.')
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
@@ -177,6 +183,9 @@ pipeline {
                 sh 'make -C etl-runners/participant-db test'
                 // The Split AllConcepts stage scripts (stubbed aws).
                 sh 'make -C etl-runners/split-allconcepts test'
+                // The QA consent counts runner's scripts and the migration report.
+                sh 'make -C etl-runners/qa-consent-counts test'
+                sh 'make -C etl-runners/migration-report test'
             }
             post {
                 always {
@@ -273,6 +282,7 @@ pipeline {
                                 flatten: true,
                                 optional: true)
                         } catch (err) {
+                            rethrowIfInterrupted(err)
                             echo "Could not copy downstream artifacts (${err.message}). " +
                                  "They remain on ${params.PARTICIPANTS_MIGRATION_JOB} #${env.PARTICIPANTS_BUILD}."
                         }
@@ -326,6 +336,7 @@ pipeline {
                             target: 'downstream-artifacts/all-concepts',
                             optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "Could not copy artifacts for all-concepts (${err.message}); " +
                              "they remain on ${params.ALL_CONCEPTS_JOB} #${downstream.number}."
                     }
@@ -371,6 +382,7 @@ pipeline {
                             target: 'downstream-artifacts/vcf-indexes',
                             optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "Could not copy artifacts for vcf-indexes (${err.message}); " +
                              "they remain on ${params.VCF_INDEXES_JOB} #${downstream.number}."
                     }
@@ -418,6 +430,7 @@ pipeline {
                             target: 'downstream-artifacts/merge-allconcepts',
                             optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "Could not copy artifacts for merge-allconcepts (${err.message}); " +
                              "they remain on ${params.MERGE_ALLCONCEPTS_JOB} #${downstream.number}."
                     }
@@ -453,6 +466,7 @@ pipeline {
                             target: 'downstream-artifacts/allconcepts-manifest',
                             optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "Could not copy artifacts for allconcepts-manifest (${err.message}); " +
                              "they remain on ${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number}."
                     }
@@ -463,6 +477,19 @@ pipeline {
                         error("${params.ALLCONCEPTS_MANIFEST_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: " +
                               'the manifest was NOT updated. Its report lists every missing or stale MERGED file.')
                     }
+                }
+            }
+        }
+
+        stage('QA consent counts') {
+            // After the manifest: every ready study's participants per consent group (participant DB,
+            // and what participants-migration loaded) against dbGaP's counts for its version.
+            // Read-only. Discrepancies make the build UNSTABLE; dbGaP not answering after retries
+            // fails it. The migration report puts the discrepancies at its top.
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    runQaConsentCounts()
                 }
             }
         }
@@ -494,6 +521,86 @@ pipeline {
             echo 'Migration pipeline completed. Every migration stage passed its own output validation.'
         }
     }
+}
+
+// The QA consent counts stage (etl-runners/qa-consent-counts): every ready study's participants per
+// consent group in the participant DB, and what participants-migration reported loading
+// (participants_migration_consent_counts.csv), compared with dbGaP's counts for its study version.
+// Discrepancies make the build UNSTABLE; a study dbGaP could not answer for after its retries fails it
+// (exit 4) -- but the database backup is still promoted (see backupParticipantDb): QA writes nothing.
+// Its reports are copied to downstream-artifacts/qa-consent-counts/ before the result is judged, for
+// the migration report. A function, not inline: see runSplitAllConcepts on the 64 KB limit.
+def runQaConsentCounts() {
+    env.QA_STAGE_REACHED = 'true'
+    // Every child parameter is passed: one left out gets the default the child registered on its
+    // previous build. Retries: 5 attempts per study, 2 s doubling to 60 s (Retry-After honoured),
+    // 60 s per request; 4 studies at once; no more lookups after 3
+    // studies fail in a row or after 90 minutes, so an outage ends with exit 4 and the report.
+    def downstream = build(
+        job: params.QA_CONSENT_COUNTS_JOB,
+        wait: true,
+        propagate: false,
+        parameters: [
+            string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS?.trim() ? laterStageManagedInputs() : ''),
+            string(name: 'LOAD_COUNTS', value: migrationLoadCounts()),
+            string(name: 'STUDY_FILTER', value: ''),
+            string(name: 'CONCURRENCY', value: '4'),
+            string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
+            string(name: 'DBGAP_MAX_ATTEMPTS', value: '5'),
+            string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '2'),
+            string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '60'),
+            string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
+            string(name: 'DBGAP_GIVE_UP_AFTER', value: '3'),
+            string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
+            string(name: 'INSTANCE_TYPE', value: 't3.medium'),
+            string(name: 'JOB_TIMEOUT_SECONDS', value: '7200'),
+            string(name: 'RUN_ID', value: "${env.BUILD_TAG}-qa-consent-counts"),
+            string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
+            string(name: 'ENV', value: params.ENV),
+            booleanParam(name: 'SKIP_TESTS', value: true),
+        ])
+    try {
+        copyArtifacts(
+            projectName: params.QA_CONSENT_COUNTS_JOB,
+            selector: specific("${downstream.number}"),
+            target: 'downstream-artifacts/qa-consent-counts',
+            optional: true)
+    } catch (err) {
+        rethrowIfInterrupted(err)
+        echo "Could not copy artifacts for qa-consent-counts (${err.message}); " +
+             "they remain on ${params.QA_CONSENT_COUNTS_JOB} #${downstream.number}."
+    }
+    if (downstream.result == 'UNSTABLE') {
+        unstable("${params.QA_CONSENT_COUNTS_JOB} #${downstream.number}: consent counts disagree with dbGaP or the " +
+                 'load report; the migration report lists each discrepancy')
+    } else if (downstream.result != 'SUCCESS') {
+        error("${params.QA_CONSENT_COUNTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: " +
+              'consent counts were not (all) verified against dbGaP; a dbGaP outage (exit 4) is retryable.')
+    }
+}
+
+// participants-migration's participants_migration_consent_counts.csv (study_id,abv,outcome,source,
+// consent_code,participants_loaded) -- already the shape qa-consent-counts --load-counts reads --
+// uploaded beside this run's report in the DATA_ROOT bucket for the runner to read. '' (no
+// load-report check; the DB is still compared with dbGaP) when it is missing or cannot be uploaded.
+def migrationLoadCounts() {
+    def local = 'downstream-artifacts/participants-migration/participants_migration_consent_counts.csv'
+    def root = params.DATA_ROOT?.trim() ?: ''
+    if (!fileExists(local) || !(root ==~ /^s3:\/\/[^\/]+.*/)) {
+        echo "WARNING: no ${local} (or DATA_ROOT is not s3://): QA compares the DB with dbGaP only."
+        return ''
+    }
+    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def dest = "s3://${root.substring('s3://'.length()).split('/')[0]}/etl-runner/reports/migration-pipeline/${tag}/qa_load_counts.csv"
+    int rc
+    withEnv(["QA_LOCAL=${local}", "QA_DEST=${dest}"]) {
+        rc = sh(returnStatus: true, script: 'aws s3 cp "$QA_LOCAL" "$QA_DEST" --only-show-errors')
+    }
+    if (rc != 0) {
+        echo "WARNING: could not upload ${local} to ${dest} (rc=${rc}): QA compares the DB with dbGaP only."
+        return ''
+    }
+    return dest
 }
 
 // The run's final report (etl-runners/migration-report/migration-report.py), written whatever stage
@@ -528,13 +635,16 @@ def writeMigrationReport() {
 // Dumps the participant DB to S3 at the end of the run, if this build's start succeeded. The
 // database stays up. A SUCCESS or UNSTABLE build overwrites participant_db.tar, the latest clean
 // backup; a failed or aborted one writes participant_db_not_promoted.tar instead and marks the live
-// database as holding a failed run (the next start acts on IF_LAST_RUN_FAILED). A failed backup
-// fails the build loudly: this run's writes then exist only in the live database.
+// database as holding a failed run (the next start acts on IF_LAST_RUN_FAILED) -- unless it got as far
+// as QA consent counts, which writes nothing. A failed backup fails the build loudly: this run's
+// writes then exist only in the live database.
 def backupParticipantDb(String backupJob, String envName) {
     if (env.DB_STARTED != 'true') {
         return
     }
-    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']
+    // QA consent counts runs last and only reads the database: reaching it means every stage that
+    // writes the database succeeded, so a QA failure (dbGaP down) must not cost this run's writes.
+    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE'] || env.QA_STAGE_REACHED == 'true'
     echo "Backing up the participant database (promote: ${promote})"
     def downstream = build(
         job: backupJob,
@@ -593,13 +703,41 @@ static List largestFirst(List rows) {
     return rows.collect { it }.sort { a, b -> (b.input_bytes as long) <=> (a.input_bytes as long) }
 }
 
-// Terraform variables for this build's runner pool; apply and destroy both need them.
+// Rethrows err if it is an abort, a timeout(), or any other interrupt of this build, so a catch meant
+// for a step's own failure never swallows it. FlowInterruptedException (abort, timeout) extends
+// InterruptedException, and instanceof needs no script approval in the sandbox.
+def rethrowIfInterrupted(err) {
+    if (err instanceof InterruptedException) {
+        throw err
+    }
+}
+
+// Runs a split worker's loop. If the build is aborted or times out, no worker in either lane takes
+// another study, and the interrupt is rethrown.
+def stopAllOnInterrupt(Map progress, Closure loop) {
+    try {
+        loop()
+    } catch (err) {
+        if (err instanceof InterruptedException) {
+            progress.stop = true
+            progress.stopReason = progress.stopReason ?: 'the build was aborted or timed out'
+        }
+        throw err
+    }
+}
+
+// Terraform variables for this build's runner pool; apply and destroy both need them. The pool
+// module is generic (etl-runners/runner-pool): the split workers need the participant DB (consents),
+// which they read from SSM at boot (TF_VAR_environment comes from common.mk), and are sized like
+// the single split runner's default.
 def runnerPoolEnv() {
     return ["TF_VAR_run_id=${env.POOL_ID}",
             "TF_VAR_pool_job=${env.POOL_JOB}",
             "TF_VAR_pool_size=${env.POOL_SIZE}",
             "TF_VAR_image_tar=${env.RUNNER_IMAGE_TAR}",
             "TF_VAR_name_suffix=${env.BUILD_NUMBER}",
+            'TF_VAR_uses_participant_db=true',
+            'TF_VAR_instance_type=r6i.large',
             "POOL_STATE_KEY=tf_backend/etl-runners/hpds-etl/runner-pool/${env.POOL_ID}.tfstate"]
 }
 
@@ -968,7 +1106,7 @@ def runSplitAllConcepts() {
     for (int w = 1; w <= poolWorkers; w++) {
         def poolInstance = poolInstances[w - 1]
         def workerName = "pool-worker-${w}"
-        branches[workerName] = {
+        branches[workerName] = { stopAllOnInterrupt(progress) {
             while (!progress.stop && progress.poolNext < poolQueue.size()) {
                 def s = poolQueue[progress.poolNext]
                 progress.poolNext = progress.poolNext + 1
@@ -997,12 +1135,12 @@ def runSplitAllConcepts() {
                     break
                 }
             }
-        }
+        } }
     }
 
     for (int w = 1; w <= buildWorkers; w++) {
         def workerName = "own-instance-${w}"
-        branches[workerName] = {
+        branches[workerName] = { stopAllOnInterrupt(progress) {
             while (!progress.stop && progress.buildNext < buildQueue.size()) {
                 def s = buildQueue[progress.buildNext]
                 progress.buildNext = progress.buildNext + 1
@@ -1040,9 +1178,11 @@ def runSplitAllConcepts() {
                         copyArtifacts(projectName: params.SPLIT_ALLCONCEPTS_JOB, selector: specific("${downstream.number}"),
                                       target: "${resultsDir}/${s.study_id}/build", optional: true)
                     } catch (err) {
+                        rethrowIfInterrupted(err)
                         echo "[${s.study_id}] could not copy the build's reports (${err.message}); they remain on ${downstream.absoluteUrl}"
                     }
                 } catch (err) {
+                    rethrowIfInterrupted(err)
                     buildReason = "could not run ${params.SPLIT_ALLCONCEPTS_JOB}: ${err.message}"
                 }
                 // Same validation and result file as a pool-lane study, from the build's reports.
@@ -1080,7 +1220,7 @@ def runSplitAllConcepts() {
                     progress.stopReason = "${s.study_id} failed and CONTINUE_ON_STUDY_FAILURE is off"
                 }
             }
-        }
+        } }
     }
 
     try {

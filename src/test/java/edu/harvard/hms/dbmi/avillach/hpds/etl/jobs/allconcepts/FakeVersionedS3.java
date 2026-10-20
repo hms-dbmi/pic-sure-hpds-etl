@@ -51,6 +51,14 @@ final class FakeVersionedS3 {
     int pageSize = 1000;
     /** When set, {@code putObject} returns no version id, as an unversioned bucket would. */
     boolean omitVersionIds;
+    /**
+     * When set, {@code putObject} reads exactly the body's declared content length and stops,
+     * never reaching end of stream, as the SDK may when it sends no streaming checksum. Otherwise
+     * it reads to end of stream, as the default aws-chunked encoding does.
+     */
+    boolean lengthCappedReads;
+    /** Runs before each {@code headObject} is answered, e.g. to write a key concurrently. */
+    java.util.function.Consumer<HeadObjectRequest> beforeHead = req -> { };
     /** Every {@code getObject} request, in order. */
     final List<GetObjectRequest> reads = java.util.Collections.synchronizedList(new ArrayList<>());
 
@@ -70,7 +78,9 @@ final class FakeVersionedS3 {
             RequestBody body = inv.getArgument(1);
             byte[] content;
             try (InputStream in = body.contentStreamProvider().newStream()) {
-                content = in.readAllBytes();
+                content = lengthCappedReads
+                        ? in.readNBytes(Math.toIntExact(body.optionalContentLength().orElseThrow()))
+                        : in.readAllBytes();
             }
             Version v = add(req.key(), content, req.metadata(), false);
             return PutObjectResponse.builder().versionId(omitVersionIds ? null : v.versionId()).build();
@@ -82,6 +92,7 @@ final class FakeVersionedS3 {
         });
         when(client.headObject(any(HeadObjectRequest.class))).thenAnswer(inv -> {
             HeadObjectRequest req = inv.getArgument(0);
+            beforeHead.accept(req);
             Version v = find(req.key(), req.versionId());
             return HeadObjectResponse.builder().versionId(v.versionId()).metadata(v.metadata())
                     .lastModified(v.lastModified()).contentLength((long) v.content().length).build();

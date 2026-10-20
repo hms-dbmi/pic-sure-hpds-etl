@@ -1,0 +1,31 @@
+{
+  "jobName" : "qa-consent-counts",
+  "jobType" : "PERMANENT",
+  "runId" : "t-qa-consent-counts",
+  "exitCode" : "SUCCESS_WITH_WARNINGS",
+  "startedAt" : "2026-10-16T00:00:00Z",
+  "finishedAt" : "2026-10-16T00:01:00Z",
+  "inputValidation" : { "phase" : "input", "issues" : [ ], "counts" : { "error" : 0, "warning" : 0, "info" : 0 } },
+  "outputValidation" : {
+    "phase" : "output",
+    "issues" : [
+      { "severity" : "WARNING", "code" : "MISSING_IN_DB", "message" : "phs000001.v1 consent 0 (NRUP): dbGaP 576, DB 0", "location" : null,
+        "context" : { "studyId" : "phs000001", "version" : "v1", "consentCode" : "0", "dbgapSubjects" : 576, "dbParticipants" : 0 } },
+      { "severity" : "WARNING", "code" : "COUNT_MISMATCH", "message" : "phs000002.v3 consent 1 (GRU): dbGaP 12, DB 10, load report 10", "location" : null,
+        "context" : { "studyId" : "phs000002", "version" : "v3", "consentCode" : "1", "dbgapSubjects" : 12, "dbParticipants" : 10, "loadParticipants" : 10, "loadSource" : "sstr" } }
+    ],
+    "counts" : { "error" : 0, "warning" : 2, "info" : 0 }
+  },
+  "metrics" : {
+    "studiesChecked" : 3, "studiesVerified" : 3, "consentsCompared" : 5, "consentsMatching" : 3,
+    "discrepancies" : 2, "discrepanciesByType" : { "COUNT_MISMATCH" : 1, "MISSING_IN_DB" : 1 },
+    "studiesWithDiscrepancies" : [ "phs000001", "phs000002" ], "unverifiedStudies" : [ ],
+    "apiAttempts" : 4, "apiRetries" : 1,
+    "loadCounts" : "s3://b/etl-runner/reports/permanent-pipeline/t/qa_load_counts.csv", "studiesWithLoadCounts" : 2,
+    "reportFiles" : [ "qa_consent_counts.csv", "qa_consent_count_discrepancies.csv" ]
+  },
+  "errorMessage" : null,
+  "status" : "SUCCESS",
+  "durationMillis" : 60000,
+  "success" : true
+}

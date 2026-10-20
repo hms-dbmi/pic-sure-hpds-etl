@@ -71,7 +71,8 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
                                         + "The filename is appended automatically if the value ends with '/'.",
                                 "s3://bucket/etl-output/"),
                         ParamSpec.optional("allow-empty",
-                                "When true, exit 0 even if no concept rows are generated (for preflight runs).",
+                                "When true, exit 0 even if no concept rows are generated (for preflight runs). "
+                                        + "Default: false; the example shows the opt-in value.",
                                 "true")),
                 List.of("global_AllConcepts.csv written to --output with concept rows for all ready studies"));
     }

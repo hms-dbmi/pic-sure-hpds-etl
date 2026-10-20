@@ -1,0 +1,35 @@
+#!/bin/bash
+# Test stub for the aws CLI, covering what pool-dispatch.sh and pool-retire-worker.sh call. S3 is a
+# directory tree, $STUB_STATE/s3/<bucket>/<key>. Every call is appended to $STUB_STATE/aws.log.
+# Optional state files under $STUB_STATE:
+#   head_error         head-object fails with 403 Forbidden this many more times (decremented)
+#   put_error          present: `s3 cp - <uri>` fails
+#   rm_error           present: `s3 rm` fails
+#   terminate_error    ec2 terminate-instances fails with this message
+S="$STUB_STATE"
+echo "aws $*" >> "$S/aws.log"
+path() { local u="${1#s3://}"; echo "$S/s3/$u"; }
+
+case "$1 $2" in
+  "ec2 terminate-instances")
+    if [[ -f "$S/terminate_error" ]]; then cat "$S/terminate_error" >&2; exit 254; fi
+    echo '{"TerminatingInstances": []}' ;;
+  "s3 rm") [[ -f "$S/rm_error" ]] && { echo "delete failed: $3 An error occurred (AccessDenied)" >&2; exit 1; }; rm -f "$(path "$3")" ;;
+  "s3 cp")
+    if [[ "$3" == - ]]; then
+      [[ -f "$S/put_error" ]] && { echo "upload failed: - to $4 An error occurred (AccessDenied)" >&2; exit 1; }
+      f="$(path "$4")"; mkdir -p "$(dirname "$f")"; cat > "$f"; exit 0
+    fi
+    echo "aws stub: unsupported s3 cp $*" >&2; exit 2 ;;
+  "s3api head-object")
+    bucket="" key=""
+    while [[ $# -gt 0 ]]; do case "$1" in --bucket) bucket="$2"; shift ;; --key) key="$2"; shift ;; esac; shift; done
+    n=$(cat "$S/head_error" 2>/dev/null || echo 0)
+    if (( n > 0 )); then
+      echo $((n - 1)) > "$S/head_error"
+      echo "An error occurred (403) when calling the HeadObject operation: Forbidden" >&2; exit 255
+    fi
+    [[ -f "$S/s3/$bucket/$key" ]] || { echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 255; }
+    echo '{"ContentLength": 1}' ;;
+  *) echo "aws stub: unsupported: $*" >&2; exit 2 ;;
+esac

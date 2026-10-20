@@ -44,13 +44,17 @@ variable "instance_type" {
 variable "vpc_id" {
   type        = string
   default     = ""
-  description = "VPC to launch in. Only consulted when subnet_id is blank, to pick its lowest-id subnet."
+  description = <<-EOT
+    VPC to launch in. Only consulted when subnet_id is blank, to pick its lowest-id subnet. That
+    pick is arbitrary (whichever subnet id sorts first, not the best-routed one), so prefer
+    pinning subnet_id.
+  EOT
 }
 
 variable "subnet_id" {
   type        = string
   default     = ""
-  description = "Subnet to launch the instance in. Blank picks the lowest-id subnet of vpc_id (one of the two must be set)."
+  description = "Subnet to launch the instance in. Blank picks the lowest-id subnet of vpc_id (one of the two must be set; pinning this is preferred)."
 }
 
 variable "vpc_security_group_ids" {
@@ -107,15 +111,15 @@ variable "job_params" {
   EOT
 
   validation {
-    condition     = alltrue([for k, v in var.job_params : !can(regex("\n", v))])
-    error_message = "job_params values must not contain newlines -- they are written as lines in a podman --env-file."
+    # Hyphens are allowed: they become underscores in the env var name.
+    condition     = alltrue([for k in keys(var.job_params) : can(regex("^[A-Za-z_][A-Za-z0-9_-]*$", k))])
+    error_message = "job_params keys must start with a letter or '_' and contain only letters, digits, '_' and '-': they become ETL_PARAM_<key> environment variable names."
   }
-}
 
-variable "image_name" {
-  type        = string
-  default     = "hpds-etl-runner"
-  description = "Image name (repository) podman loads from the tarball."
+  validation {
+    condition     = alltrue([for v in values(var.job_params) : !can(regex("[\r\n]", v))])
+    error_message = "job_params values must not contain carriage returns or newlines: they are written as lines in a podman --env-file."
+  }
 }
 
 variable "image_tar" {
@@ -141,22 +145,41 @@ variable "uses_participant_db" {
   default     = false
   description = <<-EOT
     Whether the job needs the participant database. False skips the credential step, so jobs
-    that never touch the database run whether or not it is up. True requires
-    db_credentials_json: a runner without it fails in its credentials phase (exit 5).
+    that never touch the database run whether or not it is up. True makes the instance read the
+    credentials from the SSM parameter participant_db_credentials_parameter at boot, as the
+    instance role; a runner that cannot read a valid one fails in its credentials phase (exit 5).
   EOT
 }
 
-variable "db_credentials_json" {
+variable "environment" {
   type        = string
   default     = ""
-  sensitive   = true
   description = <<-EOT
-    The participant database's credentials, as saved on the Jenkins server by
-    participant-db-start (etl-runners/common/db-credentials-path.sh); common.mk passes them as
-    TF_VAR_db_credentials_json. JSON keys: url (a full JDBC URL) or host/port/dbname, plus
-    username and password. Written into the runner's 600-mode container env file through user
-    data, so the password is in this runner's EC2 user data and Terraform state for its life.
+    The ETL environment: the <ENV> of etl-runners/environments/<ENV>.tfvars, e.g. development.
+    Names the default participant_db_credentials_parameter, and is otherwise unused.
   EOT
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]*$", var.environment))
+    error_message = "environment may contain only letters, digits, '.', '_' and '-'."
+  }
+}
+
+variable "participant_db_credentials_parameter" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    SSM SecureString parameter holding the participant database's app credentials as JSON (see
+    the README), which participant-db-start rewrites each time it rotates the password. Read at
+    boot by the instance role when uses_participant_db is true. Blank derives
+    /hpds-etl/<environment>/participant-db/app-credentials. Only the name reaches user data and
+    Terraform state, never the credentials.
+  EOT
+
+  validation {
+    condition     = var.participant_db_credentials_parameter == "" || can(regex("^/[A-Za-z0-9_./-]+$", var.participant_db_credentials_parameter))
+    error_message = "participant_db_credentials_parameter must be blank or a fully-qualified SSM parameter name (/a/b/c: letters, digits, '_', '.', '-', '/')."
+  }
 }
 
 variable "reports_s3_prefix" {
@@ -168,16 +191,50 @@ variable "reports_s3_prefix" {
   EOT
 }
 
+# ---------------------------------------------------------------------------
+# Worker mode (runner pool). Off by default: the instance runs the one job above and terminates.
+# Usable by any job, but not yet used by the permanent pipeline (README, "Worker mode").
+# ---------------------------------------------------------------------------
+
+variable "pool_prefix" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Blank (the default): single mode -- run job_name once and terminate. Set: worker mode -- boot
+    once, then run tasks from this instance's S3 mailbox,
+    s3://<stack_s3_bucket>/<pool_prefix>/<instance-id>/task.json, one at a time (written by
+    etl-runners/common/pool-dispatch.sh), until a `stop` object appears there or
+    pool_idle_timeout seconds pass with no task. An S3 key prefix: no bucket, no leading or
+    trailing slash.
+  EOT
+
+  validation {
+    condition     = var.pool_prefix == "" || (can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$", var.pool_prefix)) && !can(regex("\\.\\.", var.pool_prefix)))
+    error_message = "pool_prefix must be blank or an S3 key prefix of letters, digits, '.', '_', '-' and '/', with no leading or trailing slash and no '..'."
+  }
+}
+
+variable "pool_idle_timeout" {
+  type        = number
+  default     = 1800
+  description = "Worker mode only: seconds with no task after which a worker terminates itself -- the backstop when the dispatcher dies without stopping its pool."
+
+  validation {
+    condition     = var.pool_idle_timeout >= 60 && var.pool_idle_timeout <= 86400 && floor(var.pool_idle_timeout) == var.pool_idle_timeout
+    error_message = "pool_idle_timeout must be a whole number of seconds from 60 to 86400."
+  }
+}
+
 variable "user_data_template_vars" {
   type        = map(string)
   default     = {}
-  description = "Extra variables merged into the built-in user_data.sh.tpl template."
+  description = "Extra variables merged into the built-in user_data.sh.tpl template, overriding the module's own."
 }
 
 variable "user_data_content" {
   type        = string
   default     = null
-  description = "Fully rendered user_data. When set, overrides the built-in template entirely."
+  description = "Fully rendered user_data. When set, overrides the built-in template entirely. Gzipped for EC2 like the template."
 }
 
 variable "tags" {

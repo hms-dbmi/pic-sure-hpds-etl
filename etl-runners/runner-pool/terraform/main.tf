@@ -4,8 +4,10 @@ provider "aws" {
   allowed_account_ids = [var.aws_account_id]
 }
 
+# A pool of etl-runner instances in worker mode, for any job: each boots once, then runs the tasks
+# ../../common/pool-dispatch.sh writes to its mailbox, <pool_prefix>/<instance-id>/task.json (see
+# the module's user_data.sh.tpl and README). Available, but not yet used by the permanent pipeline.
 locals {
-  # Each worker's mailbox is <pool_prefix>/<instance-id>/ (see the module's user_data.sh.tpl).
   pool_prefix = "etl-runner/pools/${var.run_id}"
   workers     = toset([for i in range(var.pool_size) : format("%02d", i + 1)])
 }
@@ -35,14 +37,15 @@ module "worker" {
   java_opts = var.java_opts
   log_level = var.log_level
 
+  environment         = var.environment
   uses_participant_db = var.uses_participant_db
-  db_credentials_json = var.db_credentials_json
 
+  # Nothing is published here in worker mode -- each task publishes under its own reportsPrefix --
+  # but it keeps the module's per-instance outputs pointing somewhere distinct per worker.
   reports_s3_prefix = "${local.pool_prefix}/w${each.key}"
-  user_data_template_vars = {
-    pool_prefix       = local.pool_prefix
-    pool_idle_timeout = var.idle_timeout_seconds
-  }
+
+  pool_prefix       = local.pool_prefix
+  pool_idle_timeout = var.idle_timeout_seconds
 
   tags = merge({
     Pipeline = "runner-pool"

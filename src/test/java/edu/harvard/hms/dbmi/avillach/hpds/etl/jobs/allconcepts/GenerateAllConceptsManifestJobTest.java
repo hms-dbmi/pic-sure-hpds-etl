@@ -8,6 +8,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.Severity;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -233,6 +234,20 @@ class GenerateAllConceptsManifestJobTest {
         assertThat(codes(result)).contains("MERGED_STALE");
     }
 
+    /** A legacy merged copy is neither a source of the merge nor of the manifest's fingerprint check. */
+    @Test
+    void a_legacy_merged_file_is_not_a_source() throws Exception {
+        s3.put(C1 + "phs000001_allConcepts_merged.csv", "a\n");
+        mergedData();
+        s3.put(C1 + "phs000001_allConcepts_merged.csv", "a, rewritten\n");
+
+        JobResult result = manifest();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(s3.content(MERGED_C1)).isEqualTo("a\n");
+        assertThat(s3.content(MANIFEST)).contains(md5("a\n"));
+    }
+
     @Test
     void refuses_when_a_source_was_overwritten_since_the_merge() {
         mergedData();
@@ -272,12 +287,97 @@ class GenerateAllConceptsManifestJobTest {
         assertThat(codes(manifest())).contains("MD5_MISSING");
     }
 
+    /** The issue left by a folder with merged output but no sources: names the study and consent and the generator. */
+    private static boolean pointsAtGeneration(ValidationIssue i, String code, String studyId, String consent) {
+        return i.code().equals(code) && i.severity() == Severity.WARNING
+                && i.message().contains("study " + studyId + " consent " + consent)
+                && i.message().contains("all-concepts-data-generator")
+                && studyId.equals(i.context().get("studyId")) && consent.equals(i.context().get("consent"));
+    }
+
+    private List<String> partitions() {
+        return s3.content(MANIFEST).lines().skip(1).map(l -> l.substring(0, l.indexOf(','))).toList();
+    }
+
+    /**
+     * Its own MERGED file and no sources (the merge has not yet removed it): the per-study
+     * allConcepts output is missing, so the folder is left out, the rest is still published.
+     */
     @Test
-    void refuses_when_a_merged_file_has_no_sources_left() {
+    void leaves_out_and_flags_a_folder_holding_only_its_merged_file() {
         mergedData();
         s3.delete(C1 + "phs000001_allConcepts_c1.csv");
 
-        assertThat(codes(manifest())).contains("MERGED_WITHOUT_SOURCES");
+        JobResult result = manifest();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics()).containsEntry("manifestWritten", true).containsEntry("manifestRows", 3L)
+                .containsEntry("consentFoldersExcluded", 1L);
+        assertThat(partitions()).containsExactly("global", "phs000001.c2", "phs000002.c1");
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> pointsAtGeneration(i, "MERGED_WITHOUT_SOURCES", "phs000001", "c1"));
+    }
+
+    /** A folder whose only data is a legacy merged copy is left out and flagged, not published. */
+    @Test
+    void leaves_out_and_flags_a_folder_holding_only_a_legacy_merged_file() {
+        mergedData();
+        s3.delete(C1 + "phs000001_allConcepts_c1.csv");
+        s3.put(C1 + "phs000001_allConcepts_merged.csv", "a\n");
+        // The merge keeps the folder's MERGED file in this case; the manifest must still leave it out.
+        assertThat(merge().getMetrics().get("actions").toString()).contains("ONLY_MERGED_COPIES");
+
+        JobResult result = manifest();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics()).containsEntry("manifestWritten", true).containsEntry("manifestRows", 3L);
+        assertThat(partitions()).containsExactly("global", "phs000001.c2", "phs000002.c1");
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> pointsAtGeneration(i, "ONLY_MERGED_COPIES", "phs000001", "c1")
+                        && i.message().contains("phs000001_allConcepts_merged.csv"));
+    }
+
+    @Test
+    void names_a_ready_study_left_with_no_listed_consent_folder() {
+        mergedData();
+        s3.delete(P2_C1 + "phs000002_allConcepts_c1.csv");
+
+        JobResult result = manifest();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(partitions()).containsExactly("global", "phs000001.c1", "phs000001.c2");
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("STUDY_NOT_IN_MANIFEST") && i.message().contains("phs000002")
+                        && "phs000002".equals(i.context().get("studyId")));
+    }
+
+    /** Every folder left out with a warning must not publish a manifest of the global row alone. */
+    @Test
+    void refuses_when_every_consent_folder_is_left_out() {
+        mergedData();
+        s3.delete(C1 + "phs000001_allConcepts_c1.csv");
+        s3.delete(C2 + "phs000001_allConcepts_c2.csv");
+        s3.delete(P2_C1 + "phs000002_allConcepts_c1.csv");
+
+        JobResult result = manifest();
+
+        assertNotWritten(result, null);
+        assertThat(codes(result)).contains("NO_CONSENT_GROUPS", "MERGED_WITHOUT_SOURCES", "STUDY_NOT_IN_MANIFEST");
+    }
+
+    @Test
+    void leaves_out_and_flags_an_empty_merged_file() {
+        mergedData();
+        s3.put(C2 + "phs000001_allConcepts_c2.csv", "");
+        assertThat(merge().isSuccess()).isTrue();
+        assertThat(s3.content(MERGED_C2)).isEmpty();
+
+        JobResult result = manifest();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(partitions()).containsExactly("global", "phs000001.c1", "phs000002.c1");
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MERGED_EMPTY") && "c2".equals(i.context().get("consent")));
     }
 
     @Test

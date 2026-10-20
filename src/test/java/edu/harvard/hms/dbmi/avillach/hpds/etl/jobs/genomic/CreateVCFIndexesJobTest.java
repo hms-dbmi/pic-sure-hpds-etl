@@ -17,6 +17,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -427,22 +429,189 @@ class CreateVCFIndexesJobTest {
                 .anyMatch(i -> i.code().equals("BAD_BOOLEAN") && "--include-processed".equals(i.location()));
     }
 
-    @Test
-    void flags_a_sample_id_containing_a_separator() {
+    @ParameterizedTest(name = "separator {0}")
+    @ValueSource(strings = {",", "\t", "\n", "\r"})
+    void a_sample_id_containing_a_separator_holds_back_only_its_group_and_fails_the_run(String separator) {
         String studyId = "phs000666";
-        when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
+        String goodStudyId = "phs000777";
+        String badId = "NWD000002" + separator + "NWD000003";
+        when(managedInputsService.read()).thenReturn(List.of(
+                genomicStudy("TST", studyId), genomicStudy("GOOD", goodStudyId)));
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(1L, studyId, "1", "GRU"),
-                new Consent(2L, studyId, "1", "GRU")));
+                new Consent(2L, studyId, "1", "GRU"),
+                new Consent(5L, studyId, "2", "HMB")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Sample(1L, "NWD000001", "submitted"),
-                new Sample(2L, "NWD000002,NWD000003", "submitted")));
+                new Sample(2L, badId, "submitted"),
+                new Sample(5L, "NWD000005", "submitted")));
+        when(consentRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
+                new Consent(3L, goodStudyId, "1", "GRU")));
+        when(sampleRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
+                new Sample(3L, "NWD000004", "submitted")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
+        // Every group was published by an earlier run.
+        when(ioResolver.exists(startsWith(outputPath))).thenReturn(true);
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-separator-in-sample-id");
+
+        // The bad data still fails the run...
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("ID_COUNT_MISMATCH")
+                        && i.message().contains("NWD000002")
+                        && !i.message().contains("\n") && !i.message().contains("\r") && !i.message().contains("\t")
+                        && (studyId + ".c1").equals(i.location())
+                        && studyId.equals(i.context().get("studyId"))
+                        && "1".equals(i.context().get("consent"))
+                        && "ID_COUNT_MISMATCH".equals(i.context().get("reason"))
+                        && List.of(badId).equals(i.context().get("badSampleIds"))
+                        && i.message().contains("previously published files were deleted")
+                        && List.of(outputPath + studyId + ".c1_vcfIndex.tsv", outputPath + studyId + ".c1_SampleIds.csv")
+                                .equals(i.context().get("deletedFiles")))
+                .noneMatch(i -> i.code().equals("NO_FILES_WRITTEN"));
+        // ...but only the bad group is held back: not written, and its previously published files are
+        // deleted so they cannot be read beside this run's groups...
+        verify(ioResolver, never()).writeOutput(startsWith(outputPath + studyId + ".c1_"), any(byte[].class));
+        verify(ioResolver).delete(outputPath + studyId + ".c1_vcfIndex.tsv");
+        verify(ioResolver).delete(outputPath + studyId + ".c1_SampleIds.csv");
+        verify(ioResolver, never()).delete(startsWith(outputPath + studyId + ".c2_"));
+        verify(ioResolver, never()).delete(startsWith(outputPath + goodStudyId));
+        // ...while the study's other group and the other study are still written.
+        assertThat(result.getMetrics().get("outputFiles")).isEqualTo(List.of(
+                outputPath + studyId + ".c2_vcfIndex.tsv",
+                outputPath + studyId + ".c2_SampleIds.csv",
+                outputPath + goodStudyId + ".c1_vcfIndex.tsv",
+                outputPath + goodStudyId + ".c1_SampleIds.csv"));
+        verify(ioResolver).writeOutput(org.mockito.ArgumentMatchers.eq(outputPath + studyId + ".c2_vcfIndex.tsv"),
+                any(byte[].class));
+        verify(ioResolver).writeOutput(org.mockito.ArgumentMatchers.eq(outputPath + goodStudyId + ".c1_SampleIds.csv"),
+                any(byte[].class));
+        assertThat(result.getMetrics()).containsEntry("consentGroupsProcessed", 2);
+        assertThat(result.getMetrics().get("heldBackGroups")).isEqualTo(List.of(
+                new CreateVCFIndexesJob.HeldBackGroup(studyId + ".c1", studyId, "1", "TST",
+                        List.of("ID_COUNT_MISMATCH"), 1, List.of(badId),
+                        List.of(outputPath + studyId + ".c1_vcfIndex.tsv", outputPath + studyId + ".c1_SampleIds.csv"))));
+        assertThat(result.getMetrics()).containsEntry("heldBackFilesDeleted", 2);
+    }
+
+    @ParameterizedTest(name = "abv separator {0}")
+    @ValueSource(strings = {",", "\n", "\r"})
+    void a_study_abbreviation_containing_a_comma_or_line_break_holds_back_every_group_of_that_study(String separator) {
+        String studyId = "phs000888";
+        String goodStudyId = "phs000777";
+        String badAbv = "TS" + separator + "T";
+        when(managedInputsService.read()).thenReturn(List.of(
+                genomicStudy(badAbv, studyId), genomicStudy("GOOD", goodStudyId)));
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(1L, studyId, "1", "GRU"),
+                new Consent(2L, studyId, "2", "HMB")));
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Sample(1L, "NWD000001", "submitted"),
+                new Sample(2L, "NWD000002", "submitted")));
+        when(consentRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
+                new Consent(3L, goodStudyId, "1", "GRU")));
+        when(sampleRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
+                new Sample(3L, "NWD000003", "submitted")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-separator-in-abv");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(result.getOutputValidation().getIssues())
-                .anyMatch(i -> i.code().equals("ID_COUNT_MISMATCH") && i.message().contains("NWD000002,NWD000003"));
+                .anyMatch(i -> i.code().equals("BAD_STUDY_ABV") && (studyId + ".c1").equals(i.location())
+                        && studyId.equals(i.context().get("studyId")) && "1".equals(i.context().get("consent")))
+                .anyMatch(i -> i.code().equals("BAD_STUDY_ABV") && (studyId + ".c2").equals(i.location())
+                        && "2".equals(i.context().get("consent")))
+                .noneMatch(i -> i.code().equals("NO_FILES_WRITTEN"));
+        // The abv is on every _SampleIds.csv line of the study, so none of its groups is written. Neither
+        // had been published before, so nothing is deleted.
+        verify(ioResolver, never()).writeOutput(startsWith(outputPath + studyId), any(byte[].class));
+        verify(ioResolver, never()).delete(any());
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("BAD_STUDY_ABV"))
+                .allMatch(i -> i.message().contains("no previously published files to delete")
+                        && List.of().equals(i.context().get("deletedFiles")));
+        assertThat(result.getMetrics().get("outputFiles")).isEqualTo(List.of(
+                outputPath + goodStudyId + ".c1_vcfIndex.tsv",
+                outputPath + goodStudyId + ".c1_SampleIds.csv"));
+        assertThat(result.getMetrics().get("heldBackGroups")).isEqualTo(List.of(
+                new CreateVCFIndexesJob.HeldBackGroup(studyId + ".c1", studyId, "1", badAbv,
+                        List.of("BAD_STUDY_ABV"), 0, List.of(), List.of()),
+                new CreateVCFIndexesJob.HeldBackGroup(studyId + ".c2", studyId, "2", badAbv,
+                        List.of("BAD_STUDY_ABV"), 0, List.of(), List.of())));
+        assertThat(result.getMetrics()).containsEntry("heldBackFilesDeleted", 0);
+    }
+
+    @Test
+    void every_group_held_back_reports_no_files_written() {
+        String studyId = "phs000888";
+        when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TS,T", studyId)));
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(new Consent(1L, studyId, "1", "GRU")));
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Sample(1L, "NWD000001,NWD000009", "submitted")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        // Only the index was published before (e.g. an earlier run died between the two writes).
+        when(ioResolver.exists(outputPath + studyId + ".c1_vcfIndex.tsv")).thenReturn(true);
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-all-held-back");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("NO_FILES_WRITTEN") && i.message().contains("held back")
+                        && i.message().contains("1 of their previously published file(s) were deleted"))
+                .anyMatch(i -> i.code().equals("BAD_STUDY_ABV"))
+                .anyMatch(i -> i.code().equals("ID_COUNT_MISMATCH"));
+        verify(ioResolver, never()).writeOutput(any(), any(byte[].class));
+        verify(ioResolver).delete(outputPath + studyId + ".c1_vcfIndex.tsv");
+        verify(ioResolver, never()).delete(outputPath + studyId + ".c1_SampleIds.csv");
+        assertThat(result.getMetrics().get("heldBackGroups")).isEqualTo(List.of(
+                new CreateVCFIndexesJob.HeldBackGroup(studyId + ".c1", studyId, "1", "TS,T",
+                        List.of("BAD_STUDY_ABV", "ID_COUNT_MISMATCH"), 1, List.of("NWD000001,NWD000009"),
+                        List.of(outputPath + studyId + ".c1_vcfIndex.tsv"))));
+        assertThat(result.getMetrics()).containsEntry("heldBackFilesDeleted", 1);
+    }
+
+    @Test
+    void a_bad_abbreviation_on_a_study_with_nothing_to_index_does_not_block_the_run() {
+        String badStudy = "phs000888";
+        String goodStudy = "phs000777";
+        when(managedInputsService.read()).thenReturn(List.of(
+                genomicStudy("TS,T", badStudy), genomicStudy("GOOD", goodStudy)));
+        when(consentRepository.findByStudyId(badStudy)).thenReturn(List.of(new Consent(1L, badStudy, "1", "GRU")));
+        // No NWD samples, so this study would never write a _SampleIds.csv.
+        when(sampleRepository.findByStudyId(badStudy)).thenReturn(List.of(new Sample(1L, "SAMP1", "submitted")));
+        when(consentRepository.findByStudyId(goodStudy)).thenReturn(List.of(new Consent(2L, goodStudy, "1", "GRU")));
+        when(sampleRepository.findByStudyId(goodStudy)).thenReturn(List.of(new Sample(2L, "NWD000002", "submitted")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-bad-abv-nothing-to-index");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        verify(ioResolver).writeOutput(org.mockito.ArgumentMatchers.eq(outputPath + goodStudy + ".c1_vcfIndex.tsv"),
+                any(byte[].class));
+        assertThat(result.getMetrics()).containsEntry("heldBackGroups", List.of());
+        assertThat(result.getMetrics()).containsEntry("heldBackFilesDeleted", 0);
+        verify(ioResolver, never()).delete(any());
+    }
+
+    @Test
+    void a_held_back_group_on_an_unversioned_bucket_fails_before_anything_is_written_or_deleted() {
+        String studyId = "phs000888";
+        String outputPath = "s3://unversioned/vcf/";
+        when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TS,T", studyId)));
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(new Consent(1L, studyId, "1", "GRU")));
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(new Sample(1L, "NWD000001", "submitted")));
+        when(ioResolver.isS3(outputPath)).thenReturn(true);
+        when(ioResolver.exists(startsWith(outputPath))).thenReturn(true);
+        org.mockito.Mockito.doThrow(new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException(
+                        "Bucket unversioned must have versioning Enabled (is never enabled)"))
+                .when(ioResolver).requireVersioning(outputPath);
+
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-held-back-unversioned");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
+        verify(ioResolver, never()).delete(any());
+        verify(ioResolver, never()).writeOutput(any(), any(byte[].class));
     }
 }

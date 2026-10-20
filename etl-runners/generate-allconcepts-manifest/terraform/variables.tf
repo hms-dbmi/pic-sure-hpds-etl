@@ -23,7 +23,7 @@ variable "ami_name_pattern" {
 variable "instance_type" {
   type        = string
   default     = "t3.medium"
-  description = "Instance type. The job only lists and heads S3 objects; it reads no data files."
+  description = "Instance type. The job lists and heads S3 objects and streams one file, the global AllConcepts file, to compute its md5; it reads no MERGED or per-study file."
 }
 
 variable "aws_account_id" {

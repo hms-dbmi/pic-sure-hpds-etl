@@ -23,7 +23,7 @@ public class AwsConfig {
     public S3Client s3Client(EtlProperties props) {
         S3ClientBuilder builder = S3Client.builder()
                 .region(Region.of(props.getAws().getRegion()))
-                .credentialsProvider(DefaultCredentialsProvider.create());
+                .credentialsProvider(DefaultCredentialsProvider.builder().build());
 
         String endpoint = props.getAws().getS3().getEndpointOverride();
         if (endpoint != null && !endpoint.isBlank()) {

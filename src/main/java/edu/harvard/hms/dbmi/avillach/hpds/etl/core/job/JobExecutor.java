@@ -89,7 +89,13 @@ public class JobExecutor {
             return b.build();
         } catch (EtlException e) {
             log.error("Job '{}' raised {}: {}", job.name(), e.getClass().getSimpleName(), e.getMessage(), e);
-            return failed(job, ctx, start, e.exitCode(), e.getMessage());
+            // Whatever the job had established before failing (see EtlException#withPartialResult).
+            return JobResult.builder(job.name(), job.type(), ctx.runId())
+                    .startedAt(start).finishedAt(Instant.now())
+                    .exitCode(e.exitCode()).errorMessage(e.getMessage())
+                    .metrics(e.partialMetrics())
+                    .outputValidation(e.partialOutputValidation())
+                    .build();
         } catch (Exception e) {
             log.error("Job '{}' raised an unexpected error", job.name(), e);
             return failed(job, ctx, start, ExitCode.UNKNOWN,

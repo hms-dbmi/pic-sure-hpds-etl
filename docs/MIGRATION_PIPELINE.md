@@ -33,6 +33,7 @@ derived artifacts from newly migrated data.
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Merge AllConcepts](#stage-7-merge-allconcepts)
 - [Stage 8: AllConcepts Manifest](#stage-8-allconcepts-manifest)
+- [Stage 9: QA Consent Counts](#stage-9-qa-consent-counts)
 - [Post: Migration Report](#post-migration-report)
 - [Post: Back Up Participant DB](#post-back-up-participant-db)
 - [Data Flow Summary](#data-flow-summary)
@@ -81,9 +82,16 @@ Build ▸ Tests
 ┌─────────────────────────┐
 │  AllConcepts manifest    │  verifies every ready consent group, then writes
 │                          │  allConcepts_manifest.csv at the merge input root (versioned)
+└────────────┬────────────┘
+             ▼
+┌─────────────────────────┐
+│  QA consent counts       │  participants per consent group (DB, participants-migration's
+│                          │  counts) vs dbGaP; a discrepancy makes the build UNSTABLE
 └─────────────────────────┘
 
-post { always }:  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+post { always }:  migration-report       (downstream-artifacts/migration-report/; the QA's discrepancies first)
+                  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE,
+                                          or when the run reached QA consent counts)
 ```
 
 Stage ordering is strict: each stage runs only if the previous stage succeeded (UNSTABLE
@@ -131,7 +139,8 @@ The global AllConcepts and VCF index outputs are not per-study and keep their ow
 
 Same behaviour as the permanent pipeline: `PREFLIGHT_ONLY=true` starts no database, triggers
 `participants-migration`, `split-allconcepts`, and `create-vcf-indexes` in their pre-flight
-mode, and skips `Generate global AllConcepts` and `Merge AllConcepts`. Mapping URIs are
+mode, and skips `Generate global AllConcepts`, `Merge AllConcepts`, `AllConcepts manifest` and
+`QA consent counts`. Mapping URIs are
 computed but nothing is uploaded, so the split runner's mapping check is a soft warning.
 
 ---
@@ -144,7 +153,9 @@ computed but nothing is uploaded, so the split runner's mapping check is a soft 
 ```
 
 Same gate as the permanent pipeline: the full test suite runs once here, and downstream
-jobs skip tests.
+jobs skip tests. It also runs `make -C etl-runners/participant-db test`,
+`make -C etl-runners/split-allconcepts test`, `make -C etl-runners/qa-consent-counts test` and
+`make -C etl-runners/migration-report test`.
 
 ---
 
@@ -337,8 +348,10 @@ the stage stops after planning and fails if any study has no usable input.
 orchestrator deletes it (S3 tarball, local tarball, and the host's podman image) in `post { always }`.
 
 **Pool lane** ([`etl-runners/runner-pool`](../etl-runners/runner-pool/),
-[`run-pooled-study.sh`](../etl-runners/split-allconcepts/run-pooled-study.sh)): the workers boot,
-load the image and read the participant DB credentials once. The orchestrator itself hands each
+[`run-pooled-study.sh`](../etl-runners/split-allconcepts/run-pooled-study.sh)): the shared,
+job-agnostic pool, provisioned here with `TF_VAR_uses_participant_db=true` and
+`TF_VAR_instance_type=r6i.large` (the default-size split runner's type). The workers boot, load the
+image and read the participant DB credentials from SSM once. The orchestrator itself hands each
 study to a free worker through that worker's S3 mailbox
 (`etl-runner/pools/<pool-id>/<instance-id>/task.json`, written by
 [`pool-dispatch.sh`](../etl-runners/common/pool-dispatch.sh)), waits on its status sentinel with
@@ -393,7 +406,8 @@ These are consolidated into **`downstream-artifacts/split-allconcepts-report-<bu
     `ERROR` (`STUDY_FAILED` / `STUDY_NOT_STARTED`), listed in `metrics.rerunStudyIds`.
 
   A study with warnings is a `WARNING`, so `etl-runners/common/validate-report.sh` checks it like
-  any job report. `metrics` totals the studies by outcome, lane, failure stage and exit code, plus
+  any job report: any `WARNING` (an excluded study included) makes it exit 10 (UNSTABLE), and any
+  `ERROR` makes it fail. `metrics` totals the studies by outcome, lane, failure stage and exit code, plus
   rows, unmapped ids, rows without a consent and retried studies. Each study's job metrics include
   `rowsPerConsent` and `participantsPerConsent` (distinct participants written to each partition).
 - **`.md`** is the version to read: the result and totals first, then **each failed study** with its
@@ -515,14 +529,41 @@ the bucket must be versioned), and skips the rest. Folders are merged
 
 **Job:** `generate-allconcepts-manifest`
 **Class:** [`GenerateAllConceptsManifestJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/GenerateAllConceptsManifestJob.java)
-**Runs:** once, last (skipped under `PREFLIGHT_ONLY`)
+**Runs:** once, after the merge (skipped under `PREFLIGHT_ONLY`)
 
 Verifies that every ready consent group's MERGED file is the merge of exactly its current source
 files, and that `global_AllConcepts.csv` under `ALL_CONCEPTS_OUTPUT` exists. Then it writes the
 versioned `allConcepts_manifest.csv` at the root of `MERGE_ALLCONCEPTS_INPUT` (blank =
 `DATA_ROOT`): `partition, s3_uri, version_id, last_updated, md5`, with a `global` row for the
 global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consent group. If any check fails, no manifest is written and the build fails. See
-[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-9-allconcepts-manifest).
+[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-10-allconcepts-manifest).
+
+---
+
+## Stage 9: QA Consent Counts
+
+**Job:** `qa-consent-counts` (a PERMANENT job; it stays when the migration is deleted)
+**Class:** [`QaConsentCountsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/qa/QaConsentCountsJob.java)
+**Runs:** once, last (skipped under `PREFLIGHT_ONLY`). Reads the participant DB; writes nothing.
+
+For every ready study in the later-stage managed inputs (studies excluded for data problems are
+marked not ready there), compares the distinct participants per consent group in the participant
+DB with dbGaP's `subject_count` for that consent group of the study's `Version`, from
+`https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study/{phs}.{v}/summary`, and checks the DB against
+what `participants-migration` reported loading: the stage uploads
+`participants_migration_consent_counts.csv` to
+`s3://<DATA_ROOT bucket>/etl-runner/reports/migration-pipeline/<build-tag>/qa_load_counts.csv` and
+passes it as `--load-counts` (the DB is authoritative). Consent 0 is compared like any other code.
+The MULTI fallback drops consent 0 subjects, so for a study loaded from MULTI a consent 0 that
+dbGaP lists is still a discrepancy (`MISSING_IN_DB`), noted "source MULTI drops consent 0".
+
+Discrepancies (`COUNT_MISMATCH`, `MISSING_IN_DB`, `MISSING_IN_DBGAP`, `DBGAP_COUNT_MISSING`,
+`REPORT_DB_MISMATCH`, `NO_VERSION`, `VERSION_NOT_FOUND`, `VERSION_MISMATCH`) make the build
+UNSTABLE; a study dbGaP could not answer for after its retries fails the stage (exit 4, retryable)
+with every other study still compared and reported, and does not stop the backup from being
+promoted. Retries, outputs and statuses are as in
+[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-11-qa-consent-counts). The runner needs HTTPS
+egress to `www.ncbi.nlm.nih.gov`.
 
 ---
 
@@ -541,7 +582,8 @@ studies it would have handled as `NOT_REACHED`). It reads only what the stages l
 | `migration_study_outcomes.csv` | ready study | its `status` and each stage's outcome and counts |
 | `migration_review.csv` | problem | every study needing follow-up: `stage`, `category`, `code`, `detail`, `action` |
 | `migration-report.json` | -- | all of the above, plus each stage's result, under one schema (`reportVersion` 1) for QA jobs |
-| `migration-report.md` | -- | the same, to read: totals, stages, the follow-up list grouped by status, then the counts |
+| `migration-report.md` | -- | the same, to read: first the **Consent count QA (dbGaP)** section, then totals, stages, the follow-up list grouped by status, then the counts |
+| `qa_consent_counts.csv`, `qa_consent_count_discrepancies.csv` | study and consent code | copies of the [QA's](#stage-9-qa-consent-counts) CSVs, when it ran (`consentCountQa` in the JSON) |
 
 Study `status`, most severe first: `NOT_MIGRATED` (its data is missing, malformed or does not match
 the patient mapping -- fix the data), `RERUN_NEEDED` (a stage failed for a non-data reason, or an
@@ -550,13 +592,19 @@ output is missing -- re-run it with `STUDY_FILTER`), `NOT_REACHED` (the pipeline
 sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DATA_MISMATCH`,
 `PARTIAL_DATA`, `PIPELINE_FAILURE`, `OUTPUT_WARNING`.
 
+The **Consent count QA (dbGaP)** section comes first: a summary and a table of the discrepancies
+only (or "All N consent group(s) match dbGaP"), "QA did not run" when the build stopped before it,
+or "QA failed: <exit>: <reason>" with the unverified studies. QA findings do not change a study's
+`status`. Tests: `make -C etl-runners/migration-report test`.
+
 ---
 
 ## Post: Back Up Participant DB
 
 **Job:** `participant-db-backup`, in `post { always }` whenever this build's start succeeded.
 Dumps the database to S3 and leaves it running. The dump becomes `participant_db.tar` only if the
-build is SUCCESS or UNSTABLE; otherwise it goes to `participant_db_not_promoted.tar`, and the next
+build is SUCCESS or UNSTABLE, or reached [QA consent counts](#stage-9-qa-consent-counts) (which only
+reads the database); otherwise it goes to `participant_db_not_promoted.tar`, and the next
 start acts on `IF_LAST_RUN_FAILED`. A failed backup fails the build. See
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
@@ -622,7 +670,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
 | `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
 | `MERGE_ALLCONCEPTS_TIMEOUT_SECONDS` | `14400` | How long the merge may run before it is failed as stuck (exit 124) |
-| `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
+| `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job |
+| `QA_CONSENT_COUNTS_JOB` | `qa-consent-counts` | Consent count QA runner job (last stage) |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |

@@ -11,19 +11,19 @@ provider "aws" {
 module "etl_runner" {
   source = "../../../terraform-modules/etl-runner"
 
-  aws_region       = var.aws_region
-  module_name      = "generate-global-all-concepts"
-  name_suffix      = var.name_suffix
-  stack_s3_bucket  = var.stack_s3_bucket
-  ami_owner_id     = var.ami_owner_id
-  ami_name_pattern = var.ami_name_pattern
-  instance_type    = var.instance_type
-  vpc_id                 = var.vpc_id
-  subnet_id              = var.subnet_id
-  vpc_security_group_ids = var.vpc_security_group_ids
-  iam_role_name          = var.iam_role_name
+  aws_region                = var.aws_region
+  module_name               = "generate-global-all-concepts"
+  name_suffix               = var.name_suffix
+  stack_s3_bucket           = var.stack_s3_bucket
+  ami_owner_id              = var.ami_owner_id
+  ami_name_pattern          = var.ami_name_pattern
+  instance_type             = var.instance_type
+  vpc_id                    = var.vpc_id
+  subnet_id                 = var.subnet_id
+  vpc_security_group_ids    = var.vpc_security_group_ids
+  iam_role_name             = var.iam_role_name
   iam_instance_profile_name = var.iam_instance_profile_name
-  root_volume_size = var.root_volume_size
+  root_volume_size          = var.root_volume_size
 
   job_name  = "generate-global-all-concepts"
   run_id    = var.run_id
@@ -32,12 +32,12 @@ module "etl_runner" {
   log_level = var.log_level
 
   uses_participant_db = true
-  db_credentials_json = var.db_credentials_json
+  environment         = var.environment
 
   job_params = merge(
     { output = var.output_uri },
     var.managed_inputs_uri != "" ? { managed_inputs = var.managed_inputs_uri } : {},
-    var.allow_empty != ""        ? { allow_empty = var.allow_empty }           : {}
+    var.allow_empty != "" ? { allow_empty = var.allow_empty } : {}
   )
 
   tags = merge({

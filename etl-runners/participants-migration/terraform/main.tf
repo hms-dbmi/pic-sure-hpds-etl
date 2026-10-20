@@ -10,19 +10,19 @@ provider "aws" {
 module "etl_runner" {
   source = "../../../terraform-modules/etl-runner"
 
-  aws_region       = var.aws_region
-  module_name      = "participants-migration"
-  name_suffix      = var.name_suffix
-  stack_s3_bucket  = var.stack_s3_bucket
-  ami_owner_id     = var.ami_owner_id
-  ami_name_pattern = var.ami_name_pattern
-  instance_type    = var.instance_type
-  vpc_id                 = var.vpc_id
-  subnet_id              = var.subnet_id
-  vpc_security_group_ids = var.vpc_security_group_ids
-  iam_role_name          = var.iam_role_name
+  aws_region                = var.aws_region
+  module_name               = "participants-migration"
+  name_suffix               = var.name_suffix
+  stack_s3_bucket           = var.stack_s3_bucket
+  ami_owner_id              = var.ami_owner_id
+  ami_name_pattern          = var.ami_name_pattern
+  instance_type             = var.instance_type
+  vpc_id                    = var.vpc_id
+  subnet_id                 = var.subnet_id
+  vpc_security_group_ids    = var.vpc_security_group_ids
+  iam_role_name             = var.iam_role_name
   iam_instance_profile_name = var.iam_instance_profile_name
-  root_volume_size = var.root_volume_size
+  root_volume_size          = var.root_volume_size
 
   job_name  = "participants-migration"
   run_id    = var.run_id
@@ -31,7 +31,7 @@ module "etl_runner" {
   log_level = var.log_level
 
   uses_participant_db = true
-  db_credentials_json = var.db_credentials_json
+  environment         = var.environment
 
   # Keys use underscores; the runner converts them to --managed-inputs, --data-folder,
   # --batch-size. Names must match ParticipantsMigrationJob.expectations().

@@ -67,11 +67,9 @@ variable "root_volume_size" {
   description = "Root EBS size in GiB. Holds the container image and the CSV output."
 }
 
-variable "db_credentials_json" {
+variable "environment" {
   type        = string
-  default     = ""
-  sensitive   = true
-  description = "Participant DB credentials, from the Jenkins server's saved copy (common.mk sets TF_VAR_db_credentials_json)"
+  description = "ETL environment (common.mk sets TF_VAR_environment from ENV). Names the participant DB credentials' SSM parameter, /hpds-etl/<environment>/participant-db/app-credentials."
 }
 
 variable "tags" {

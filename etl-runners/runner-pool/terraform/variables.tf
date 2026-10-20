@@ -10,6 +10,11 @@ variable "aws_account_id" {
   description = "Account the environment lives in; the provider refuses any other"
 }
 
+variable "environment" {
+  type        = string
+  description = "ETL environment (common.mk sets TF_VAR_environment from ENV). Names the participant DB credentials' SSM parameter."
+}
+
 variable "stack_s3_bucket" {
   type        = string
   description = "Bucket holding the container tarball, mailboxes, run logs, and job reports"
@@ -28,13 +33,13 @@ variable "ami_name_pattern" {
 variable "vpc_id" {
   type        = string
   default     = ""
-  description = "VPC to launch in; its lowest-id subnet is used when subnet_id is blank"
+  description = "VPC to launch in; its lowest-id subnet (an arbitrary pick) is used when subnet_id is blank"
 }
 
 variable "subnet_id" {
   type        = string
   default     = ""
-  description = "Subnet for the workers. Must reach the participant DB and S3."
+  description = "Subnet for the workers (preferred over vpc_id). Must reach S3, and the participant DB when uses_participant_db."
 }
 
 variable "vpc_security_group_ids" {
@@ -55,19 +60,13 @@ variable "iam_instance_profile_name" {
   description = "Pre-existing instance profile to attach (environments/<ENV>.tfvars)"
 }
 
-variable "root_volume_size" {
-  type        = number
-  default     = 50
-  description = "Root EBS size in GiB per worker"
-}
-
 variable "tags" {
   type        = map(string)
   default     = {}
   description = "Additional resource tags"
 }
 
-# --- Per pool (supplied by Jenkins as TF_VAR_*) ---------------------------------------------
+# --- Per pool (supplied by the caller as TF_VAR_*) ------------------------------------------
 
 variable "run_id" {
   type        = string
@@ -86,22 +85,36 @@ variable "name_suffix" {
 
 variable "pool_job" {
   type        = string
-  description = "Job the workers run (instance names and tags only; tasks name their own job)"
+  description = <<-EOT
+    Names the workers: their module_name and job_name (instance names, tags, and the worker log
+    etl-runner/logs/<pool_job>-<run_id>-<instance-id>.log). Tasks name their own job, so one pool
+    can run any job the image holds.
+  EOT
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+$", var.pool_job))
+    error_message = "pool_job may contain only letters, digits, '.', '_' and '-'."
+  }
 }
 
 variable "pool_size" {
   type        = number
   description = "Number of worker instances"
   validation {
-    condition     = var.pool_size >= 1 && var.pool_size <= 50
-    error_message = "pool_size must be between 1 and 50."
+    condition     = var.pool_size >= 1 && var.pool_size <= 50 && floor(var.pool_size) == var.pool_size
+    error_message = "pool_size must be a whole number from 1 to 50."
   }
 }
 
 variable "instance_type" {
   type        = string
-  default     = "r6i.large"
-  description = "Worker instance type"
+  default     = "m5.large"
+  description = "Worker instance type, sized for the heaviest job the pool will run"
+}
+
+variable "root_volume_size" {
+  type        = number
+  default     = 50
+  description = "Root EBS size in GiB per worker: the container image plus the largest task's working files"
 }
 
 variable "image_tar" {
@@ -111,15 +124,8 @@ variable "image_tar" {
 
 variable "uses_participant_db" {
   type        = bool
-  default     = true
-  description = "Pass the participant DB credentials to the workers"
-}
-
-variable "db_credentials_json" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "Participant DB credentials, from the Jenkins server's saved copy (common.mk sets TF_VAR_db_credentials_json)"
+  default     = false
+  description = "Give the workers the participant DB credentials (read from SSM once, at boot)"
 }
 
 variable "idle_timeout_seconds" {

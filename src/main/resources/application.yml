@@ -7,9 +7,11 @@ spring:
     banner-mode: "off"
   datasource:
     # Supplied on a runner from the participant DB credentials (see docs/PARTICIPANT_DB.md).
-    url: ${DB_URL:jdbc:postgresql://unset:5432/unset}
-    username: ${DB_USERNAME:}
-    password: ${DB_PASSWORD:}
+    # The RDS_* fallback is transitional: older runner user_data still writes RDS_URL etc.
+    # Remove it once all runners write DB_*.
+    url: ${DB_URL:${RDS_URL:jdbc:postgresql://unset:5432/unset}}
+    username: ${DB_USERNAME:${RDS_USERNAME:}}
+    password: ${DB_PASSWORD:${RDS_PASSWORD:}}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
       schema: ${DB_SCHEMA:etl}
@@ -41,8 +43,6 @@ etl:
     # PERMANENT ingestion.
     sstr-populate-rds-participants:
       enabled: ${ETL_JOB_SSTR_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
-    single-consent-data-populate-rds-participants:
-      enabled: ${ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
 
     generate-global-all-concepts:
       enabled: ${ETL_JOB_GENERATE_GLOBAL_ALL_CONCEPTS_ENABLED:true}
@@ -56,10 +56,16 @@ etl:
     merge-allconcepts:
       enabled: ${ETL_JOB_MERGE_ALLCONCEPTS_ENABLED:true}
 
-    # Runs last in both pipelines: verifies every ready consent group's MERGED file and writes the
+    # Runs after the merge in both pipelines: verifies every ready consent group's MERGED file and writes the
     # versioned allConcepts_manifest.csv handed to production ingestion.
     generate-allconcepts-manifest:
       enabled: ${ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED:true}
+
+    # PERMANENT QA, last stage of both pipelines: participants per consent group in the participant DB
+    # (and this run's load reports) vs dbGaP's subject counts per study version. Read-only; needs
+    # HTTPS egress to www.ncbi.nlm.nih.gov.
+    qa-consent-counts:
+      enabled: ${ETL_JOB_QA_CONSENT_COUNTS_ENABLED:true}
 
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:

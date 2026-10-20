@@ -3,6 +3,7 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.config.EtlProperties;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.DelimitedReader;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
@@ -20,6 +21,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.UncheckedIOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -104,6 +107,17 @@ class AllConceptsDataGeneratorJobTest {
                 new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
     }
 
+    /** Runs a captured streaming writer and returns what it wrote. */
+    private static String render(IoResolver.IoWriter writer) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try {
+            writer.writeTo(out);
+        } catch (java.io.IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
     @Test
     void generates_per_consent_output_files_with_text_data() {
         setupStudyData();
@@ -121,7 +135,7 @@ class AllConceptsDataGeneratorJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<IoResolver.IoWriter> contentCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
         verify(ioResolver, org.mockito.Mockito.atLeastOnce())
                 .writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
@@ -130,7 +144,7 @@ class AllConceptsDataGeneratorJobTest {
         assertThat(uris).anyMatch(u -> u.contains(STUDY_ID + "_allConcepts_c2.csv"));
 
         for (int i = 0; i < uris.size(); i++) {
-            String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
+            String csv = render(contentCaptor.getAllValues().get(i));
             if (uris.get(i).contains("_allConcepts_c1.csv")) {
                 assertThat(csv).contains("\"" + String.valueOf(id1) + "\"");
                 assertThat(csv).contains("\"µStudyµAgeµ\"");
@@ -160,12 +174,12 @@ class AllConceptsDataGeneratorJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<IoResolver.IoWriter> contentCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
         verify(ioResolver, org.mockito.Mockito.atLeastOnce())
                 .writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
-            String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
+            String csv = render(contentCaptor.getAllValues().get(i));
             if (uriCaptor.getAllValues().get(i).contains("_allConcepts_c1.csv")) {
                 // numeric value in the numeric column (3rd), non-numeric column (4th) empty
                 assertThat(csv).contains("\"24.5\"");
@@ -286,37 +300,18 @@ class AllConceptsDataGeneratorJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<IoResolver.IoWriter> contentCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
         verify(ioResolver, org.mockito.Mockito.atLeastOnce())
                 .writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
-            String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
+            String csv = render(contentCaptor.getAllValues().get(i));
             if (uriCaptor.getAllValues().get(i).contains("_allConcepts_c1.csv")) {
                 assertThat(csv).contains("\"µStudyµAgeµ\"");
                 assertThat(csv).contains("\"µStudyµWeightµ\"");
             }
         }
-    }
-
-    @Test
-    void skips_missing_data_files_gracefully() {
-        setupStudyData();
-
-        setupMappingFile("\"missing.csv:1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
-                + "\"present.csv:1\",\"µStudyµOtherµ\",\"\",\"TEXT\",\"\"\n");
-
-        String dataDir = tempDir.resolve("data/").toString() + "/";
-        when(ioResolver.exists(dataDir + "missing.csv")).thenReturn(false);
-        setupDataFile("present.csv",
-                "patient_id,val\n"
-                        + "SUBJ001,hello\n");
-
-        String outputDir = tempDir.resolve("output/").toString();
-        JobResult result = executor.run(job, params(outputDir), "test-missing-file");
-
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
     }
 
     @Test
@@ -348,13 +343,13 @@ class AllConceptsDataGeneratorJobTest {
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<IoResolver.IoWriter> contentCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
         verify(ioResolver, org.mockito.Mockito.atLeastOnce())
                 .writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
-            String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
+            String csv = render(contentCaptor.getAllValues().get(i));
             if (uriCaptor.getAllValues().get(i).contains("_allConcepts_c1.csv")) {
                 // "hello" is now TEXT since analysis detected non-numeric values
                 assertThat(csv).contains("\"hello\"");
@@ -375,14 +370,14 @@ class AllConceptsDataGeneratorJobTest {
         String outputDir = tempDir.resolve("output/").toString();
         executor.run(job, params(outputDir), "test-format");
 
-        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<IoResolver.IoWriter> contentCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
         verify(ioResolver, org.mockito.Mockito.atLeastOnce())
                 .writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
         for (int i = 0; i < uriCaptor.getAllValues().size(); i++) {
             if (!uriCaptor.getAllValues().get(i).contains("allConcepts")) continue;
-            String csv = new String(contentCaptor.getAllValues().get(i), StandardCharsets.UTF_8);
+            String csv = render(contentCaptor.getAllValues().get(i));
             for (String line : csv.split("\n")) {
                 assertThat(line).endsWith(",\"0\"");
                 long quoteCount = line.chars().filter(c -> c == '"').count();
@@ -419,20 +414,154 @@ class AllConceptsDataGeneratorJobTest {
     }
 
     @Test
-    void stale_cleanup_leaves_other_sources_files_alone() {
+    void replaces_the_studys_earlier_output_whichever_job_wrote_it() {
         setupStudyData();
         setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
         setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\n");
 
         String outputDir = tempDir.resolve("output").toString();
         String studyDir = outputDir + "/" + STUDY_ID + "/allConcepts/";
-        // c2 holds only another source's file, not this job's.
+        // The migration's split wrote c1 and c2 under the same names this job uses.
         when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2"));
+        String c1 = studyDir + "c1/" + STUDY_ID + "_allConcepts_c1.csv";
+        String c2 = studyDir + "c2/" + STUDY_ID + "_allConcepts_c2.csv";
+        when(ioResolver.exists(c1)).thenReturn(true);
+        when(ioResolver.exists(c2)).thenReturn(true);
 
-        JobResult result = executor.run(job, params(outputDir), "test-other-sources");
+        JobResult result = executor.run(job, params(outputDir), "test-replace");
+
+        // c1 is overwritten with this run's rows; c2, empty this run, loses the earlier file.
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        verify(ioResolver).writeOutput(org.mockito.ArgumentMatchers.eq(c1), any(IoResolver.IoWriter.class));
+        verify(ioResolver, never()).delete(c1);
+        verify(ioResolver).delete(c2);
+        assertThat(result.getMetrics().get("staleFilesRemoved")).isEqualTo(List.of(c2));
+    }
+
+    @Test
+    void stale_cleanup_leaves_differently_named_files_alone() {
+        setupStudyData();
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
+        setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\n");
+
+        String outputDir = tempDir.resolve("output").toString();
+        String studyDir = outputDir + "/" + STUDY_ID + "/allConcepts/";
+        // c2 holds only a file under another name (here a legacy abbreviation-named one).
+        when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2"));
+        when(ioResolver.exists(studyDir + "c2/ABV_allConcepts_c2.csv")).thenReturn(true);
+
+        JobResult result = executor.run(job, params(outputDir), "test-other-names");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        verify(ioResolver).exists(studyDir + "c2/" + STUDY_ID + "_allConcepts_c2.csv");
         verify(ioResolver, never()).delete(any());
+    }
+
+    @Test
+    void missing_data_file_skips_stale_cleanup_for_the_whole_study() {
+        setupStudyData();
+        // Even a name that looks consent-specific does not narrow it: decoded data files are not
+        // split by consent (each participant's consent comes from the SSTR), so any group could
+        // have lost rows.
+        String missing = "phs001412.v1.pht000001.v1.p1.c2.SomeTable.HMB.txt";
+        setupMappingFile("\"" + missing + ":1\",\"µStudyµValµ\",\"\",\"TEXT\",\"\"\n"
+                + "\"present.csv:1\",\"µStudyµOtherµ\",\"\",\"TEXT\",\"\"\n");
+        String dataDir = tempDir.resolve("data/").toString() + "/";
+        when(ioResolver.exists(dataDir + missing)).thenReturn(false);
+        // Only c1 gets rows; c2's or c3's rows may well have been in the missing file.
+        setupDataFile("present.csv", "patient_id,val\nSUBJ001,hello\n");
+
+        String outputDir = tempDir.resolve("output").toString();
+        String studyDir = outputDir + "/" + STUDY_ID + "/allConcepts/";
+        when(ioResolver.listDirectoryNames(studyDir)).thenReturn(List.of("c1", "c2", "c3"));
+        String staleC2 = studyDir + "c2/" + STUDY_ID + "_allConcepts_c2.csv";
+        String staleC3 = studyDir + "c3/" + STUDY_ID + "_allConcepts_c3.csv";
+        when(ioResolver.exists(staleC2)).thenReturn(true);
+        when(ioResolver.exists(staleC3)).thenReturn(true);
+
+        JobResult result = executor.run(job, params(outputDir), "test-missing-file");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        verify(ioResolver, never()).delete(any());
+        assertThat(result.getMetrics())
+                .containsEntry("staleCleanupSkipped", true)
+                .containsEntry("staleFilesKept", List.of(staleC2, staleC3))
+                .containsEntry("staleFilesRemoved", List.of())
+                .containsEntry("missingDataFiles", List.of(dataDir + missing))
+                .doesNotContainKey("staleCleanupProtectedGroups");
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MISSING_DATA_FILE") && i.severity() == Severity.WARNING
+                        && i.message().contains(missing))
+                .anyMatch(i -> i.code().equals("STALE_CLEANUP_SKIPPED") && i.severity() == Severity.WARNING
+                        && i.message().contains("whole study")
+                        && List.of(staleC2, staleC3).equals(i.context().get("staleFilesKept")))
+                .noneMatch(i -> i.code().equals("STALE_OUTPUT_REMOVED"));
+    }
+
+    @Test
+    void writes_each_consent_file_at_the_shared_layout_path() {
+        setupStudyData();
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
+        setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\nSUBJ002,30\n");
+        String outputDir = "s3://out-bucket/root/";
+        when(ioResolver.isS3(outputDir)).thenReturn(true);
+
+        JobResult result = executor.run(job, params(outputDir), "test-layout");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        String expectedC1 = "s3://out-bucket/root/phs001412/allConcepts/c1/phs001412_allConcepts_c1.csv";
+        String expectedC2 = "s3://out-bucket/root/phs001412/allConcepts/c2/phs001412_allConcepts_c2.csv";
+        assertThat(AllConceptsLayout.consentFile(outputDir, STUDY_ID, AllConceptsLayout.consentLabel("1")))
+                .isEqualTo(expectedC1);
+        assertThat(result.getMetrics().get("outputFiles")).isEqualTo(List.of(expectedC1, expectedC2));
+        verify(ioResolver).writeOutput(org.mockito.ArgumentMatchers.eq(expectedC1), any(IoResolver.IoWriter.class));
+        verify(ioResolver).writeOutput(org.mockito.ArgumentMatchers.eq(expectedC2), any(IoResolver.IoWriter.class));
+        verify(ioResolver, never()).writeOutput(any(), any(byte[].class));
+    }
+
+    @Test
+    void refuses_an_s3_output_bucket_without_versioning_before_writing() {
+        String outputDir = "s3://out-bucket/root/";
+        when(ioResolver.isS3(outputDir)).thenReturn(true);
+        org.mockito.Mockito.doThrow(new ConfigException(
+                        "Bucket out-bucket must have versioning Enabled (is Suspended)"))
+                .when(ioResolver).requireVersioning(outputDir);
+
+        JobResult result = executor.run(job, params(outputDir), "test-unversioned");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.CONFIG_ERROR);
+        assertThat(result.getErrorMessage()).contains("versioning Enabled");
+        verify(ioResolver, never()).writeOutput(any(), any(IoResolver.IoWriter.class));
+        verify(ioResolver, never()).delete(any());
+    }
+
+    @Test
+    void writes_to_a_versioned_s3_output_bucket() {
+        setupStudyData();
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
+        setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\nSUBJ002,30\n");
+        String outputDir = "s3://out-bucket/root/";
+        when(ioResolver.isS3(outputDir)).thenReturn(true);
+
+        JobResult result = executor.run(job, params(outputDir), "test-versioned");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        verify(ioResolver).requireVersioning(outputDir);
+        verify(ioResolver).writeOutput(
+                org.mockito.ArgumentMatchers.eq(outputDir + STUDY_ID + "/allConcepts/c1/" + STUDY_ID + "_allConcepts_c1.csv"),
+                any(IoResolver.IoWriter.class));
+    }
+
+    @Test
+    void local_output_skips_the_versioning_check() {
+        setupStudyData();
+        setupMappingFile("\"datafile.csv:1\",\"µStudyµAgeµ\",\"\",\"TEXT\",\"\"\n");
+        setupDataFile("datafile.csv", "patient_id,age\nSUBJ001,25\nSUBJ002,30\n");
+
+        JobResult result = executor.run(job, params(tempDir.resolve("output").toString()), "test-local");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        verify(ioResolver, never()).requireVersioning(any());
     }
 
     @Test
@@ -452,14 +581,14 @@ class AllConceptsDataGeneratorJobTest {
         String outputDir = tempDir.resolve("output/").toString();
         JobResult result = executor.run(job, params(outputDir), "test-dropped-rows");
 
-        // Only the malformed data row loses data; the other two are surfaced without failing the run.
+        // The malformed row and the missing file lose data; the dropped mapping row is only surfaced.
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(result.getMetrics())
                 .containsEntry("malformedRows", 1L)
                 .containsEntry("mappingRowsDropped", 1L);
         assertThat(result.getOutputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("MALFORMED_ROWS") && i.severity() == Severity.WARNING)
-                .anyMatch(i -> i.code().equals("MISSING_DATA_FILE") && i.severity() == Severity.INFO
+                .anyMatch(i -> i.code().equals("MISSING_DATA_FILE") && i.severity() == Severity.WARNING
                         && i.message().contains("missing.csv"))
                 .anyMatch(i -> i.code().equals("DROPPED_MAPPING_ROWS") && i.severity() == Severity.INFO);
     }

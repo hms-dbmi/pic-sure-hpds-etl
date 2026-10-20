@@ -6,12 +6,20 @@
 // of global_AllConcepts.csv, then one row per consent group of every study marked ready in managed
 // inputs, partition {study_id}.c{code}, naming its MERGED allConcepts file.
 //
-// Runs last in both orchestrators, after generate-allconcepts-manifest. Before writing it verifies that every
+// Runs in both orchestrators, after merge-allconcepts. Before writing it verifies that every
 // ready consent group has a MERGED file built from exactly its current source files (the S3 version
 // ids the merge recorded) and carrying its md5, and that the global file exists and is non-empty
 // (its md5 is computed from that exact version). If any check fails, NO manifest is written, the
 // previous version stays current, and the build fails listing every problem. The bucket must be
 // versioned: each run's manifest is a new version of the same key.
+//
+// Some consent folders are left out with a WARNING (the build is UNSTABLE) while the rest is still
+// published: a folder with no allConcepts files; one holding only merged output and no source files
+// (ONLY_MERGED_COPIES / MERGED_WITHOUT_SOURCES: the per-study allConcepts output for that study and
+// consent is missing, so check its all-concepts-data-generator run, or in the migration its
+// split-allconcepts run); and one whose MERGED file is empty (MERGED_EMPTY). A ready study left
+// with no listed consent folder is named (STUDY_NOT_IN_MANIFEST); if no consent group is left at
+// all, nothing is written (NO_CONSENT_GROUPS).
 //
 // Inputs
 //   --input                data root (s3://, versioned bucket)
@@ -23,8 +31,15 @@
 //   generate-allconcepts-manifest-<runId>.json report.
 //
 // Exit codes (see ExitCode.java)
-//   0 success | 2 validation (manifest not written) | 4 infrastructure | 5 config (incl. bucket not
-//   versioned) | 1 unknown | 124 monitor timeout
+//   0 success (warnings make the build UNSTABLE) | 1 unknown | 2 validation (manifest not written) |
+//   3 data | 4 infrastructure (retried once when RETRY_ON_INFRA) | 5 config (incl. bucket not
+//   versioned) | 124 monitor timeout (not retried)
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The permanent orchestrator (/Jenkinsfile) builds the image once and passes it as
+//   PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball, and leaves
+//   deleting it to the orchestrator.
 // =============================================================================
 
 pipeline {
@@ -36,7 +51,7 @@ pipeline {
 
     options {
         timestamps()
-        // Lets the migration orchestrator (Jenkinsfile.migration) copy this job's reports.
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
         copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
@@ -56,6 +71,8 @@ pipeline {
                description: 'Runner instance type.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '1800',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
@@ -83,6 +100,10 @@ pipeline {
         stage('Init') {
             steps {
                 script {
+                    // The workspace persists between builds, and post { always } archives reports/**
+                    // even when this build never fetched any (say, a failed apply): start empty, so an
+                    // earlier build's report is never archived, or copied by an orchestrator, as this one's.
+                    sh "rm -rf ${RUNNER_DIR}/reports"
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// data root the manifest is written to.')
                     }
@@ -97,8 +118,14 @@ pipeline {
 
                     env.TF_VAR_name_suffix = "generate-allconcepts-manifest-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} generate-allconcepts-manifest"
                     echo "input: ${params.INPUT}"
@@ -116,7 +143,9 @@ pipeline {
             }
         }
 
+        // A pre-built image already contains the JAR.
         stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' } }
             steps {
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
@@ -143,7 +172,23 @@ pipeline {
 
         stage('Package runner image') {
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
             }
         }
 
@@ -250,12 +295,18 @@ pipeline {
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }

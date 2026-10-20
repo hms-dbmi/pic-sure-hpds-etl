@@ -1,0 +1,20 @@
+#!/bin/bash
+# podman stub: `load` swallows the image; `run` saves the --env-file it was given as $W/envs/<n>.env,
+# writes a report (and a .partial that must not be published), prints a line, and exits
+# $PODMAN_EXIT (default 0). PODMAN_TERM=1: SIGTERM the bootstrap script first, as an instance
+# termination would.
+echo "podman $*" >> "$W/calls"
+case "$1" in
+  load) cat >/dev/null ;;
+  run)
+    envf="" vol=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in --env-file) envf="$2"; shift ;; -v) vol="${2%%:*}"; shift ;; esac; shift
+    done
+    mkdir -p "$W/envs"; n=$(( $(ls "$W/envs" | wc -l) + 1 ))
+    cp "$envf" "$W/envs/$n.env"
+    echo "report $n" > "$vol/report.json"; echo partial > "$vol/big.csv.partial"
+    echo "container output $n"
+    [[ "${PODMAN_TERM:-}" == 1 ]] && kill -TERM "$(cat "$W/script.pid")"
+    exit "${PODMAN_EXIT:-0}" ;;
+esac

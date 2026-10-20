@@ -1,0 +1,3 @@
+study_id,version,consent_code,consent_short_name,dbgap_subjects,db_participants,load_participants,load_source,status,note
+phs000001,v1,0,NRUP,576,0,,,MISSING_IN_DB,
+phs000002,v3,1,GRU,12,10,10,sstr,COUNT_MISMATCH,

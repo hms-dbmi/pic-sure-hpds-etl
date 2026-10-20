@@ -1,0 +1,5 @@
+study_id	result	build	url	reason
+phs000001	SUCCESS	11	https://j/sstr/11/	
+phs000002	UNSTABLE	12	https://j/sstr/12/	
+phs000003	SUCCESS	13	https://j/sstr/13/	
+phs000006	SUCCESS	14	https://j/sstr/14/	

@@ -42,8 +42,16 @@ import java.util.Set;
  * ready consent group must hold: a MERGED file exists; its recorded
  * {@linkplain AllConceptsFolders#fingerprint source fingerprint} equals that of the folder's
  * current sources (it is the merge of exactly the ready files); and it carries its MD5. A ready
- * study with no consent folders, or a missing or empty global AllConcepts file, also fails. Any failure writes <b>no</b> manifest, so ingestion
- * never receives one describing stale or missing data; the report names every problem.
+ * study with no consent folders, or a missing or empty global AllConcepts file, also fails. Any
+ * failure writes <b>no</b> manifest, so ingestion never receives one describing stale or missing
+ * data; the report names every problem.
+ *
+ * <p>A consent folder that cannot be listed but does not block the rest is left out with a
+ * WARNING: one with no allConcepts files at all; one holding only merged output and no sources
+ * (its own MERGED file, a legacy {@code *_merged.csv}, or another folder's MERGED file), which
+ * means the per-study allConcepts generation for that study and consent did not write its files;
+ * and one whose MERGED file is empty. A ready study left with no listed consent folder at all is
+ * warned about by name; if that leaves no consent group in the manifest at all, nothing is written.
  *
  * <p>The manifest is overwritten in place on a bucket that must have versioning enabled, so every
  * earlier manifest stays retrievable. {@code version_id} pins each row to the exact MERGED version
@@ -64,7 +72,7 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
 
     public GenerateAllConceptsManifestJob(IoResolver io, S3Client s3, ManagedInputsService managedInputsService) {
         this.io = io;
-        this.folders = new AllConceptsFolders(s3);
+        this.folders = new AllConceptsFolders(s3, io);
         this.managedInputsService = managedInputsService;
     }
 
@@ -135,12 +143,31 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
                 problems.add(Problem.error("NO_CONSENT_FOLDERS", studyId, null, "ready, but has no "
                         + AllConceptsFolders.ALL_CONCEPTS_DIR + "/c{code}/ folders under " + base + studyId + "/"));
             }
+            int rowsBefore = rows.size();
+            int problemsBefore = problems.size();
             for (ConsentFolder folder : studyFolders.values()) {
                 verify(folder, rows, problems);
             }
+            boolean studyErrors = problems.subList(problemsBefore, problems.size()).stream()
+                    .anyMatch(p -> p.severity() == Severity.ERROR);
+            if (!studyFolders.isEmpty() && rows.size() == rowsBefore && !studyErrors) {
+                // Every folder was left out with a warning: the study is ready but publishes nothing.
+                problems.add(Problem.warning("STUDY_NOT_IN_MANIFEST", studyId, null, studyId + " is ready, "
+                        + "but none of its " + studyFolders.size() + " consent folder(s) is in the manifest "
+                        + "(see the warnings for each); check its all-concepts-data-generator output"));
+            }
         }
 
-        if (problems.stream().anyMatch(p -> p.severity() == Severity.ERROR)) {
+        boolean blocked = problems.stream().anyMatch(p -> p.severity() == Severity.ERROR);
+        if (!blocked && !studyIds.isEmpty() && rows.stream().noneMatch(r -> !GLOBAL_PARTITION.equals(r.partition()))) {
+            // Every consent folder was left out with a warning (say, a broken generator run): a
+            // manifest of the global row alone would drop every study from ingestion.
+            problems.add(Problem.error("NO_CONSENT_GROUPS", null, null, "none of the " + studyIds.size()
+                    + " ready stud" + (studyIds.size() == 1 ? "y has" : "ies has") + " a consent group to list "
+                    + "(see the warnings); refusing to publish a manifest with no consent group"));
+            blocked = true;
+        }
+        if (blocked) {
             // Errors include a missing or empty global file: the manifest always lists it.
             log.error("Not writing {}: {} problem(s) found", manifestUri, problems.size());
             return new Output(studyIds.size(), rows, problems, manifestUri, null);
@@ -178,6 +205,18 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
     private void verify(ConsentFolder folder, List<ManifestRow> rows, List<Problem> problems) {
         String studyId = folder.studyId();
         String consentDir = folder.consentDir();
+        if (folder.sources().isEmpty() && (folder.merged() != null || !folder.otherMergedFiles().isEmpty())) {
+            // Only merged output, no per-study source files: the merged file is not the merge of
+            // anything the study now has, so it is left out, and the rest is still published.
+            List<String> merged = new ArrayList<>(folder.otherMergedFiles());
+            if (folder.merged() != null) {
+                merged.add(0, folder.mergedFileName());
+            }
+            problems.add(Problem.warning(folder.otherMergedFiles().isEmpty()
+                            ? "MERGED_WITHOUT_SOURCES" : "ONLY_MERGED_COPIES", studyId, consentDir,
+                    onlyMergedMessage(folder, merged) + " Left out of the manifest."));
+            return;
+        }
         if (folder.sources().isEmpty() && folder.merged() == null) {
             problems.add(Problem.warning("NO_SOURCES", studyId, consentDir, folder.label()
                     + " holds no allConcepts files (only " + folder.ignored() + "); not in the manifest"));
@@ -186,11 +225,6 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
         if (folder.merged() == null) {
             problems.add(Problem.error("MERGED_MISSING", studyId, consentDir, folder.label() + " has "
                     + folder.sources().size() + " source file(s) but no " + folder.mergedFileName()));
-            return;
-        }
-        if (folder.sources().isEmpty()) {
-            problems.add(Problem.error("MERGED_WITHOUT_SOURCES", studyId, consentDir, folder.label()
-                    + ": " + folder.mergedFileName() + " exists but every source file is gone"));
             return;
         }
         Map<String, String> meta = folders.metadata(folder.bucket(), folder.mergedKey(), folder.merged().versionId());
@@ -213,8 +247,27 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
                     + folder.mergedFileName() + " has no recorded md5; re-run the merge"));
             return;
         }
+        if (folder.merged().size() != null && folder.merged().size() == 0) {
+            problems.add(Problem.warning("MERGED_EMPTY", studyId, consentDir, folder.label() + ": "
+                    + folder.mergedFileName() + " is empty (0 bytes: its source files are empty); left out of the "
+                    + "manifest. Check the all-concepts-data-generator run for " + studyId + " (or, in the "
+                    + "migration, its split-allconcepts run)"));
+            return;
+        }
         rows.add(new ManifestRow(partition(studyId, consentDir), folder.uri() + folder.mergedFileName(),
                 folder.merged().versionId(), folder.merged().lastModified().toString(), md5));
+    }
+
+    /**
+     * Why a consent folder holding only merged output (no sources) is suspect. Shared with
+     * {@link MergeAllConceptsJob}, so both jobs point at the same place.
+     */
+    static String onlyMergedMessage(ConsentFolder folder, List<String> mergedFiles) {
+        return folder.label() + " has no per-study allConcepts source files, only merged file(s) " + mergedFiles
+                + ", so the allConcepts output for study " + folder.studyId() + " consent " + folder.consentDir()
+                + " is missing: check that study's all-concepts-data-generator run (or, in the migration, its "
+                + "split-allconcepts run) wrote its " + AllConceptsFolders.ALL_CONCEPTS_MARKER + " files into "
+                + folder.uri() + ", then re-run the merge.";
     }
 
     /** {@code phs000001}, folder {@code c1} &rarr; {@code phs000001.c1}, the {studyId}.c{code} consent form. */
@@ -302,7 +355,9 @@ public class GenerateAllConceptsManifestJob extends AbstractJob<GenerateAllConce
                 .metric("manifestVersionId", output.versionId() == null ? "" : output.versionId())
                 .metric("manifestWritten", output.versionId() != null)
                 .metric("problems", (long) output.problems().stream()
-                        .filter(p -> p.severity() == Severity.ERROR).count());
+                        .filter(p -> p.severity() == Severity.ERROR).count())
+                .metric("consentFoldersExcluded", (long) output.problems().stream()
+                        .filter(p -> p.severity() == Severity.WARNING && p.consentDir() != null).count());
     }
 
     /** One manifest line. */

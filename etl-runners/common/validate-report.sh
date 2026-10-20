@@ -37,11 +37,14 @@ fi
 
 # One jq pass per report: the migration validates ~600 sub-reports, and the ~20 jq processes
 # per report this used to start made validation take longer than the migration itself.
-# Each output line is tagged: C<TAB>0|1<TAB>label is a check, N<TAB>text a note, anything else
-# is printed as-is (an issue message can span several lines).
+# Every output line carries a tag, so text from the report can never be read as a check:
+#   C<TAB>0|1<TAB>label   a check (1 passed)
+#   W<TAB>text            a warning: the report is clean but the build is UNSTABLE (exit 10)
+#   T<TAB>text            a line printed as-is (a multi-line issue message is one T line per line)
 if ! LINES=$(jq -r '
   def ok(f): if (try f catch false) then "1" else "0" end;
   def chk($name; f): "C\t\(ok(f))\t\($name)";
+  def txt: tostring | if . == "" then "T\t" else (split("\n")[] | "T\t" + .) end;
   chk("report names its job";        .jobName | type == "string" and length > 0),
   chk("report carries a run id";     .runId   | type == "string" and length > 0),
   chk("status is SUCCESS";           .status == "SUCCESS"),
@@ -50,20 +53,21 @@ if ! LINES=$(jq -r '
   chk("no output-validation errors"; (.outputValidation.counts.error // 0) == 0),
   chk("no errorMessage recorded";    .errorMessage == null),
   ((.inputValidation.counts.warning // 0) + (.outputValidation.counts.warning // 0)
-    | select(. != 0) | "N\tvalidation warnings: \(.) (see details below)"),
-  (select(.exitCode == "SUCCESS_WITH_WARNINGS") | "N\tjob reported SUCCESS_WITH_WARNINGS"),
-  "",
-  "  Job: \(.jobName) (\(.jobType)) run \(.runId)",
-  "  Exit: \(.exitCode)   Duration: \(.durationMillis) ms",
-  "",
-  "  Metrics:",
-  (.metrics // {} | to_entries[] | "         \(.key) = \(.value | tostring)"),
-  ([ (.inputValidation.issues // [])[], (.outputValidation.issues // [])[] ]
-    | map(select(.severity == "ERROR" or .severity == "WARNING"))
-    | if length == 0 then empty else
-        "", "  Errors and warnings:",
-        (.[] | "         [\(.severity)] \(.code): \(.message)\(if .location then " (\(.location))" else "" end)")
-      end)
+    | select(. != 0) | "W\tvalidation warnings: \(.) (see details below)"),
+  (select(.exitCode == "SUCCESS_WITH_WARNINGS") | "W\tjob reported SUCCESS_WITH_WARNINGS"),
+  ("",
+   "  Job: \(.jobName) (\(.jobType)) run \(.runId)",
+   "  Exit: \(.exitCode)   Duration: \(.durationMillis) ms",
+   "",
+   "  Metrics:",
+   (.metrics // {} | to_entries[] | "         \(.key) = \(.value | tostring)"),
+   ([ (.inputValidation.issues // [])[], (.outputValidation.issues // [])[] ]
+     | map(select(.severity == "ERROR" or .severity == "WARNING"))
+     | if length == 0 then empty else
+         "", "  Errors and warnings:",
+         (.[] | "         [\(.severity)] \(.code): \(.message)\(if .location then " (\(.location))" else "" end)")
+       end)
+  | txt)
 ' "$REPORT" 2>/dev/null) || [[ -z "$LINES" ]]; then
   # jq prints nothing at all for an empty file, which must not pass as a valid report.
   fail "report is valid JSON"
@@ -77,10 +81,13 @@ while IFS= read -r line; do
     C$'\t'*)
       line="${line#C$'\t'}"
       check "${line#*$'\t'}" test "${line%%$'\t'*}" = 1 ;;
-    N$'\t'*)
-      note "${line#N$'\t'}" ;;
+    W$'\t'*)
+      warn "${line#W$'\t'}" ;;
+    T$'\t'*)
+      printf '%s\n' "${line#T$'\t'}" ;;
     *)
-      printf '%s\n' "$line" ;;
+      # Every line jq prints is tagged; anything else means this script and its filter disagree.
+      fail "unexpected validator output: $line" ;;
   esac
 done <<<"$LINES"
 

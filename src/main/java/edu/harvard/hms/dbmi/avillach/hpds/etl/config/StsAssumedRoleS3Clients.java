@@ -42,7 +42,7 @@ public class StsAssumedRoleS3Clients implements AssumedRoleS3Clients {
         // EC2 (tests, LocalStack) it is whatever the default chain resolves.
         StsClient stsClient = StsClient.builder()
                 .region(region)
-                .credentialsProvider(DefaultCredentialsProvider.create())
+                .credentialsProvider(DefaultCredentialsProvider.builder().build())
                 .build();
 
         S3ClientBuilder builder = S3Client.builder()

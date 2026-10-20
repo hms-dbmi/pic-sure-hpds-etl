@@ -72,16 +72,23 @@ that Jenkins gates on.
 | `InfrastructureException`      | 4 `INFRASTRUCTURE_ERROR` | DB/S3/network failed (retryable)    |
 | *(anything else)*              | 1 `UNKNOWN`              | unclassified                        |
 
+A thrown exception normally leaves the report with just the error. A job that fails part-way but
+has already established something worth reporting attaches it:
+`throw new InfrastructureException(msg).withPartialResult(metrics, outputValidation)`, and
+`JobExecutor` keeps those metrics and issues in the failed run's report (see `QaConsentCountsJob`,
+which still reports every study it checked when dbGaP stops answering).
+
 ## 4. Reuse the Building Blocks
 
 Inject these rather than rolling your own.
 
 | Component                                                        | Purpose                                                             |
 |------------------------------------------------------------------|---------------------------------------------------------------------|
-| `IoResolver`                                                     | `openInput(uri)` / `writeOutput(uri, bytes)` for `s3://` or local paths |
+| `IoResolver`                                                     | `s3://` or local paths: `openInput(uri)`, `exists`, `size(uri)`, `delete(uri)`; `writeOutput(uri, bytes)` for small outputs only; `writeOutputFile(uri, file)` / `writeOutputFile(uri, file, Map metadata)` (returns the version id) and `writeOutputStream(uri, length, metadata, content)` for large ones (multipart, nothing held in memory); `requireVersioning(uri)` before overwriting or deleting in place, so every earlier version stays recoverable |
 | `DelimitedReader`                                                | Stream CSV/TSV rows as `Map<String,String>` (memory-flat)            |
 | `JsonReader`                                                     | Parse JSON into domain types                                        |
 | `ParticipantRepository` / `ConsentRepository` / `SampleRepository` | Batched, idempotent upserts                                         |
+| `ConsentRepository.KEY_ORDER` / `SampleRepository.KEY_ORDER` + `BatchOps.upsertInChunks(upsert, items, batchSize, keyOrder)` | Upsert in a fixed key order, so concurrent loads touching overlapping rows lock them in the same order and cannot deadlock. Use the `keyOrder` overload for any table more than one study load can write at once |
 | `PlatformTransactionManager` (via `TransactionTemplate`)          | Make a multi-batch load atomic                                      |
 
 ### Participant IDs
@@ -113,9 +120,10 @@ for the end-to-end guarantee.
 else. It does not use `Boolean.parseBoolean`, which maps an unrecognised string such as `treu`
 to `false`, silently inverting a flag.
 
-Also check the value in `validateInput` with `JobContext.isBooleanLiteral(raw)` so a bad flag
-appears in the JSON report before any work starts, rather than surfacing later as a thrown
-exception.
+Call `AbstractJob.validateBooleanParam(ctx, report, "<name>")` from `validateInput` for every
+boolean parameter: a value that is present but not one of those literals is reported as
+`BAD_BOOLEAN` (exit 2) before any work starts, rather than being read as false or surfacing
+mid-run as a `CONFIG_ERROR`.
 
 ## 5. Write Tests
 
@@ -170,30 +178,32 @@ module "etl_runner" {
 
   # DB-backed jobs only; omit both if the job touches no database.
   uses_participant_db = true
-  db_credentials_json = var.db_credentials_json
+  environment         = var.environment   # -> /hpds-etl/<environment>/participant-db/app-credentials
 
   job_params = { output = var.output_uri }
 }
 ```
 
 Declare `aws_account_id`, `vpc_id`, `subnet_id`, `iam_role_name`, and `iam_instance_profile_name` in its `variables.tf`
-(copy them from an existing runner). A DB-backed job also declares the credentials variable:
+(copy them from an existing runner). A DB-backed job also passes `environment`.
 
-```hcl
-variable "db_credentials_json" {
-  type      = string
-  default   = ""
-  sensitive = true
-}
-```
-
-`common.mk` sets it as `TF_VAR_db_credentials_json` from the file `participant-db-start` saved on
-the Jenkins server, so a DB-backed job must run on the same Jenkins node as the start job, and
-the password ends up in the runner's user data and Terraform state (see
-[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#credentials)). There is no role to assume: the instance
+**Participant DB credentials come from SSM at runner boot**, never through Terraform:
+`participant-db-start` writes them (rotated on every start) to the SSM SecureString
+`/hpds-etl/<ENV>/participant-db/app-credentials`, the runner reads it when it boots (its instance
+role needs `ssm:GetParameter` on it and `kms:Decrypt` via SSM; see
+[`terraform-modules/etl-runner/README.md`](../terraform-modules/etl-runner/README.md)), and the
+connection requires TLS. So no password lands in user data or Terraform state, and a job started
+after a newer `participant-db-start` simply reads the new credentials. See
+[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#credentials). There is no role to assume: the instance
 role does all S3 work. A job that touches no database omits `uses_participant_db` and
-`db_credentials_json`, which skips the credential step so it runs whether or not the
-participant database is up.
+`environment`, which skips the credential step so it runs whether or not the participant
+database is up.
+
+**AWS credential chain.** Jobs use the SDK's default chain (the instance role on a runner, the
+agent's role in Jenkins). If you point a job or a local run at a named profile (`AWS_PROFILE`)
+whose config has a `role_arn`, that profile must also say where its base credentials come from —
+`source_profile = <profile>` or `credential_source = Ec2InstanceMetadata` (or `Environment`) —
+otherwise the role cannot be assumed and the job fails with a credentials error, not an S3 one.
 
 **Never put a value the Jenkinsfile sets through `TF_VAR_*` (e.g. `instance_type`) in the
 runner's `.tfvars`.** A `-var-file` value outranks `TF_VAR_*`, so the Jenkins parameter would
@@ -203,6 +213,8 @@ be silently ignored. Put its default in `variables.tf` instead.
 
 - `choice(name: 'ENV', choices: ['development'], ...)`, defaulting `ENV` to `development`.
 - No AWS profile or role parameter: the agent and the runner both act as their own role.
+- A job an orchestrator calls needs `copyArtifactPermission('*')` in its `options` block, or the
+  orchestrator's `copyArtifacts` of its reports fails.
 - A DB-backed job calls the shared check at the top of `Provision, run and monitor`, so a
   missing database fails in seconds rather than after provisioning:
 
@@ -217,10 +229,22 @@ be silently ignored. Put its default in `variables.tf` instead.
 
 ### Orchestrator Stage
 
-A stage whose job uses the database must sit **after** `Start participant DB`; the database
-is stopped (and dumped) in `post { always }`. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+A stage whose job uses the database must sit **after** `Start participant DB`. The database is
+long-lived: the orchestrator makes sure it is up there, backs it up (dumps it to S3) in
+`post { always }`, and never stops it. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 If the stage has no pre-flight mode of its own, skip it under `PREFLIGHT_ONLY`
 (`when { expression { !params.PREFLIGHT_ONLY } }`), since the database is not started then.
+
+In `/Jenkinsfile`, keep the stage short and call the helpers in
+[`etl-runners/common/orchestrator.groovy`](../etl-runners/common/orchestrator.groovy):
+`orch().runDownstream(job, parameters, 'downstream-artifacts/<name>')` for a run-wide job (copies
+its reports, turns UNSTABLE/failure into this build's result), or
+`orch().runPerStudyStage(title:, key:, job:, studies:, workers:, paramsFor:, onFailure:)` for one
+build per study. Pass every child parameter whose value matters explicitly (`INSTANCE_TYPE`,
+`JOB_TIMEOUT_SECONDS`, ...): one left out gets the default the child registered on its previous
+build. Long logic belongs in the loaded file, not in `pipeline {}`, which must stay under the
+JVM's 64 KB method limit. If the job's JSON report should appear in the end-of-run report, add it
+to `etl-runners/pipeline-report/pipeline-report.py` and its test fixture.
 
 Two things to get right in the runner scripts:
 

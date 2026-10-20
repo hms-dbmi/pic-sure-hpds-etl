@@ -102,7 +102,9 @@ lines_matching() {   # the labels of validate.sh lines tagged $1, as a JSON arra
   fi
 }
 failed_checks=$(lines_matching '[FAIL]')
-warnings=$(lines_matching '[warn]')
+# validate.sh follows the report's own [warn] lines with "standard report checks (warnings above)";
+# that line only points at the others, so it is not listed as a warning of its own.
+warnings=$(lines_matching '[warn]' | jq -c 'map(select(endswith("(warnings above)") | not))')
 
 # --- outcome -----------------------------------------------------------------------------------
 JOB_ERROR=""

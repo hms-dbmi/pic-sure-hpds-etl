@@ -11,10 +11,17 @@
 // (with the participant DB up -- see docs/PARTICIPANT_DB.md).
 //
 // Output is overwritten in place, by design: OUTPUT is the shared root of the per-study folders,
-// whose {study_id}/allConcepts/ folders other sources (the migration's split) also write into, and the bucket's S3 versioning keeps every previous version.
-// Pre-flight refuses an unversioned output bucket. A consent group that produces no rows this
-// run has this job's own file from an earlier run removed (a recoverable delete marker), so
-// merge-allconcepts never keeps merging stale rows; other sources' files are never touched.
+// and the bucket's S3 versioning keeps every previous version. Pre-flight and the job itself
+// refuse an output bucket whose versioning is not Enabled.
+// This job's output for a study fully REPLACES any earlier per-study allConcepts output for that
+// study, whichever job wrote it: the migration's split writes the same
+// {study_id}_allConcepts_c{code}.csv names (a distinct name would make merge-allconcepts
+// concatenate both and duplicate rows). A consent group that produces no rows this run has that
+// file removed (a recoverable delete marker), so merge-allconcepts never keeps merging stale rows.
+// Only files with other names in those folders are left alone. If a data file named in the mapping
+// is missing, removal is skipped for the whole study (STALE_CLEANUP_SKIPPED and MISSING_DATA_FILE
+// warnings; metrics staleCleanupSkipped and staleFilesKept) rather than risk dropping groups:
+// decoded data files are not split by consent, so a missing file could have fed any group.
 //
 // This job replaces the legacy "ETL - Generate DBGAP All Concepts with Data Type
 // Analyzer" Jenkins job, producing per-consent output rather than per-study.
@@ -24,8 +31,8 @@
 //   --data-dir     decoded data CSVs (local path or s3:// URI)
 //   --mapping      mapping CSV (local path or s3:// URI)
 //   --output       root of the per-study folders
-//   participant DB credentials read from the copy participant-db-start saved on the Jenkins server and
-//                              passed to the runner as a sensitive Terraform variable
+//   Participant DB credentials read by the runner at boot from the SSM parameter
+//                              /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
 //   {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv per consent group
@@ -34,9 +41,10 @@
 // Exit codes (see ExitCode.java)
 //   0 success | 2 validation | 3 data | 4 infrastructure | 5 config | 1 unknown |
 //   124 monitor timeout
+//
 // Runner image
 //   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
-//   the permanent orchestrator (/Jenkinsfile) runs one of these per study, so it builds the image once and
+//   The permanent orchestrator (/Jenkinsfile) runs one of these per study, so it builds the image once and
 //   passes it as PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball,
 //   and leaves deleting it to the orchestrator.
 // =============================================================================
@@ -50,8 +58,10 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the permanent orchestrator (/Jenkinsfile) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
-        timeout(time: 4, unit: 'HOURS')
+        timeout(time: 4, unit: 'HOURS') // keep BUILD_TIMEOUT_HOURS below in step
     }
 
     parameters {
@@ -70,7 +80,7 @@ pipeline {
         string(name: 'INSTANCE_TYPE', defaultValue: 'm5.xlarge',
                description: 'Runner instance type. Larger studies need more memory for decoded data.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
-               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+               description: 'How long to wait for the runner before giving up (monitor exits 124). A retry gets at most what is left of the 4h build timeout.')
         string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
                description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
@@ -218,6 +228,15 @@ pipeline {
 
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
+                    // A retry's monitor timeout is capped to what is left of the build timeout (less
+                    // 30 min to provision it, fetch reports and tear down), and skipped when under
+                    // 10 min would remain, so Jenkins never aborts a retry mid-run (which would leave
+                    // no timeout report). Must match options { timeout }.
+                    final long BUILD_TIMEOUT_HOURS = 4
+                    final long TEARDOWN_MARGIN_SECONDS = 1800
+                    final long MIN_RETRY_SECONDS = 600
+                    long deadlineMillis = currentBuild.startTimeInMillis + BUILD_TIMEOUT_HOURS * 3600 * 1000
+                    long monitorTimeout = Long.parseLong(env.PIPELINE_TIMEOUT)
 
                     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
                         env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
@@ -226,24 +245,35 @@ pipeline {
                         env.TF_VAR_name_suffix = "allconcepts-${params.STUDY_ID.trim()}-${env.BUILD_NUMBER}-${attempt}".replaceAll(/[^A-Za-z0-9-]/, '-')
                         env.STATE_KEY = "tf_backend/etl-runners/hpds-etl/all-concepts-data-generator/${env.EFFECTIVE_RUN_ID}.tfstate"
 
-                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID}"
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID} (monitor timeout ${monitorTimeout}s)"
 
                         sh "make -C ${RUNNER_DIR} init apply STATE_KEY=${env.STATE_KEY}"
                         env.TF_INITIALISED = 'true'
 
-                        rc = sh(returnStatus: true, script: """
-                            cd ${RUNNER_DIR}
-                            TF=\$(make -s tf-path)
-                            ../common/monitor-runner.sh \
-                              "\$(\$TF -chdir=terraform output -raw instance_id)" \
-                              "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
-                              "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
-                        """)
+                        withEnv(["PIPELINE_TIMEOUT=${monitorTimeout}"]) {
+                            rc = sh(returnStatus: true, script: """
+                                cd ${RUNNER_DIR}
+                                TF=\$(make -s tf-path)
+                                ../common/monitor-runner.sh \
+                                  "\$(\$TF -chdir=terraform output -raw instance_id)" \
+                                  "\$(\$TF -chdir=terraform output -raw status_s3_uri)" \
+                                  "\$(\$TF -chdir=terraform output -raw log_s3_uri)"
+                            """)
+                        }
 
                         env.JOB_EXIT_CODE = "${rc}"
                         if (rc != 4 || attempt == maxAttempts) {
                             break
                         }
+
+                        // Checked before tearing down, so a skipped retry leaves this attempt's
+                        // reports and state for the stages below. 60 s: the pause before retrying.
+                        long remaining = (deadlineMillis - System.currentTimeMillis()) / 1000 - 60 - TEARDOWN_MARGIN_SECONDS
+                        if (remaining < MIN_RETRY_SECONDS) {
+                            echo "Exit 4, but not retrying: only ${remaining}s of the ${BUILD_TIMEOUT_HOURS}h build timeout would be left for the run"
+                            break
+                        }
+                        monitorTimeout = Math.min(Long.parseLong(env.PIPELINE_TIMEOUT), remaining)
 
                         echo "Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- tearing down and retrying"
                         sh(returnStatus: true,
@@ -323,6 +353,11 @@ pipeline {
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }
@@ -336,7 +371,8 @@ pipeline {
         }
         unstable {
             echo 'all-concepts-data-generator completed WITH WARNINGS. ' +
-                 'Check for unmapped patients, or stale consent-group files removed, in the report.'
+                 'Check for unmapped patients, missing data files (stale cleanup is then skipped), ' +
+                 'or stale consent-group files removed, in the report.'
         }
         success {
             echo "allConcepts files generated for ${params.STUDY_ID} (run ${env.EFFECTIVE_RUN_ID})."

@@ -182,7 +182,9 @@ pooled_warnings_are_success_with_warnings() {
     run_pooled phs000001 warn
     expect_rc 10
     expect_eq "$(result .outcome)" SUCCESS_WITH_WARNINGS
-    expect_eq "$(result '.validation.warnings | join(",")')" "no unmapped hpds ids"
+    # The job's own SUCCESS_WITH_WARNINGS (from the standard report checks) and the failed soft
+    # check; not the "standard report checks (warnings above)" line that only points at the first.
+    expect_eq "$(result '.validation.warnings | join(",")')" "job reported SUCCESS_WITH_WARNINGS,no unmapped hpds ids"
     expect_out "SUCCESS WITH WARNINGS"
 }
 
@@ -385,7 +387,11 @@ report_warnings_only_is_success_with_warnings() {
     expect_eq "$(J .exitCode)" SUCCESS_WITH_WARNINGS
     expect_eq "$(J '.outputValidation.issues[0].code')" STUDY_WARNINGS
     expect_file_has "$(MDFILE)" "## Studies with warnings"
-    expect_file_has "$(MDFILE)" "| phs000002 | no unmapped hpds ids | 2 | 0 |"
+    expect_file_has "$(MDFILE)" "| phs000002 | job reported SUCCESS_WITH_WARNINGS; no unmapped hpds ids | 2 | 0 |"
+    # The stage report's warnings make the standard report checks pass with warnings (UNSTABLE).
+    RC=0; OUT=$("$COMMON/validate-report.sh" "$T/report/split-allconcepts-report-build-1.json" 2>&1) || RC=$?
+    expect_rc 10
+    expect_out "[warn] job reported SUCCESS_WITH_WARNINGS"
 }
 
 report_mixed_stage_is_failed_and_puts_each_failure_first_with_where_to_look() {
@@ -444,9 +450,11 @@ report_data_failures_only_exclude_the_studies_and_succeed_with_warnings() {
     expect_eq "$(J '.metrics.rerunStudyIds | length')" 0
     expect_eq "$(J '[.inputValidation.issues[], .outputValidation.issues[] | select(.severity == "ERROR")] | length')" 0
     expect_file_has "$(MDFILE)" "3 were excluded for data problems (listed below, and left out of the later stages)."
-    # No ERROR issues, so the standard report checks pass; the exclusions are listed as warnings.
+    # No ERROR issues, so the standard report checks pass, with warnings (exit 10, UNSTABLE): the
+    # exclusions are WARNING issues.
     RC=0; OUT=$("$COMMON/validate-report.sh" "$T/report/split-allconcepts-report-build-1.json" 2>&1) || RC=$?
-    expect_rc 0
+    expect_rc 10
+    expect_out "[warn] validation warnings: 3 (see details below)"
     expect_out "STUDY_EXCLUDED"
 }
 

@@ -8,9 +8,9 @@
 # Data lives in the same account as the runners, so no cross-account role is assumed: every
 # instance does all S3 and SSM work as iam_role_name.
 
-aws_region       = "us-east-1"
-aws_account_id   = "515157839325"
-stack_s3_bucket  = "bdc-etl-data-d0d6191"
+aws_region      = "us-east-1"
+aws_account_id  = "515157839325"
+stack_s3_bucket = "bdc-etl-data-d0d6191"
 # SRCE RHEL9 golden image, the same AMI the pheno ETL environment's runners and Jenkins host use
 # (avillach-jenkins-bdc-etl: pipelines/hpds-ingest/terraform/hpds-ingest.tfvars). Its container
 # runtime is podman; the bootstraps enable it through /opt/srce/startup.config.

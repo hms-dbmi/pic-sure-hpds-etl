@@ -1,50 +1,83 @@
 #!/bin/bash
-# Post-run validation for merge-allconcepts.
-# Checks the JSON report for expected fields.
 #
-# Exit codes:
-#   0  = pass
-#   10 = warnings
-#   1  = hard failure
-set -euo pipefail
+# Post-run validation for merge-allconcepts, over the artifacts fetched from the runner's S3
+# report prefix:
+#   merge-allconcepts-<runId>.json           the JobResult
+#   merge-allconcepts-<runId>-folders.json   every folder's outcome; only written when the run failed
+#
+# Runs the standard report checks, then asserts that the merge metrics agree with each other and
+# with the per-folder actions.
+#
+# Usage: validate.sh <reports-dir> <run-id>
+# Exit:  0 clean | 10 clean but with warnings | 1 failed | 64 usage
+set -uo pipefail
 
-REPORTS_DIR="${1:?Usage: validate.sh <reports-dir> <run-id>}"
-RUN_ID="${2:?Usage: validate.sh <reports-dir> <run-id>}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../common/lib.sh
+source "$HERE/../common/lib.sh"
 
-REPORT="$REPORTS_DIR/merge-allconcepts-${RUN_ID}.json"
-
-if [[ ! -f "$REPORT" ]]; then
-    echo "FAIL: no report at $REPORT. The job writes it as it finishes, so the job stopped early (timeout, crash or lost instance); its exit code and runner log say why."
-    exit 1
+REPORTS="${1:-}"
+RUN_ID="${2:-}"
+if [[ -z "$REPORTS" || -z "$RUN_ID" ]]; then
+  echo "usage: $0 <reports-dir> <run-id>" >&2
+  exit 64
 fi
 
-echo "--- Report: $REPORT ---"
-jq . "$REPORT"
+REPORT="$REPORTS/merge-allconcepts-$RUN_ID.json"
+FOLDERS="$REPORTS/merge-allconcepts-$RUN_ID-folders.json"
 
-STATUS=$(jq -r '.status' "$REPORT")
-if [[ "$STATUS" != "SUCCESS" && "$STATUS" != "SUCCESS_WITH_WARNINGS" ]]; then
-    echo "FAIL: job status is $STATUS"
-    exit 1
+echo "=========================================================="
+echo " merge-allconcepts validation (run $RUN_ID)"
+echo "=========================================================="
+
+"$HERE/../common/validate-report.sh" "$REPORT"
+case $? in
+  0)  echo "  [ok]   standard report checks"; _PASS=$((_PASS + 1)) ;;
+  10) echo "  [warn] standard report checks (warnings above)"; _WARN=$((_WARN + 1)) ;;
+  *)  echo "  [FAIL] standard report checks"; _FAIL=$((_FAIL + 1)) ;;
+esac
+
+if [[ -f "$FOLDERS" ]]; then
+  # A failed run: its report has no metrics, so show what each folder did.
+  note "the run failed; per-folder outcomes from $(basename "$FOLDERS"):"
+  jq -r '(.actions // {}) | to_entries[]
+         | "         \(.key): \(.value.action)\(if .value.error then " -- \(.value.error)" else "" end)"' "$FOLDERS"
+  fail "$(jq -r '.foldersFailed' "$FOLDERS") of $(jq -r '.consentFoldersDiscovered' "$FOLDERS") consent folder(s) failed"
 fi
 
-FOLDERS_MERGED=$(jq -r '.metrics.foldersMerged // 0' "$REPORT")
-FOLDERS_SKIPPED=$(jq -r '.metrics.foldersSkipped // 0' "$REPORT")
-FOLDERS_REMOVED=$(jq -r '.metrics.foldersRemoved // 0' "$REPORT")
-
-echo "Studies checked: $(jq -r '.metrics.studiesChecked // 0' "$REPORT")"
-echo "Folders merged: $FOLDERS_MERGED"
-echo "Folders skipped (up to date): $FOLDERS_SKIPPED"
-echo "Folders whose MERGED file was removed (no sources left): $FOLDERS_REMOVED"
-echo "Per-folder actions:"
-jq -r '(.metrics.actions // {}) | to_entries[] | "  \(.key): \(.value.action) (\(.value.sourceFileCount) source(s))"' "$REPORT"
-
-# Check for warnings in output validation
-WARNINGS=$(jq -r '.outputValidation.counts.warning // 0' "$REPORT")
-if [[ "$WARNINGS" -gt 0 ]]; then
-    echo "WARNING: $WARNINGS warning(s) in output validation"
-    jq -r '.outputValidation.issues[] | select(.severity == "WARNING") | "  \(.code): \(.message)"' "$REPORT"
-    exit 10
+if [[ ! -f "$REPORT" ]] || [[ "$(jq -r '.metrics.consentFoldersDiscovered // "absent"' "$REPORT")" == "absent" ]]; then
+  summary
+  exit 1
 fi
 
-echo "PASS: $FOLDERS_MERGED folder(s) merged, $FOLDERS_SKIPPED already up to date"
-exit 0
+m() { jq -r ".metrics.$1 // 0" "$REPORT"; }
+# Number of folders in .metrics.actions whose action is one of the given names.
+actions() {
+  jq -r --arg names "$*" \
+    '($names | split(" ")) as $n | [(.metrics.actions // {})[] | select(.action as $a | $n | any(. == $a))] | length' \
+    "$REPORT"
+}
+
+DISCOVERED=$(m consentFoldersDiscovered)
+MERGED=$(m foldersMerged)
+SKIPPED=$(m foldersSkipped)
+REMOVED=$(m foldersRemoved)
+FILES=$(m totalFilesMerged)
+LISTED=$(jq -r '(.metrics.actions // {}) | length' "$REPORT")
+
+note "studies checked: $(m studiesChecked); consent folders: $DISCOVERED"
+note "merged: $MERGED ($FILES source file(s)); up to date: $SKIPPED; MERGED removed: $REMOVED"
+echo "  Per-folder actions:"
+jq -r '(.metrics.actions // {}) | to_entries[] | "         \(.key): \(.value.action) (\(.value.sourceFileCount) source(s))"' "$REPORT"
+
+# Every discovered folder has exactly one action, so the per-action counts sum to the total.
+check "one action per consent folder ($LISTED listed, $DISCOVERED discovered)" test "$LISTED" -eq "$DISCOVERED"
+check "foldersMerged ($MERGED) = MISSING + NO_FINGERPRINT + SOURCES_CHANGED actions" \
+  test "$(actions MISSING NO_FINGERPRINT SOURCES_CHANGED)" -eq "$MERGED"
+check "foldersSkipped ($SKIPPED) = UP_TO_DATE actions" test "$(actions UP_TO_DATE)" -eq "$SKIPPED"
+check "foldersRemoved ($REMOVED) = REMOVED_NO_SOURCES actions" test "$(actions REMOVED_NO_SOURCES)" -eq "$REMOVED"
+check "no FAILED action in a finished run" test "$(actions FAILED)" -eq 0
+# Every merged folder has at least one source file.
+check "totalFilesMerged ($FILES) >= foldersMerged ($MERGED)" test "$FILES" -ge "$MERGED"
+
+summary

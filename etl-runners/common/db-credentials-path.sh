@@ -1,15 +1,15 @@
 #!/bin/bash
 #
-# Prints where the Jenkins server keeps the participant database's credentials for <env>.
-# The one place that path is defined: participant-db-start writes it (via
-# ../participant-db/lib.sh), require-db.sh checks it, and common.mk hands it to DB-backed runners.
-#
-# The file lives on the Jenkins server, outside every workspace, so all jobs on that server
-# share it. Jobs on a different agent would not see it.
+# Prints the name of the SSM parameter that holds the participant database's app credentials for
+# <env>. The parameter is a SecureString whose value is
+#   {"engine":"postgres","host":…,"port":…,"dbname":…,"schema":…,"username":…,"password":…,"container":…}
+# This is the one place the name is defined. participant-db-start publishes the parameter (through
+# ../participant-db/lib.sh), require-db.sh reads it, and DB-backed runners fetch it at boot.
+# Every pipeline run's start rotates the password, so no other copy of it is kept (in particular,
+# none on the Jenkins server).
 #
 # Usage: db-credentials-path.sh <env>
-#        HPDS_ETL_CREDENTIALS_DIR overrides the directory (default ~/.hpds-etl).
 set -euo pipefail
 
 ENV_NAME="${1:?usage: db-credentials-path.sh <env>}"
-echo "${HPDS_ETL_CREDENTIALS_DIR:-$HOME/.hpds-etl}/participant-db-$ENV_NAME.json"
+echo "/hpds-etl/$ENV_NAME/participant-db/app-credentials"

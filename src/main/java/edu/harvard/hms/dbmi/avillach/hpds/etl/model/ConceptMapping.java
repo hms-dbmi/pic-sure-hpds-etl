@@ -10,7 +10,7 @@ import java.util.stream.Stream;
 
 /**
  * One row in a mapping CSV: ties a (filename, columnIndex) pair to a concept path and
- * data type. The mapping CSV is headerless, comma-separated, with 5 positional columns:
+ * data type. The mapping CSV is headerless (a header row is tolerated), comma-separated, with 5 positional columns:
  * key (filename:colIndex), rootNode (concept path), supPath, dataType (TEXT/NUMERIC), options.
  *
  * @param fileName    the decoded-data CSV filename (extracted from key)
@@ -56,6 +56,8 @@ public record ConceptMapping(
         }
     }
 
+    private static final java.util.regex.Pattern HEADER_KEY = java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9_ ]*");
+
     /** Mappings parsed from a mapping CSV, plus how many rows were dropped as unusable. */
     public record Parsed(List<ConceptMapping> mappings, long droppedRows) {
     }
@@ -66,38 +68,48 @@ public record ConceptMapping(
 
     /**
      * Like {@link #parse}, but also counts the rows it drops: fewer than 4 columns, a key that is
-     * not {@code file:int}, or a blank root node.
+     * not {@code file:int}, or a blank root node. Blank lines are skipped without being counted,
+     * and so is a header row: the first non-blank row, when its key is a bare column title
+     * (letters, digits, spaces, underscores -- no {@code :} or {@code .}).
      */
     public static Parsed parseWithStats(InputStream in, DelimitedReader reader) {
         List<ConceptMapping> mappings = new ArrayList<>();
         long droppedRows = 0;
+        boolean firstRow = true;
         try (Stream<List<String>> rows = reader.streamRows(in, DelimitedReader.COMMA)) {
             for (List<String> row : (Iterable<List<String>>) rows::iterator) {
+                if (row.stream().allMatch(cell -> cell.replace("\"", "").isBlank())) {
+                    continue;
+                }
+                boolean headerCandidate = firstRow;
+                firstRow = false;
+
+                String key = row.get(0).replace("\"", "").trim();
+                String[] keyParts = key.split(":");
+                int colIdx;
+                try {
+                    colIdx = keyParts.length == 2 ? Integer.parseInt(keyParts[1].trim()) : -1;
+                } catch (NumberFormatException e) {
+                    colIdx = -1;
+                }
+                if (colIdx < 0) {
+                    // Only a column title (a bare word, e.g. KEY) is taken for a header; a mistyped
+                    // first mapping like "file.csv:x" is still counted as dropped.
+                    if (!(headerCandidate && HEADER_KEY.matcher(key).matches())) {
+                        droppedRows++;
+                    }
+                    continue;
+                }
                 if (row.size() < 4) {
                     droppedRows++;
                     continue;
                 }
-                String key = row.get(0).replace("\"", "").trim();
+                String fileName = keyParts[0];
                 String rootNode = row.get(1).replace("\"", "").trim();
                 String dataTypeStr = row.get(3).replace("\"", "").trim();
                 String options = row.size() > 4 ? row.get(4).replace("\"", "").trim() : "";
 
-                String[] keyParts = key.split(":");
-                if (keyParts.length != 2) {
-                    droppedRows++;
-                    continue;
-                }
-
-                String fileName = keyParts[0];
-                int colIdx;
-                try {
-                    colIdx = Integer.parseInt(keyParts[1].trim());
-                } catch (NumberFormatException e) {
-                    droppedRows++;
-                    continue;
-                }
-
-                if (rootNode.isEmpty()) {
+                if (fileName.isBlank() || rootNode.isEmpty()) {
                     droppedRows++;
                     continue;
                 }

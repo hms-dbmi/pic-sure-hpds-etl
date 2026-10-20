@@ -8,6 +8,10 @@
 #                  restore point is untouched, and the live data is recorded dirty, so by default
 #                  the next start restores the clean backup (IF_LAST_RUN_FAILED)
 #
+# A pipeline run's start (start.sh with RUN_ID) already recorded the live data dirty, so a run that
+# never gets here (killed, agent lost, this backup failing) still counts as failed: only
+# promote=true records it clean.
+#
 # The bucket must be versioned: each overwrite keeps the previous dump as an older version.
 #
 # Usage:  backup.sh <env> <promote: true|false>
@@ -24,6 +28,12 @@ PROMOTE="${2:?usage: backup.sh <env> <promote: true|false>}"
 case "$PROMOTE" in true|false) ;; *) pdb_die "promote must be true or false, got '$PROMOTE'" ;; esac
 
 pdb_require_versioning
+# A replace that did not finish leaves a partial restore up. Dumping it would put it over the
+# clean restore point (promote=true), or mark it dirty so the next start saves it over
+# participant_db_pre_overwrite.tar, the replaced database's copy (promote=false).
+LIVE_RECORD=$(pdb_read_live_record) || exit 1
+[[ "$(jq -r .state <<<"$LIVE_RECORD")" != replacing ]] \
+    || pdb_die "the live database is a partial restore (a participant-db-start replace did not finish), so nothing was dumped. Re-run participant-db-start first."
 STATE=$(pdb_state)
 [[ "$STATE" == up ]] || pdb_die "$CONTAINER is $STATE, so nothing was dumped. Its data is still in volume $VOLUME; start the container (or run participant-db-start) and re-run this backup."
 

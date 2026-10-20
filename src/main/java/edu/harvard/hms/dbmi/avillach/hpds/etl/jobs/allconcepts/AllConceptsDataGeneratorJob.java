@@ -9,6 +9,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExpectations;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsCsvBuilder;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsRow;
@@ -21,7 +22,11 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -41,7 +46,6 @@ import java.util.stream.Stream;
 public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGeneratorJob.Output> {
 
     private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
-    private static final Pattern CONSENT_FOLDER_PATTERN = Pattern.compile("c[^/]+");
     private static final Set<String> NULL_EQUIVALENTS = Set.of(
             "null", "na", "n/a", "nan", "nil", "nill");
 
@@ -111,6 +115,12 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         String mappingUri = ctx.require("mapping");
         String outputDir = normalizeDir(ctx.require("output"));
         boolean skipAnalysis = ctx.getBoolean("skip-analysis", false);
+
+        // Overwrites and stale-file deletes are only recoverable on a versioned bucket. Pre-flight
+        // checks this too, but a standalone or orchestrated run must not depend on it.
+        if (io.isS3(outputDir)) {
+            io.requireVersioning(outputDir);
+        }
 
         List<Consent> consents = consentRepository.findByStudyId(studyId);
         if (consents.isEmpty()) {
@@ -196,53 +206,80 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 continue;
             }
 
-            String consentLabel = "c" + consentCode;
-            String outputFile = outputFileFor(outputDir, studyId, consentLabel);
-            byte[] csv = builder.build();
-            io.writeOutput(outputFile, csv);
-            rowsPerConsent.put("c" + consentCode, (long) builder.size());
+            String consentLabel = AllConceptsLayout.consentLabel(consentCode);
+            String outputFile = AllConceptsLayout.consentFile(outputDir, studyId, consentLabel);
+            // Streamed (spooled to a temp file for S3, then a multipart upload when large), so the
+            // serialized CSV is never held in memory and the 2 GiB array / 5 GiB PutObject caps
+            // do not apply.
+            io.writeOutput(outputFile, out -> writeCsv(builder, out));
+            rowsPerConsent.put(consentLabel, (long) builder.size());
             outputFiles.add(outputFile);
-            log.info("Wrote {} rows ({} bytes) to {}", builder.size(), csv.length, outputFile);
+            log.info("Wrote {} rows to {}", builder.size(), outputFile);
         }
 
-        List<String> staleFilesRemoved = removeStaleOutputs(outputDir, studyId, rowsPerConsent.keySet());
+        // A missing data file can be why a consent group came up empty; deleting its file then
+        // would turn an incomplete input into silent data loss. Decoded data files are not split by
+        // consent (each participant's consent comes from the SSTR), so a missing file could have fed
+        // any group: skip stale removal for the whole study, and leave cleanup for a full run.
+        boolean staleCleanupSkipped = !missingDataFiles.isEmpty();
+        if (staleCleanupSkipped) {
+            log.warn("Skipping stale-output removal for every consent group of study {}: {} mapped data "
+                    + "file(s) are missing", studyId, missingDataFiles.size());
+        }
+        List<String> staleFilesRemoved = new ArrayList<>();
+        List<String> staleFilesKept = new ArrayList<>();
+        removeStaleOutputs(outputDir, studyId, rowsPerConsent.keySet(), staleCleanupSkipped,
+                staleFilesRemoved, staleFilesKept);
 
         return new Output(studyId, consents.size(), participants.size(), mappings.size(),
                 rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles,
-                staleFilesRemoved, parsed.droppedRows(), malformedRows, missingDataFiles);
+                staleFilesRemoved, staleCleanupSkipped, staleFilesKept,
+                parsed.droppedRows(), malformedRows, missingDataFiles);
     }
 
-    static String outputFileFor(String outputDir, String studyId, String consentLabel) {
-        return studyAllConceptsDir(outputDir, studyId) + consentLabel + "/"
-                + studyId + "_allConcepts_" + consentLabel + ".csv";
-    }
-
-    static String studyAllConceptsDir(String outputDir, String studyId) {
-        return outputDir + studyId + "/allConcepts/";
+    private static void writeCsv(AllConceptsCsvBuilder builder, OutputStream out) throws IOException {
+        // Not closed here: IoResolver owns and closes the target stream.
+        BufferedOutputStream buffered = new BufferedOutputStream(out, 1 << 16);
+        try {
+            builder.writeTo(buffered);
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
+        buffered.flush();
     }
 
     /**
-     * Each run overwrites this study's per-consent files in place (the output bucket is
-     * versioned, so the previous version stays recoverable). A consent group that produced
-     * rows last time but none now -- emptied by the data, or gone after an SSTR reload -- would
-     * otherwise keep last run's file and keep being merged. Removes exactly this job's own file
-     * in every other consent folder of the study; files other sources write into the same
-     * folders are never touched.
+     * Each run's output fully replaces the study's earlier per-consent allConcepts output, whichever
+     * job wrote it: the migration's split-allconcepts writes the same
+     * {@code {study}_allConcepts_c{code}.csv} names on purpose (a second name would make
+     * merge-allconcepts concatenate both and duplicate rows). Written groups are overwritten in
+     * place (the output bucket is versioned, so the previous version stays recoverable). A consent
+     * group that produced rows last time but none now -- emptied by the data, or gone after an
+     * SSTR reload -- would otherwise keep that file and keep being merged, so this removes the
+     * {@code {study}_allConcepts_c{code}.csv} in every other consent folder of the study -- unless
+     * {@code keepAll} (a mapped data file is missing), when every such stale file is kept and listed
+     * in {@code kept}. Files with any other name in those folders are left alone.
      */
-    private List<String> removeStaleOutputs(String outputDir, String studyId, Set<String> writtenLabels) {
-        List<String> removed = new ArrayList<>();
-        for (String folder : io.listDirectoryNames(studyAllConceptsDir(outputDir, studyId))) {
-            if (!CONSENT_FOLDER_PATTERN.matcher(folder).matches() || writtenLabels.contains(folder)) {
+    private void removeStaleOutputs(String outputDir, String studyId, Set<String> writtenLabels,
+                                    boolean keepAll, List<String> removed, List<String> kept) {
+        for (String folder : io.listDirectoryNames(AllConceptsLayout.studyAllConceptsDir(outputDir, studyId))) {
+            if (!AllConceptsLayout.CONSENT_FOLDER_PATTERN.matcher(folder).matches() || writtenLabels.contains(folder)) {
                 continue;
             }
-            String stale = outputFileFor(outputDir, studyId, folder);
-            if (io.exists(stale)) {
-                io.delete(stale);
-                removed.add(stale);
-                log.warn("Removed stale {}: consent group {} produced no rows this run", stale, folder);
+            String stale = AllConceptsLayout.consentFile(outputDir, studyId, folder);
+            if (!io.exists(stale)) {
+                continue;
             }
+            if (keepAll) {
+                kept.add(stale);
+                log.warn("Kept stale {}: consent group {} produced no rows this run, but a mapped data file "
+                        + "is missing", stale, folder);
+                continue;
+            }
+            io.delete(stale);
+            removed.add(stale);
+            log.warn("Removed stale {}: consent group {} produced no rows this run", stale, folder);
         }
-        return removed;
     }
 
     private AllConceptsRow buildConceptRow(String hpdsId, ConceptMapping mapping, String cellValue) {
@@ -476,11 +513,19 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         output.staleFilesRemoved().forEach(file ->
                 report.warning("STALE_OUTPUT_REMOVED",
                         "removed " + file + ": its consent group produced no rows this run"));
-        // INFO rather than WARNING: a missing data file is tolerated by design (the mapping may name
-        // files a study's decoded data does not include), but it should still be visible.
+        // A missing data file does not fail the run, but the consent files just written lack its
+        // concepts and are smaller than they should be, so it has to be looked at.
         output.missingDataFiles().forEach(file ->
-                report.info("MISSING_DATA_FILE",
+                report.warning("MISSING_DATA_FILE",
                         file + " is named in the mapping but does not exist; its concepts were not generated"));
+        if (output.staleCleanupSkipped()) {
+            report.add(ValidationIssue.warning("STALE_CLEANUP_SKIPPED",
+                    "stale-file removal was skipped for the whole study: " + output.missingDataFiles().size()
+                            + " mapped data file(s) are missing, and decoded data files are not split by consent, "
+                            + "so any consent group could have lost rows; kept " + output.staleFilesKept().size()
+                            + " stale file(s) from earlier runs",
+                    Map.of("staleFilesKept", output.staleFilesKept())));
+        }
         if (output.malformedRows() > 0) {
             report.warning("MALFORMED_ROWS", output.malformedRows()
                     + " data row(s) had a column count different from their file's header and were skipped");
@@ -506,6 +551,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 .metric("rowsPerConsent", output.rowsPerConsent())
                 .metric("outputFiles", output.outputFiles())
                 .metric("staleFilesRemoved", output.staleFilesRemoved())
+                .metric("staleCleanupSkipped", output.staleCleanupSkipped())
+                .metric("staleFilesKept", output.staleFilesKept())
                 .metric("mappingRowsDropped", output.mappingRowsDropped())
                 .metric("malformedRows", output.malformedRows())
                 .metric("missingDataFiles", output.missingDataFiles());
@@ -522,6 +569,10 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             Map<String, Long> rowsPerConsent,
             List<String> outputFiles,
             List<String> staleFilesRemoved,
+            // true when stale removal was skipped for the whole study (a mapped data file is missing)
+            boolean staleCleanupSkipped,
+            // the stale files then left in place
+            List<String> staleFilesKept,
             long mappingRowsDropped,
             long malformedRows,
             List<String> missingDataFiles

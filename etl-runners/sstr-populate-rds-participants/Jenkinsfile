@@ -23,13 +23,13 @@
 //   --study-id     phs###### (params.STUDY_ID)
 //   --input        the SSTR TSV, local or s3:// (params.INPUT)
 //   --batch-size   rows per batch insert (params.BATCH_SIZE)
-//   RDS credentials read from the copy participant-db-start saved on the Jenkins server and
-//                   passed to the runner as a sensitive Terraform variable
+//   RDS credentials read by the runner at boot from the SSM parameter
+//                   /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
 //   RDS rows in participants / consents / samples for this study
 //   sstr-populate-rds-participants-<runId>.json with rowsRead, distinctParticipants,
-//   participantsInserted, consentsWritten, samplesInserted, and countsByConsentGroup.
+//   participantsInserted, consentsWritten, samplesSeen, samplesInserted, and countsByConsentGroup.
 //   Archived on this build and left in S3 under the runner's report prefix.
 //
 // Exit codes (see ExitCode.java)
@@ -38,9 +38,10 @@
 //
 // Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, and the
 // bdc-etl-jenkins-role instance profile.
+//
 // Runner image
 //   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
-//   the permanent orchestrator (/Jenkinsfile) runs one of these per study, so it builds the image once and
+//   The permanent orchestrator (/Jenkinsfile) runs one of these per study, so it builds the image once and
 //   passes it as PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball,
 //   and leaves deleting it to the orchestrator.
 // =============================================================================
@@ -54,6 +55,8 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the permanent orchestrator (/Jenkinsfile) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         // Concurrency is deliberately ALLOWED so the orchestrator can load several studies at
         // once. Study-scoped work is isolated (the purge is scoped to one study_id; resource
@@ -343,6 +346,11 @@ pipeline {
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }

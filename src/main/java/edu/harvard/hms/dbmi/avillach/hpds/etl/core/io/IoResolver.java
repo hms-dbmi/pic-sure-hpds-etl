@@ -2,6 +2,7 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.core.io;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.EtlException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,11 +11,13 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetBucketVersioningRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
@@ -35,6 +38,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 /**
@@ -61,6 +66,29 @@ public class IoResolver {
 
     public boolean isS3(String uri) {
         return uri != null && uri.startsWith(S3_PREFIX);
+    }
+
+    /**
+     * Fails unless the bucket of an {@code s3://} location has versioning {@code Enabled}, for
+     * jobs that overwrite or delete in place and rely on versioning to keep the previous version
+     * recoverable. S3 only; callers skip it for local outputs. merge-allconcepts' and the manifest's
+     * {@code AllConceptsFolders.requireVersioning} delegates here.
+     */
+    public void requireVersioning(String uri) {
+        if (!isS3(uri)) {
+            throw new ConfigException("Versioning check needs an s3:// location, got: " + uri);
+        }
+        String bucket = S3Uri.parsePrefix(uri).bucket();
+        BucketVersioningStatus status;
+        try {
+            status = s3.getBucketVersioning(GetBucketVersioningRequest.builder().bucket(bucket).build()).status();
+        } catch (RuntimeException e) {
+            throw new InfrastructureException("Could not read the versioning status of bucket " + bucket, e);
+        }
+        if (status != BucketVersioningStatus.ENABLED) {
+            throw new ConfigException("Bucket " + bucket + " must have versioning Enabled (is "
+                    + (status == null ? "never enabled" : status) + ")");
+        }
     }
 
     /** Opens an input stream for reading. Caller must close it. */
@@ -115,8 +143,15 @@ public class IoResolver {
                         .contentLength();
             } catch (NoSuchKeyException e) {
                 return -1;
+            } catch (S3Exception e) {
+                // A HEAD has no body to carry an error code, so a missing key may surface as a
+                // bare 404 rather than NoSuchKeyException.
+                if (e.statusCode() == 404) {
+                    return -1;
+                }
+                throw classifyS3Failure("size lookup", "Failed to read the size of S3 object: " + uri, uri, e);
             } catch (RuntimeException e) {
-                throw new InfrastructureException("Failed to read the size of S3 object: " + uri, e);
+                throw classifyS3Failure("size lookup", "Failed to read the size of S3 object: " + uri, uri, e);
             }
         }
         Path path = toLocalPath(uri);
@@ -141,7 +176,7 @@ public class IoResolver {
                 s3.deleteObject(DeleteObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).build());
                 log.info("Deleted S3 object {}", uri);
             } catch (RuntimeException e) {
-                throw new InfrastructureException("Failed to delete from S3: " + uri, e);
+                throw classifyS3Failure("delete", "Failed to delete from S3: " + uri, uri, e);
             }
             return;
         }
@@ -239,10 +274,19 @@ public class IoResolver {
     // comfortable margin under the cap. Each upload in flight holds one part in memory, so
     // 64 MiB parts let several run at once on a small runner (merge-allconcepts uploads up to
     // --parallelism files concurrently) while keeping the count well inside S3's 10,000 parts
-    // (a 34 GiB consent file is 544; the cap is 625 GiB).
+    // (a 34 GiB consent file is 544). Past 625 GiB the part size grows to stay under 10,000;
+    // see partSizeFor.
     // Non-final so the LocalStack IT can lower them and exercise multipart with small files.
-    private long multipartThresholdBytes = 4L * 1024 * 1024 * 1024;
-    private int multipartPartSizeBytes = 64 * 1024 * 1024;
+    static final long DEFAULT_MULTIPART_THRESHOLD_BYTES = 4L * 1024 * 1024 * 1024;
+    static final int DEFAULT_MULTIPART_PART_SIZE_BYTES = 64 * 1024 * 1024;
+    /** S3's limit on the number of parts in one multipart upload. */
+    static final int MAX_PARTS = 10_000;
+    /** S3's limit on one object's size. */
+    static final long MAX_OBJECT_BYTES = 5L * 1024 * 1024 * 1024 * 1024;
+    private static final long PART_SIZE_ROUNDING_BYTES = 1024 * 1024;
+
+    private long multipartThresholdBytes = DEFAULT_MULTIPART_THRESHOLD_BYTES;
+    private int multipartPartSizeBytes = DEFAULT_MULTIPART_PART_SIZE_BYTES;
 
     void setMultipartThresholdBytes(long bytes) {
         this.multipartThresholdBytes = bytes;
@@ -250,6 +294,22 @@ public class IoResolver {
 
     void setMultipartPartSizeBytes(int bytes) {
         this.multipartPartSizeBytes = bytes;
+    }
+
+    /** Restores the production threshold and part size after a test lowered them. */
+    void resetMultipartDefaults() {
+        this.multipartThresholdBytes = DEFAULT_MULTIPART_THRESHOLD_BYTES;
+        this.multipartPartSizeBytes = DEFAULT_MULTIPART_PART_SIZE_BYTES;
+    }
+
+    /**
+     * The part size for a multipart upload of {@code length} bytes: the configured size, or the
+     * smallest whole MiB that keeps the upload within {@link #MAX_PARTS}, whichever is larger.
+     */
+    static long partSizeFor(long length, long configuredPartSize) {
+        long minimum = (length + MAX_PARTS - 1) / MAX_PARTS;
+        long rounded = (minimum + PART_SIZE_ROUNDING_BYTES - 1) / PART_SIZE_ROUNDING_BYTES * PART_SIZE_ROUNDING_BYTES;
+        return Math.max(configuredPartSize, rounded);
     }
 
     /**
@@ -284,6 +344,10 @@ public class IoResolver {
             throw new ConfigException("Streamed output needs an s3:// target, got: " + uri);
         }
         S3Uri s3Uri = S3Uri.parse(uri);
+        // The SDK reads a single-put body through its own exactly-length-bytes window, so an
+        // over-long stream would be silently truncated and a short one surfaces wrapped in an SDK
+        // exception. The checked stream records a mismatch here, whatever the SDK wraps it in.
+        AtomicReference<LengthMismatchException> mismatch = new AtomicReference<>();
         try {
             String versionId;
             if (length < multipartThresholdBytes) {
@@ -291,7 +355,7 @@ public class IoResolver {
                         PutObjectRequest.builder().bucket(s3Uri.bucket()).key(s3Uri.key()).metadata(metadata).build(),
                         RequestBody.fromContentProvider(() -> {
                             try {
-                                return content.open();
+                                return new LengthCheckedInputStream(content.open(), length, mismatch);
                             } catch (IOException e) {
                                 throw new UncheckedIOException(e);
                             }
@@ -301,10 +365,99 @@ public class IoResolver {
             }
             log.info("Uploaded {} bytes to S3 {} (version {})", length, uri, versionId);
             return versionId;
-        } catch (IOException | UncheckedIOException e) {
-            throw new InfrastructureException("Failed to write to S3: " + uri, e);
-        } catch (RuntimeException e) {
-            throw classifyS3WriteFailure(uri, e);
+        } catch (IOException | RuntimeException e) {
+            if (mismatch.get() != null) {
+                throw lengthMismatch(uri, mismatch.get());
+            }
+            if (e instanceof IOException || e instanceof UncheckedIOException) {
+                throw new InfrastructureException("Failed to write to S3: " + uri, e);
+            }
+            throw classifyS3WriteFailure(uri, (RuntimeException) e);
+        }
+    }
+
+    /**
+     * The content did not have the length the caller declared. The same source yields the same
+     * bytes on every open, so this is a bug in the caller, not something a retry can fix.
+     */
+    private static DataException lengthMismatch(String uri, LengthMismatchException e) {
+        return new DataException("Content for " + uri + " does not match its declared length: " + e.getMessage(), e);
+    }
+
+    /** Thrown by {@link LengthCheckedInputStream} when the stream is shorter or longer than declared. */
+    static final class LengthMismatchException extends IOException {
+        LengthMismatchException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Passes through exactly {@code expected} bytes and fails if the underlying stream holds fewer
+     * or more. Over-run is detected by probing for one more byte as soon as the last expected byte
+     * is read, so it fails even for a reader (like the SDK's) that never asks past the length.
+     * The first mismatch is also recorded in {@code seen}, if given.
+     */
+    static final class LengthCheckedInputStream extends InputStream {
+        private final InputStream in;
+        private final long expected;
+        private final AtomicReference<LengthMismatchException> seen;
+        private final byte[] one = new byte[1];
+        private long count;
+        private boolean endVerified;
+
+        LengthCheckedInputStream(InputStream in, long expected, AtomicReference<LengthMismatchException> seen) {
+            this.in = in;
+            this.expected = expected;
+            this.seen = seen;
+        }
+
+        @Override
+        public int read() throws IOException {
+            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xff;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            Objects.checkFromIndexSize(off, len, b.length);
+            if (count == expected) {
+                verifyEnd();
+                return -1;
+            }
+            if (len == 0) {
+                return 0;
+            }
+            int n = in.read(b, off, (int) Math.min(len, expected - count));
+            if (n < 0) {
+                throw fail("expected " + expected + " bytes but the stream ended after " + count);
+            }
+            count += n;
+            if (count == expected) {
+                verifyEnd();
+            }
+            return n;
+        }
+
+        private void verifyEnd() throws IOException {
+            if (endVerified) {
+                return;
+            }
+            if (in.read() >= 0) {
+                throw fail("expected " + expected + " bytes but the stream holds more");
+            }
+            endVerified = true;
+        }
+
+        private LengthMismatchException fail(String message) {
+            LengthMismatchException e = new LengthMismatchException(message);
+            if (seen != null) {
+                seen.compareAndSet(null, e);
+            }
+            return e;
+        }
+
+        @Override
+        public void close() throws IOException {
+            in.close();
         }
     }
 
@@ -320,16 +473,22 @@ public class IoResolver {
      */
     private String uploadMultipart(String bucket, String key, long size, Map<String, String> metadata,
                                    ContentSource content) throws IOException {
+        if (size > MAX_OBJECT_BYTES) {
+            throw new DataException("s3://" + bucket + "/" + key + " would be " + size
+                    + " bytes, over S3's " + MAX_OBJECT_BYTES + " byte object limit");
+        }
+        // Fits an int: at the 5 TiB object cap this is 525 MiB.
+        int partSize = (int) partSizeFor(size, multipartPartSizeBytes);
         String uploadId = s3.createMultipartUpload(
                 CreateMultipartUploadRequest.builder().bucket(bucket).key(key).metadata(metadata).build()).uploadId();
         log.info("Multipart upload {} started for s3://{}/{} ({} bytes, {} byte parts)",
-                uploadId, bucket, key, size, multipartPartSizeBytes);
+                uploadId, bucket, key, size, partSize);
         try {
             List<CompletedPart> parts = new ArrayList<>();
-            byte[] buffer = new byte[multipartPartSizeBytes];
+            byte[] buffer = new byte[partSize];
             int partNumber = 1;
-            long total = 0;
-            try (InputStream in = new BufferedInputStream(content.open())) {
+            try (InputStream in = new LengthCheckedInputStream(
+                    new BufferedInputStream(content.open()), size, null)) {
                 while (true) {
                     int filled = 0;
                     while (filled < buffer.length) {
@@ -352,14 +511,10 @@ public class IoResolver {
                             .eTag();
                     parts.add(CompletedPart.builder().partNumber(partNumber).eTag(etag).build());
                     partNumber++;
-                    total += filled;
                     if (filled < buffer.length) {
                         break;
                     }
                 }
-            }
-            if (total != size) {
-                throw new IOException("Expected " + size + " bytes for s3://" + bucket + "/" + key + " but read " + total);
             }
             var completed = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket).key(key).uploadId(uploadId)
@@ -379,6 +534,9 @@ public class IoResolver {
                 log.warn("Could not abort multipart upload {} for s3://{}/{}: {}",
                         uploadId, bucket, key, abortFailure.getMessage());
             }
+            if (e instanceof LengthMismatchException mismatch) {
+                throw lengthMismatch("s3://" + bucket + "/" + key, mismatch);
+            }
             throw e;
         }
     }
@@ -393,14 +551,31 @@ public class IoResolver {
      * rejected identically, so it must not map to the retryable INFRASTRUCTURE exit.
      */
     private RuntimeException classifyS3WriteFailure(String uri, RuntimeException e) {
+        return classifyS3Failure("write", "Failed to write to S3: " + uri, uri, e);
+    }
+
+    /**
+     * As {@link #classifyS3WriteFailure}, for any S3 call: a 4xx (bar 429) is a {@link DataException}
+     * naming {@code operation}; anything else is an {@link InfrastructureException} with
+     * {@code infraMessage}.
+     */
+    private RuntimeException classifyS3Failure(String operation, String infraMessage, String uri, RuntimeException e) {
+        if (e instanceof EtlException classified) {
+            return classified;
+        }
         if (e instanceof S3Exception s3e) {
             int status = s3e.statusCode();
             if (status >= 400 && status < 500 && status != 429) {
-                return new DataException("S3 rejected the write (" + status + ") for " + uri
-                        + ": " + s3e.awsErrorDetails().errorMessage(), e);
+                // A HEAD has no body, so its error details usually carry no message.
+                String detail = s3e.awsErrorDetails() == null ? null : s3e.awsErrorDetails().errorMessage();
+                if (detail == null || detail.isBlank()) {
+                    detail = s3e.getMessage();
+                }
+                return new DataException("S3 rejected the " + operation + " (" + status + ") for " + uri
+                        + ": " + detail, e);
             }
         }
-        return new InfrastructureException("Failed to write to S3: " + uri, e);
+        return new InfrastructureException(infraMessage, e);
     }
 
     /**

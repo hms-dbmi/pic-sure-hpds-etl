@@ -1,10 +1,9 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
-import software.amazon.awssdk.services.s3.model.GetBucketVersioningRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
@@ -23,9 +22,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.regex.Pattern;
 
 /**
  * The per-consent allConcepts folders of a study, read from a versioned S3 bucket:
@@ -41,11 +40,17 @@ import java.util.regex.Pattern;
 public class AllConceptsFolders {
 
     /** Per-study subfolder holding the per-consent folders; {@code legacy/allConcepts/} is never scanned. */
-    public static final String ALL_CONCEPTS_DIR = "allConcepts";
+    public static final String ALL_CONCEPTS_DIR = AllConceptsLayout.ALL_CONCEPTS_DIR;
     public static final String MERGED_SUFFIX = "_allConcepts_MERGED.csv";
     /** A source file's name contains this; anything else in a consent folder is ignored. */
     public static final String ALL_CONCEPTS_MARKER = "_allConcepts_";
-    private static final Pattern CONSENT_FOLDER_PATTERN = Pattern.compile("c[^/]+");
+    /**
+     * Any name ending in this, ignoring case, is a merged file, never a source: this job's
+     * {@link #MERGED_SUFFIX MERGED} output, or a merged file from an older naming scheme (e.g. a
+     * hand-copied {@code phs000001_allConcepts_merged.csv}) that would otherwise duplicate every row
+     * of the per-file sources it was built from.
+     */
+    static final String MERGED_NAME_SUFFIX_LOWER = "_merged.csv";
 
     /** User metadata on a MERGED object (S3 lower-cases these keys). */
     public static final String META_FINGERPRINT = "source-fingerprint";
@@ -59,26 +64,21 @@ public class AllConceptsFolders {
             Comparator.comparingInt(String::length).thenComparing(Comparator.naturalOrder());
 
     private final S3Client s3;
+    private final IoResolver io;
 
-    public AllConceptsFolders(S3Client s3) {
+    public AllConceptsFolders(S3Client s3, IoResolver io) {
         this.s3 = s3;
+        this.io = io;
     }
 
     /**
      * Fails unless the bucket's versioning is {@code Enabled}: change detection and the manifest's
-     * version ids both depend on it.
+     * version ids both depend on it. The check itself is {@link IoResolver#requireVersioning}'s
+     * (same messages and exit codes: config 5 for a bucket without versioning, infrastructure 4
+     * when the status cannot be read).
      */
     public void requireVersioning(String bucket) {
-        BucketVersioningStatus status;
-        try {
-            status = s3.getBucketVersioning(GetBucketVersioningRequest.builder().bucket(bucket).build()).status();
-        } catch (RuntimeException e) {
-            throw new InfrastructureException("Could not read the versioning status of bucket " + bucket, e);
-        }
-        if (status != BucketVersioningStatus.ENABLED) {
-            throw new ConfigException("Bucket " + bucket + " must have versioning Enabled (is "
-                    + (status == null ? "never enabled" : status) + ")");
-        }
+        io.requireVersioning(S3_PREFIX + bucket + "/");
     }
 
     /**
@@ -93,7 +93,7 @@ public class AllConceptsFolders {
     public Map<String, ConsentFolder> scanStudy(String base, String studyId) {
         String[] bucketAndPrefix = parseS3Prefix(normalizeDir(base));
         String bucket = bucketAndPrefix[0];
-        String studyPrefix = bucketAndPrefix[1] + studyId + "/" + ALL_CONCEPTS_DIR + "/";
+        String studyPrefix = AllConceptsLayout.studyAllConceptsDir(bucketAndPrefix[1], studyId);
 
         Map<String, FolderBuilder> builders = new TreeMap<>(CONSENT_ORDER);
         String keyMarker = null;
@@ -112,7 +112,7 @@ public class AllConceptsFolders {
                     }
                     String[] parts = v.key().substring(studyPrefix.length()).split("/");
                     // Only files directly inside a consent folder: c{code}/{file}
-                    if (parts.length != 2 || !CONSENT_FOLDER_PATTERN.matcher(parts[0]).matches()) {
+                    if (parts.length != 2 || !AllConceptsLayout.CONSENT_FOLDER_PATTERN.matcher(parts[0]).matches()) {
                         continue;
                     }
                     String consentDir = parts[0];
@@ -196,6 +196,14 @@ public class AllConceptsFolders {
         }
     }
 
+    /**
+     * True for any merged file's name, this job's or a legacy one: ends in {@code _merged.csv},
+     * ignoring case. Such files are never merge sources nor part of a {@link #fingerprint}.
+     */
+    public static boolean isMergedName(String name) {
+        return name.toLowerCase(Locale.ROOT).endsWith(MERGED_NAME_SUFFIX_LOWER);
+    }
+
     /** {@code {study_id}_c{code}_allConcepts_MERGED.csv}. */
     public static String mergedFileName(String studyId, String consentDir) {
         return studyId + "_" + consentDir + MERGED_SUFFIX;
@@ -230,10 +238,12 @@ public class AllConceptsFolders {
      * One consent folder at its current versions.
      *
      * @param prefix   key prefix of the folder, ending in {@code /}
-     * @param sources  {@code *_allConcepts_*} files other than any MERGED file, sorted by name
+     * @param sources  {@code *_allConcepts_*} files other than any merged file (any name ending in
+     *                 {@code _merged.csv}, ignoring case), sorted by name
      * @param merged   this folder's {@link #mergedFileName MERGED file}, or null if it has none
-     * @param ignored  everything else: names without the allConcepts marker, and MERGED files named
-     *                 for another study or consent
+     * @param ignored  everything else: names without the allConcepts marker, MERGED files named
+     *                 for another study or consent, and legacy merged files (e.g.
+     *                 {@code *_allConcepts_merged.csv})
      */
     public record ConsentFolder(String bucket, String prefix, String studyId, String consentDir,
                                 List<FileVersion> sources, FileVersion merged, List<String> ignored) {
@@ -252,6 +262,16 @@ public class AllConceptsFolders {
 
         public String label() {
             return studyId + "/" + ALL_CONCEPTS_DIR + "/" + consentDir;
+        }
+
+        /**
+         * The ignored allConcepts files that are merged files themselves (a legacy
+         * {@code *_allConcepts_merged.csv} copy, or another folder's MERGED file). In a folder with
+         * no sources they likely hold its data under a name that is never merged, so the folder
+         * must not be treated as simply empty.
+         */
+        public List<String> otherMergedFiles() {
+            return ignored.stream().filter(n -> n.contains(ALL_CONCEPTS_MARKER) && isMergedName(n)).toList();
         }
     }
 
@@ -274,7 +294,7 @@ public class AllConceptsFolders {
         void add(FileVersion f) {
             if (f.name().equals(mergedFileName(studyId, consentDir))) {
                 merged = f;
-            } else if (f.name().contains(ALL_CONCEPTS_MARKER) && !f.name().endsWith(MERGED_SUFFIX)) {
+            } else if (f.name().contains(ALL_CONCEPTS_MARKER) && !isMergedName(f.name())) {
                 sources.add(f);
             } else {
                 ignored.add(f.name());

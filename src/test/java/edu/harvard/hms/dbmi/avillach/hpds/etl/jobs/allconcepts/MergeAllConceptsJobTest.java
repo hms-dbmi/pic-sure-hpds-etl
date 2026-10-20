@@ -254,7 +254,33 @@ class MergeAllConceptsJobTest {
         // A delete marker: the last merged version is still recoverable.
         assertThat(s3.versionCount(MERGED_C1)).isEqualTo(2);
         assertThat(result.getOutputValidation().getIssues())
-                .anyMatch(i -> i.code().equals("MERGED_WITHOUT_SOURCES_REMOVED"));
+                .anyMatch(i -> i.code().equals("MERGED_WITHOUT_SOURCES_REMOVED")
+                        && i.message().contains("all-concepts-data-generator")
+                        && "phs000001".equals(i.context().get("studyId")) && "c1".equals(i.context().get("consent")));
+    }
+
+    /** A MERGED file written after the scan (say, by a concurrent merge) is not ours to delete. */
+    @Test
+    void does_not_delete_a_merged_file_that_changed_since_the_scan() {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        run();
+        s3.delete(C1 + "phs000001_allConcepts_c1.csv");
+        java.util.concurrent.atomic.AtomicBoolean rewritten = new java.util.concurrent.atomic.AtomicBoolean();
+        s3.beforeHead = req -> {
+            if (req.key().equals(MERGED_C1) && req.versionId() == null && !rewritten.getAndSet(true)) {
+                s3.put(MERGED_C1, "fresh\n");
+            }
+        };
+
+        JobResult result = run();
+
+        assertThat(action(result, "phs000001/allConcepts/c1")).containsEntry("action", "CHANGED_DURING_RUN");
+        // The first merge, then the concurrent write; no delete marker on top.
+        assertThat(s3.versionCount(MERGED_C1)).isEqualTo(2);
+        assertThat(s3.content(MERGED_C1)).isEqualTo("fresh\n");
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MERGED_CHANGED_DURING_RUN"));
     }
 
     @Test
@@ -294,6 +320,73 @@ class MergeAllConceptsJobTest {
         assertThat(result.getOutputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("IGNORED_FILES") && i.message().contains("notes.txt")
                         && i.message().contains("phs000009_c1_allConcepts_MERGED.csv"));
+    }
+
+    /**
+     * A merged file from the older lowercase scheme, hand-copied into a consent folder alongside
+     * the per-file sources it was built from, must not be concatenated with them (every row would
+     * be duplicated); it is ignored and reported instead.
+     */
+    @Test
+    void ignores_and_reports_a_legacy_lowercase_merged_file() {
+        s3.put(C1 + "phs000001_allConcepts_c1_a.csv", "a\n");
+        s3.put(C1 + "phs000001_allConcepts_c1_b.csv", "b\n");
+        s3.put(C1 + "phs000001_allConcepts_merged.csv", "a\nb\n");
+
+        JobResult result = run();
+
+        assertThat(s3.content(MERGED_C1)).isEqualTo("a\nb\n");
+        assertThat(action(result, "phs000001/allConcepts/c1")).containsEntry("sourceFileCount", 2);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("IGNORED_FILES")
+                        && i.message().contains("phs000001_allConcepts_merged.csv"));
+    }
+
+    /**
+     * With no sources but a legacy merged copy, the folder's data likely sits in that copy: its
+     * MERGED file is kept (not deleted as sourceless) and the folder is flagged.
+     */
+    @Test
+    void keeps_the_merged_file_and_warns_when_only_a_legacy_merged_file_remains() {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        run();
+        String mergedVersion = s3.versionId(MERGED_C1);
+        s3.delete(C1 + "phs000001_allConcepts_c1.csv");
+        s3.put(C1 + "phs000001_allConcepts_merged.csv", "a\n");
+
+        JobResult result = run();
+
+        assertThat(action(result, "phs000001/allConcepts/c1")).containsEntry("action", "ONLY_MERGED_COPIES");
+        assertThat(s3.versionId(MERGED_C1)).isEqualTo(mergedVersion);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("ONLY_MERGED_COPIES")
+                        && i.message().contains("phs000001_allConcepts_merged.csv")
+                        && i.message().contains("all-concepts-data-generator")
+                        && i.message().contains("study phs000001 consent c1")
+                        && "phs000001".equals(i.context().get("studyId")) && "c1".equals(i.context().get("consent")));
+    }
+
+    @Test
+    void ignores_merged_files_of_any_case_but_still_recognizes_its_own_merged_file() {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        s3.put(C1 + "phs000001_allConcepts_Merged.csv", "legacy\n");
+        s3.put(C1 + "phs000001_c1_allConcepts_merged.CSV", "legacy\n");
+        s3.put(C1 + "phs000001_c1_allConcepts_MERGED.csv", "stale\n");
+
+        JobResult first = run();
+
+        // Its own MERGED file is recognized (no fingerprint yet, so re-merged), not treated as a source.
+        assertThat(action(first, "phs000001/allConcepts/c1")).containsEntry("action", "NO_FINGERPRINT");
+        assertThat(s3.content(MERGED_C1)).isEqualTo("a\n");
+        assertThat(first.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("IGNORED_FILES")
+                        && i.message().contains("phs000001_allConcepts_Merged.csv")
+                        && i.message().contains("phs000001_c1_allConcepts_merged.CSV")
+                        && !i.message().contains("phs000001_c1_allConcepts_MERGED.csv"));
+
+        // Legacy merged files are outside the fingerprint: rewriting one does not trigger a re-merge.
+        s3.put(C1 + "phs000001_allConcepts_Merged.csv", "legacy, rewritten\n");
+        assertThat(action(run(), "phs000001/allConcepts/c1")).containsEntry("action", "UP_TO_DATE");
     }
 
     @Test
@@ -431,6 +524,69 @@ class MergeAllConceptsJobTest {
         assertThat(s3.exists(MERGED_C1)).isFalse();
     }
 
+    /** Serves {@code first} on the first read of a source and {@code later} on every read after. */
+    private void sourcesReadBack(String first, String later) {
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        when(s3.client.getObject(any(GetObjectRequest.class))).thenAnswer(inv -> {
+            String body = reads.getAndIncrement() == 0 ? first : later;
+            return new software.amazon.awssdk.core.ResponseInputStream<>(
+                    software.amazon.awssdk.services.s3.model.GetObjectResponse.builder().build(),
+                    software.amazon.awssdk.http.AbortableInputStream.create(
+                            new java.io.ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8))));
+        });
+    }
+
+    /**
+     * An uploader that reads exactly the content length and stops never sees end of stream, so the
+     * check must not wait for it: the same-length but different bytes must not be uploaded under
+     * the first read's md5.
+     */
+    @Test
+    void abandons_the_upload_when_a_length_capped_upload_reads_back_different_bytes() {
+        s3.lengthCappedReads = true;
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        sourcesReadBack("a\n", "z\n");
+
+        JobResult result = run();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(s3.exists(MERGED_C1)).isFalse();
+    }
+
+    @Test
+    void a_length_capped_upload_of_unchanged_sources_succeeds() {
+        s3.lengthCappedReads = true;
+        s3.put(C1 + "phs000001_allConcepts_c1_a.csv", "a1");
+        s3.put(C1 + "phs000001_allConcepts_c1_b.csv", "b1\n");
+
+        JobResult result = run();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(s3.content(MERGED_C1)).isEqualTo("a1\nb1\n");
+    }
+
+    @Test
+    void abandons_the_upload_when_the_sources_read_back_longer_or_shorter() {
+        for (String later : List.of("a\nextra\n", "")) {
+            setUpQuietly();
+            s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+            sourcesReadBack("a\n", later);
+
+            JobResult result = run();
+
+            assertThat(result.getExitCode()).as(later).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+            assertThat(s3.exists(MERGED_C1)).as(later).isFalse();
+        }
+    }
+
+    private void setUpQuietly() {
+        try {
+            setUp();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     // ---- parallelism -----------------------------------------------------------
 
     @Test
@@ -485,6 +641,55 @@ class MergeAllConceptsJobTest {
         assertThat(result.getErrorMessage()).contains("Failed to read source");
         assertThat(s3.exists(MERGED_C1)).isFalse();
         assertThat(s3.content(MERGED_C2)).isEqualTo("b\n");
+    }
+
+    /** The report of a failed run has no metrics, so every folder's outcome is written beside it. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void a_failed_run_still_records_what_every_folder_did() throws Exception {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+        s3.put(C2 + "phs000001_allConcepts_c2.csv", "b\n");
+        when(s3.client.getObject(any(GetObjectRequest.class))).thenAnswer(inv -> {
+            GetObjectRequest req = inv.getArgument(0);
+            if (req.key().startsWith(C1)) {
+                throw new RuntimeException("connection reset");
+            }
+            return new software.amazon.awssdk.core.ResponseInputStream<>(
+                    software.amazon.awssdk.services.s3.model.GetObjectResponse.builder().build(),
+                    software.amazon.awssdk.http.AbortableInputStream.create(
+                            new java.io.ByteArrayInputStream("b\n".getBytes(StandardCharsets.UTF_8))));
+        });
+
+        JobResult result = run();
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        Path folders = tempDir.resolve("reports").resolve("merge-allconcepts-unit-folders.json");
+        assertThat(folders).exists();
+        Map<String, Object> partial = new ObjectMapper().readValue(folders.toFile(), Map.class);
+        assertThat(partial).containsEntry("foldersFailed", 1).containsEntry("consentFoldersDiscovered", 2);
+        Map<String, Map<String, Object>> actions = (Map<String, Map<String, Object>>) partial.get("actions");
+        assertThat(actions.get("phs000001/allConcepts/c1")).containsEntry("action", "FAILED");
+        assertThat((String) actions.get("phs000001/allConcepts/c1").get("error")).contains("Failed to read source");
+        assertThat(actions.get("phs000001/allConcepts/c2")).containsEntry("action", "MISSING");
+    }
+
+    @Test
+    void a_successful_run_writes_no_per_folder_outcomes_file() {
+        s3.put(C1 + "phs000001_allConcepts_c1.csv", "a\n");
+
+        run();
+
+        assertThat(tempDir.resolve("reports").resolve("merge-allconcepts-unit-folders.json")).doesNotExist();
+    }
+
+    @Test
+    void rejects_malformed_study_ids() {
+        for (String bad : List.of("phs000001,,phs000002", "phs1", "phs000001/c1", "phs000001, ")) {
+            JobResult result = executor.run(job(), Map.of("input", ROOT, "study-ids", bad), "unit");
+
+            assertThat(result.getExitCode()).as(bad).isEqualTo(ExitCode.VALIDATION_FAILED);
+            assertThat(result.getInputValidation().getIssues()).as(bad).anyMatch(i -> i.code().equals("BAD_STUDY_ID"));
+        }
     }
 
     @Test

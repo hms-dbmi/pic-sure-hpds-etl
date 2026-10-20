@@ -63,12 +63,14 @@ SUBJECTS=$(jq -r  '.metrics.distinctParticipants // 0' "$REPORT")
 NEW=$(jq -r       '.metrics.participantsInserted // 0' "$REPORT")
 CONSENTS=$(jq -r  '.metrics.consentsWritten      // 0' "$REPORT")
 SAMPLES=$(jq -r   '.metrics.samplesInserted      // 0' "$REPORT")
+# samplesSeen (input rows with a non-blank dbgap_sample_id) is absent from older reports.
+SAMPLES_SEEN=$(jq -r '.metrics.samplesSeen // empty' "$REPORT")
 GROUP_SUM=$(jq -r '[(.metrics.countsByConsentGroup // {})[]] | add // 0' "$REPORT")
 GROUP_KEYS=$(jq -r '(.metrics.countsByConsentGroup // {}) | keys_unsorted | join(",")' "$REPORT")
 
 echo ""
 echo "  rowsRead=$ROWS  distinctParticipants=$SUBJECTS  newParticipants=$NEW"
-echo "  consentsWritten=$CONSENTS  samplesInserted=$SAMPLES"
+echo "  consentsWritten=$CONSENTS  samplesSeen=${SAMPLES_SEEN:-n/a}  samplesInserted=$SAMPLES"
 echo "  consent groups: ${GROUP_KEYS:-<none>}"
 
 # --- shape of the load ---------------------------------------------------
@@ -90,10 +92,19 @@ if [[ "$NEW" == "0" && "$SUBJECTS" != "0" ]]; then
 fi
 
 # One sample row per input row that has a non-blank dbgap_sample_id, deduplicated by the
-# (hpds_id, sample id, source) constraint -- so at most rowsRead.
+# (hpds_id, sample id, source) constraint -- so at most rowsRead. Samples are inserted with
+# ON CONFLICT DO NOTHING, so samplesInserted is legitimately 0 on a reload; only an input with
+# no sample ids at all, or new participants arriving with no new samples, is suspicious.
 check "no more samples than rows"                        test "$SAMPLES" -le "$ROWS"
-if [[ "$SAMPLES" == "0" ]]; then
-  warn "no sample rows written: every dbgap_sample_id in the file was blank"
+if [[ -n "$SAMPLES_SEEN" ]]; then
+  check "no more samples inserted than seen ($SAMPLES <= $SAMPLES_SEEN)" test "$SAMPLES" -le "$SAMPLES_SEEN"
+  if [[ "$SAMPLES_SEEN" == "0" ]]; then
+    warn "no sample ids in the input: every dbgap_sample_id in the file was blank"
+  elif [[ "$NEW" != "0" && "$SAMPLES" == "0" ]]; then
+    warn "$NEW new participant(s) but no new sample rows, although $SAMPLES_SEEN input row(s) carry a dbgap_sample_id"
+  fi
+elif [[ "$NEW" != "0" && "$SAMPLES" == "0" ]]; then
+  warn "$NEW new participant(s) but no sample rows written: every dbgap_sample_id for them may be blank"
 fi
 
 # --- consent groups ------------------------------------------------------

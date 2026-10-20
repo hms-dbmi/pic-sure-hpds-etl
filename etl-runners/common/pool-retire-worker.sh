@@ -4,9 +4,10 @@
 # the job may still be running there, and the worker would otherwise be handed the next task while
 # the old one is still going -- that task's clock would start before it could, and every task after
 # it would be refused as "unclaimed". Terminating also stops the abandoned job from publishing its
-# output and status after its study was already reported as failed.
+# output and status after its run was already reported as failed.
 #
 # Usage: pool-retire-worker.sh <instance-id> <reason>
+#        AWS_REGION (default us-east-1)
 # Exit:  0 terminated (or already gone) | 1 could not terminate it | 64 usage
 set -uo pipefail
 
