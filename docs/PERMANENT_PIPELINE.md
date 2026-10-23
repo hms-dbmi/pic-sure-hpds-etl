@@ -681,22 +681,25 @@ side only counts as 0 on the other. Consent 0 is compared like any other code.
 | `NO_VERSION` | the study has no usable `Version` in managed inputs; not looked up |
 | `VERSION_NOT_FOUND` | dbGaP has no such study version (HTTP 400, `error_code` 2); never retried |
 | `VERSION_MISMATCH` | dbGaP answered for a different accession or version than requested; its counts are not compared |
-| `UNVERIFIED` | dbGaP gave no usable answer after every retry (see below) |
+| `UNVERIFIED` | dbGaP gave no usable answer after the retries (see below); a warning, not a discrepancy |
 
 A row can carry two findings (`COUNT_MISMATCH;REPORT_DB_MISMATCH`). `study_status` is not checked.
 
 **Outcome.** Every discrepancy is a WARNING issue, so the job succeeds with warnings, its
 `validate.sh` exits 10, and the stage and build are **UNSTABLE**; the pipeline still finishes.
-dbGaP is retried per study — up to 5 attempts, waiting 2 s, 4 s, 8 s, 16 s (doubling, capped at
-60 s; a `Retry-After` header, seconds or HTTP-date, is honoured instead, up to 5 minutes), 60 s per
-request — on 429, 408, 5xx, timeouts, connection errors and a 200 whose body is not the expected
-JSON. Any other 4xx is not retried. So that an outage ends quickly, with its report, rather than
-in the runner's monitor timeout (exit 124, nothing written), no lookup starts once 3 studies in a
-row got no usable answer, or 90 minutes into the lookups; those studies are `UNVERIFIED` too. A
-study still unanswered **fails the job with exit 4**
-(retryable; the runner retries once with `RETRY_ON_INFRA`), and the build: every other study is
-still compared, and both CSVs and the JSON report (metrics and issues included) are still written,
-with that study's rows `UNVERIFIED`. Because this stage only reads the database, reaching it means
+dbGaP is asked **once per study**; that one answer covers every consent group of the study. A
+request is retried, gently, on 429, 408, 5xx, timeouts, connection errors and a 200 whose body is
+not the expected JSON: up to 3 requests in all (2 retries), waiting 60 s then 120 s (a
+`Retry-After` header, seconds or HTTP-date, is honoured instead, up to 5 minutes), 60 s per
+request. Any other 4xx is not retried. So that an outage ends quickly, with its report, rather than
+in the runner's monitor timeout (exit 124, nothing written), no lookup starts once 20 studies in a
+row got no usable answer (about half an hour of retries, 4 at a time), or 90 minutes into the lookups; those studies are `UNVERIFIED` too. A
+study still unanswered is `UNVERIFIED`, one `DBGAP_UNAVAILABLE` WARNING each: the job **succeeds
+with warnings** (UNSTABLE), every other study is compared, and both CSVs and the JSON report are
+written and published as usual. Only when dbGaP answered for **no** study does the job fail with
+exit 4 (retryable; the runner retries once with `RETRY_ON_INFRA`), the CSVs and the JSON report
+(metrics and issues included) still written. A `VERSION_NOT_FOUND` answer counts as an answer.
+Because this stage only reads the database, reaching it means
 every stage that writes it succeeded, so a QA failure does **not** stop the
 [backup](#post-back-up-participant-db) from being promoted. Four studies are looked up at a time
 (each call takes ~10 s).
@@ -707,7 +710,7 @@ code) and `qa_consent_count_discrepancies.csv` (its non-`MATCH` rows), columns `
 consent_code, consent_short_name, dbgap_subjects, db_participants, load_participants, load_source,
 status, note`; and the JSON report's metrics `studiesChecked`, `studiesVerified`,
 `consentsCompared`, `consentsMatching`, `discrepancies`, `discrepanciesByType`,
-`studiesWithDiscrepancies`, `unverifiedStudies`, `apiAttempts`, `apiRetries`.
+`studiesWithDiscrepancies`, `studiesAnswered`, `unverifiedStudies`, `apiAttempts`, `apiRetries`.
 
 **Network.** The runner's security group must allow HTTPS (443) egress to
 `www.ncbi.nlm.nih.gov`; see [`JENKINS.md`](JENKINS.md#qa-consent-counts-network-egress).
@@ -754,10 +757,10 @@ It writes `downstream-artifacts/pipeline-report/`, archived on the build and upl
 | `qa_consent_counts.csv`, `qa_consent_count_discrepancies.csv` | copies of the [QA's](#stage-11-qa-consent-counts) CSVs, when it ran |
 
 The **Consent count QA (dbGaP)** section comes first: a summary line and a table of the
-discrepancies only (at most 200; the CSV has every one), or "All N consent group(s) match dbGaP";
-"QA did not run" when the pipeline stopped before it; "QA failed: <exit>: <reason>" (with the
-unverified studies, and the discrepancies among the studies it did check) when dbGaP could not
-answer. QA findings are not turned into study review items: the section stands on its own.
+discrepancies only (at most 200; the CSV has every one), or "All N consent group(s) match dbGaP",
+followed by the studies dbGaP gave no usable answer for, if any; "QA did not run" when the pipeline
+stopped before it; "QA failed: <exit>: <reason>" (with the unverified studies, and the
+discrepancies among the studies it did check) when dbGaP answered for no study. QA findings are not turned into study review items: the section stands on its own.
 
 Study status, most severe first: `FAILED` (a stage failed for it), `EXCLUDED` (missing inputs),
 `NOT_REACHED` (the pipeline stopped first), `COMPLETE_WITH_WARNINGS`, `COMPLETE`,

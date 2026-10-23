@@ -7,7 +7,8 @@
 #   qa_consent_count_discrepancies.csv      its rows whose status is not MATCH
 #
 # Prints every discrepancy, so the console names what to look at. Discrepancies are warnings
-# (exit 10: the build goes UNSTABLE); a study dbGaP could not answer for is a failure.
+# (exit 10: the build goes UNSTABLE), and so are studies dbGaP could not answer for, as long as it
+# answered for at least one; answering for none is a failure.
 #
 # Usage: validate.sh <reports-dir> <run-id>
 # Exit:  0 clean | 10 clean but with warnings | 1 failed | 64 usage
@@ -52,7 +53,11 @@ note "discrepancies $(metric discrepancies): $(jq -r '(.metrics.discrepanciesByT
 note "dbGaP requests $(metric apiAttempts) ($(metric apiRetries) retries); load counts: $(jq -r '.metrics.loadCounts // "none"' "$REPORT")"
 
 UNVERIFIED=$(jq -r '(.metrics.unverifiedStudies // []) | join(", ")' "$REPORT")
-check "dbGaP answered for every study${UNVERIFIED:+ (not for: $UNVERIFIED -- retryable)}" test -z "$UNVERIFIED"
+ANSWERED=$(jq -r '.metrics.studiesAnswered // 0' "$REPORT")
+if [[ -n "$UNVERIFIED" ]]; then
+  check "dbGaP answered for at least one study ($ANSWERED)" test "$ANSWERED" -gt 0
+fi
+soft "dbGaP answered for every study${UNVERIFIED:+ (not for: $UNVERIFIED -- re-run QA for them)}" test -z "$UNVERIFIED"
 
 check "consent counts written ($(basename "$COUNTS"))" test -f "$COUNTS"
 check "discrepancies written ($(basename "$DISCREPANCIES"))" test -f "$DISCREPANCIES"

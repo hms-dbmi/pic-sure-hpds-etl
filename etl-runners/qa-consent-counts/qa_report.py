@@ -99,9 +99,11 @@ def summary_line(qa):
     if qa["outcome"] == "FAILED":
         return (f"consent count QA: FAILED ({qa['exitCode']}); unverified: {', '.join(qa['unverifiedStudies']) or 'n/a'}; "
                 f"{qa['discrepancyCount'] or 0} discrepancy(ies) among the studies it did check")
+    unverified = (f"; dbGaP did not answer for {', '.join(qa['unverifiedStudies'])} (unverified)"
+                  if qa["unverifiedStudies"] else "")
     if qa["outcome"] == "DISCREPANCIES":
-        return (f"consent count QA: {qa['discrepancyCount']} discrepancy(ies) in "
-                f"{', '.join(qa['studiesWithDiscrepancies']) or '?'}")
+        return (f"consent count QA: {qa['discrepancyCount'] or 0} discrepancy(ies) in "
+                f"{', '.join(qa['studiesWithDiscrepancies']) or 'no study'}{unverified}")
     return f"consent count QA: all {qa['consentsCompared']} consent group(s) match dbGaP"
 
 
@@ -129,9 +131,13 @@ def markdown(qa, cell):
                   + f" ({qa['studiesChecked']} ready study/studies checked).", ""]
         return lines
     else:
-        lines += [f"**{qa['discrepancyCount']} discrepancy(ies)** in {len(qa['studiesWithDiscrepancies'])} "
-                  f"study/studies ({by_type}); {checked}. The participant DB is authoritative; "
-                  "`load` is what this run's loads reported.", ""]
+        lines += [f"**{qa['discrepancyCount'] or 0} discrepancy(ies)** in {len(qa['studiesWithDiscrepancies'])} "
+                  f"study/studies{f' ({by_type})' if by_type else ''}; {checked}. The participant DB is "
+                  "authoritative; `load` is what this run's loads reported.", ""]
+        if qa["unverifiedStudies"]:
+            lines += [f"**dbGaP gave no usable answer** for {len(qa['unverifiedStudies'])} study/studies after "
+                      f"retries: {', '.join(qa['unverifiedStudies'])}. Their rows are `UNVERIFIED`; re-run "
+                      "qa-consent-counts (STUDY_FILTER set to them) to check them.", ""]
     shown = qa["discrepancies"][:MAX_ROWS]
     if shown:
         lines += ["| Study | Version | Consent | Name | dbGaP | DB | Load | Status | Note |",

@@ -128,6 +128,8 @@ class QaConsentCountsJobIT extends AbstractIntegrationTest {
                 "phs000099,v2,1,ABV-1,,1,,,VERSION_NOT_FOUND,dbGaP has no phs000099.v2: "
                         + "Invalid or non-existent study with accession phs000099.v2");
         assertThat(csv(QaConsentCountsJob.DISCREPANCIES_FILE)).hasSize(4);
+        // One request per study, its answer used for every consent group (phs001412 has three).
+        assertThat(dbgap.requestsFor("phs001412.v4")).isEqualTo(1);
         assertThat(dbgap.requestsFor("phs000007.v33")).isEqualTo(3);
         assertThat(dbgap.requestsFor("phs000099.v2")).isEqualTo(1);
         assertThat(dbgap.requests()).noneMatch(p -> p.contains("phs000100"));
@@ -140,7 +142,8 @@ class QaConsentCountsJobIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void an_outage_exits_4_with_the_report_and_csvs_written() throws IOException {
+    void a_study_dbgap_cannot_answer_is_unverified_and_the_run_unstable_with_the_report_and_csvs_written()
+            throws IOException {
         managedInputs("DHS,phs001412,v4,Yes", "DOWN,phs000007,v33,Yes");
         consents("phs001412", "0", 576);
         consents("phs001412", "1", 402);
@@ -151,15 +154,39 @@ class QaConsentCountsJobIT extends AbstractIntegrationTest {
 
         JobResult r = executor.run(job, params(), "it");
 
-        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(dbgap.requestsFor("phs000007.v33")).isEqualTo(3);
         assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).contains(
                 "phs001412,v4,1,HMB-IRB-NPU,402,402,,,MATCH,")
                 .anyMatch(l -> l.startsWith("phs000007,v33,1,ABV-1,,3,,,UNVERIFIED,"));
         JsonNode report = mapper.readTree(reportsDir.resolve("qa-consent-counts-it.json").toFile());
-        assertThat(report.get("exitCode").asText()).isEqualTo("INFRASTRUCTURE_ERROR");
+        assertThat(report.get("exitCode").asText()).isEqualTo("SUCCESS_WITH_WARNINGS");
         assertThat(report.at("/metrics/unverifiedStudies/0").asText()).isEqualTo("phs000007");
+        assertThat(report.at("/metrics/studiesAnswered").asInt()).isEqualTo(1);
         assertThat(report.at("/metrics/consentsMatching").asInt()).isEqualTo(3);
         assertThat(report.at("/outputValidation/issues/0/code").asText()).isEqualTo("DBGAP_UNAVAILABLE");
+        assertThat(report.at("/outputValidation/issues/0/severity").asText()).isEqualTo("WARNING");
+    }
+
+    @Test
+    void an_outage_for_every_study_exits_4_with_the_report_and_csvs_written() throws IOException {
+        managedInputs("DHS,phs001412,v4,Yes", "DOWN,phs000007,v33,Yes");
+        consents("phs001412", "1", 402);
+        consents("phs000007", "1", 3);
+        dbgap.on("phs001412.v4", Reply.json(503, "maintenance"))
+                .on("phs000007.v33", Reply.json(503, "maintenance"));
+
+        JobResult r = executor.run(job, params(), "it");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(dbgap.requestsFor("phs001412.v4")).isEqualTo(3);
+        assertThat(dbgap.requestsFor("phs000007.v33")).isEqualTo(3);
+        assertThat(csv(QaConsentCountsJob.COUNTS_FILE))
+                .anyMatch(l -> l.startsWith("phs001412,v4,1,ABV-1,,402,,,UNVERIFIED,"))
+                .anyMatch(l -> l.startsWith("phs000007,v33,1,ABV-1,,3,,,UNVERIFIED,"));
+        JsonNode report = mapper.readTree(reportsDir.resolve("qa-consent-counts-it.json").toFile());
+        assertThat(report.get("exitCode").asText()).isEqualTo("INFRASTRUCTURE_ERROR");
+        assertThat(report.at("/metrics/studiesAnswered").asInt()).isEqualTo(0);
+        assertThat(report.at("/metrics/unverifiedStudies").size()).isEqualTo(2);
     }
 }

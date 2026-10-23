@@ -486,27 +486,28 @@ def failureDetail(downstream) {
 
 // The last stage: every ready study's participants per consent group in the participant DB, and this
 // run's SSTR load reports (qaLoadCounts), compared with dbGaP's counts for its study version.
-// Discrepancies make the child (and this build) UNSTABLE; a study dbGaP could not answer for fails
-// it (exit 4, after its own retries). Its reports land in downstream-artifacts/qa-consent-counts/
-// either way, for the end-of-run report.
+// Discrepancies, and studies dbGaP could not answer for after the retries, make the child (and this
+// build) UNSTABLE; dbGaP answering for no study at all fails it (exit 4). Its reports land in
+// downstream-artifacts/qa-consent-counts/ either way, for the end-of-run report.
 def runQaConsentCounts(String job) {
     // Every stage that writes the participant DB is done: see backupParticipantDb.
     env.QA_STAGE_REACHED = 'true'
     // Every child parameter is passed: one left out gets the default the child registered on its
-    // previous build. Retries: 5 attempts per study, 2 s doubling to 60 s (Retry-After honoured),
-    // 60 s per request; 4 studies at once; no more lookups after 3
-    // studies fail in a row or after 90 minutes, so an outage ends with exit 4 and the report.
+    // previous build. One request per study, up to 3 in all (2 retries, 60 s then 120 s apart,
+    // Retry-After honoured), 60 s per request; 4 studies at once; no more lookups after 20 studies
+    // fail in a row or after 90 minutes. Unanswered studies are UNVERIFIED warnings (UNSTABLE); only
+    // dbGaP answering for no study at all is exit 4.
     runDownstream(job, [
         string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs()),
         string(name: 'LOAD_COUNTS', value: qaLoadCounts()),
         string(name: 'STUDY_FILTER', value: ''),
         string(name: 'CONCURRENCY', value: '4'),
         string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
-        string(name: 'DBGAP_MAX_ATTEMPTS', value: '5'),
-        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '2'),
-        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '60'),
+        string(name: 'DBGAP_MAX_ATTEMPTS', value: '3'),
+        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '60'),
+        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
         string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
-        string(name: 'DBGAP_GIVE_UP_AFTER', value: '3'),
+        string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
         string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
         string(name: 'INSTANCE_TYPE', value: 't3.medium'),
         string(name: 'JOB_TIMEOUT_SECONDS', value: '7200'),
@@ -515,7 +516,7 @@ def runQaConsentCounts(String job) {
         string(name: 'ENV', value: params.ENV),
         booleanParam(name: 'SKIP_TESTS', value: true),
     ], 'downstream-artifacts/qa-consent-counts',
-                  ': consent counts were not (all) verified against dbGaP. downstream-artifacts/qa-consent-counts/ ' +
+                  ': no consent count was verified against dbGaP. downstream-artifacts/qa-consent-counts/ ' +
                   'has what was compared; a dbGaP outage (exit 4) is retryable.')
 }
 

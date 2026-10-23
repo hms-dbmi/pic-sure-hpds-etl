@@ -526,16 +526,17 @@ pipeline {
 // The QA consent counts stage (etl-runners/qa-consent-counts): every ready study's participants per
 // consent group in the participant DB, and what participants-migration reported loading
 // (participants_migration_consent_counts.csv), compared with dbGaP's counts for its study version.
-// Discrepancies make the build UNSTABLE; a study dbGaP could not answer for after its retries fails it
-// (exit 4) -- but the database backup is still promoted (see backupParticipantDb): QA writes nothing.
+// Discrepancies, and studies dbGaP could not answer for after the retries, make the build UNSTABLE;
+// dbGaP answering for no study at all fails it (exit 4) -- but the database backup is still promoted (see backupParticipantDb): QA writes nothing.
 // Its reports are copied to downstream-artifacts/qa-consent-counts/ before the result is judged, for
 // the migration report. A function, not inline: see runSplitAllConcepts on the 64 KB limit.
 def runQaConsentCounts() {
     env.QA_STAGE_REACHED = 'true'
     // Every child parameter is passed: one left out gets the default the child registered on its
-    // previous build. Retries: 5 attempts per study, 2 s doubling to 60 s (Retry-After honoured),
-    // 60 s per request; 4 studies at once; no more lookups after 3
-    // studies fail in a row or after 90 minutes, so an outage ends with exit 4 and the report.
+    // previous build. One request per study, up to 3 in all (2 retries, 60 s then 120 s apart,
+    // Retry-After honoured), 60 s per request; 4 studies at once; no more lookups after 20 studies
+    // fail in a row or after 90 minutes. Unanswered studies are UNVERIFIED warnings (UNSTABLE); only
+    // dbGaP answering for no study at all is exit 4.
     def downstream = build(
         job: params.QA_CONSENT_COUNTS_JOB,
         wait: true,
@@ -546,11 +547,11 @@ def runQaConsentCounts() {
             string(name: 'STUDY_FILTER', value: ''),
             string(name: 'CONCURRENCY', value: '4'),
             string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
-            string(name: 'DBGAP_MAX_ATTEMPTS', value: '5'),
-            string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '2'),
-            string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '60'),
+            string(name: 'DBGAP_MAX_ATTEMPTS', value: '3'),
+            string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '60'),
+            string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
             string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
-            string(name: 'DBGAP_GIVE_UP_AFTER', value: '3'),
+            string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
             string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
             string(name: 'INSTANCE_TYPE', value: 't3.medium'),
             string(name: 'JOB_TIMEOUT_SECONDS', value: '7200'),
@@ -572,10 +573,10 @@ def runQaConsentCounts() {
     }
     if (downstream.result == 'UNSTABLE') {
         unstable("${params.QA_CONSENT_COUNTS_JOB} #${downstream.number}: consent counts disagree with dbGaP or the " +
-                 'load report; the migration report lists each discrepancy')
+                 'load report, or dbGaP did not answer for some studies; the migration report lists each')
     } else if (downstream.result != 'SUCCESS') {
         error("${params.QA_CONSENT_COUNTS_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: " +
-              'consent counts were not (all) verified against dbGaP; a dbGaP outage (exit 4) is retryable.')
+              'no consent count was verified against dbGaP; a dbGaP outage (exit 4) is retryable.')
     }
 }
 

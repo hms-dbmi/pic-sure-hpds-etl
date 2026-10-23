@@ -37,7 +37,8 @@ import java.time.format.DateTimeParseException;
  * </table>
  *
  * <p>Retries wait {@code initialBackoff * 2^(n-1)} after the n-th failed attempt, capped at
- * {@code maxBackoff} (2 s, 4 s, 8 s, 16 s with the defaults), except that a {@code Retry-After}
+ * {@code maxBackoff}. The defaults are deliberately gentle on dbGaP: 3 attempts (2 retries),
+ * waiting 60 s then 120 s. A {@code Retry-After}
  * header -- seconds or an HTTP-date -- is honoured instead, up to {@link #MAX_RETRY_AFTER}. The
  * wait and the clock are injected, so tests never sleep.
  *
@@ -73,7 +74,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
         }
 
         public static Config defaults() {
-            return new Config(DEFAULT_BASE_URL, 5, Duration.ofSeconds(2), Duration.ofSeconds(60),
+            return new Config(DEFAULT_BASE_URL, 3, Duration.ofSeconds(60), Duration.ofSeconds(120),
                     Duration.ofSeconds(60));
         }
     }

@@ -65,10 +65,13 @@ import java.util.stream.Stream;
  *   <li>every consent matches: exit 0;</li>
  *   <li>any discrepancy (see {@link Status}): one WARNING issue each, SUCCESS_WITH_WARNINGS (exit 0;
  *       validate.sh exits 10 and the build is UNSTABLE);</li>
- *   <li>dbGaP gave no usable answer for some study after every retry: exit 4
- *       (INFRASTRUCTURE_ERROR, retryable). Every other study is still compared, both CSVs are still
- *       written with the unanswered study's rows UNVERIFIED, and the JSON report still carries the
- *       metrics and issues (via {@link InfrastructureException#withPartialResult}).</li>
+ *   <li>dbGaP gave no usable answer for some studies after their retries, but answered for at
+ *       least one: those studies are UNVERIFIED, one DBGAP_UNAVAILABLE WARNING each, and the run is
+ *       SUCCESS_WITH_WARNINGS (UNSTABLE) like any discrepancy. Every other study is compared and
+ *       both CSVs are written, the unanswered studies' rows UNVERIFIED;</li>
+ *   <li>dbGaP answered for no study at all: exit 4 (INFRASTRUCTURE_ERROR, retryable). The CSVs are
+ *       still written and the JSON report still carries the metrics and issues (via
+ *       {@link InfrastructureException#withPartialResult}).</li>
  * </ul>
  * A study version dbGaP does not know (HTTP 400, error_code 2) is a VERSION_NOT_FOUND discrepancy,
  * not an outage.
@@ -97,7 +100,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
     static final String COL_SOURCE = "source";
 
     static final int DEFAULT_CONCURRENCY = 4;
-    static final int DEFAULT_GIVE_UP_AFTER = 3;
+    static final int DEFAULT_GIVE_UP_AFTER = 20;
     /** 90 minutes: plus one in-flight lookup's retries (~6 min), inside the runner's 7200 s monitor timeout. */
     static final int DEFAULT_DEADLINE_SECONDS = 5400;
     static final int MAX_CONCURRENCY = 16;
@@ -156,27 +159,27 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                         ParamSpec.optional("dbgap-base-url",
                                 "dbGaP SSTR study endpoint (default " + d.baseUrl() + ")", d.baseUrl()),
                         ParamSpec.optional("dbgap-max-attempts",
-                                "Requests per study, retries included (1-20; default " + d.maxAttempts() + ")", "5"),
+                                "Requests per study, retries included (1-20; default " + d.maxAttempts() + ")", "3"),
                         ParamSpec.optional("dbgap-initial-backoff-seconds",
                                 "Wait after the first failed request, doubling per retry (0-600; default "
-                                        + d.initialBackoff().toSeconds() + ")", "2"),
+                                        + d.initialBackoff().toSeconds() + ")", "60"),
                         ParamSpec.optional("dbgap-max-backoff-seconds",
                                 "Longest wait between retries (1-3600; default " + d.maxBackoff().toSeconds()
                                         + "); a Retry-After header is honoured instead, up to "
-                                        + DbgapStudyClient.MAX_RETRY_AFTER.toMinutes() + " minutes", "60"),
+                                        + DbgapStudyClient.MAX_RETRY_AFTER.toMinutes() + " minutes", "120"),
                         ParamSpec.optional("dbgap-timeout-seconds",
                                 "Per-request timeout (1-600; default " + d.requestTimeout().toSeconds() + ")", "60"),
                         ParamSpec.optional("dbgap-give-up-after",
                                 "Stop asking dbGaP once this many studies in a row got no usable answer "
-                                        + "(1-1000; default " + DEFAULT_GIVE_UP_AFTER + "): an outage then ends the run "
-                                        + "with exit 4 in minutes, the rest UNVERIFIED, instead of retrying every study",
-                                "3"),
+                                        + "(1-1000; default " + DEFAULT_GIVE_UP_AFTER + "): an outage then ends the lookups "
+                                        + "in about half an hour (4 at a time), the rest UNVERIFIED, instead of retrying "
+                                        + "every study", "20"),
                         ParamSpec.optional("dbgap-deadline-seconds",
                                 "No dbGaP lookup starts after this many seconds of lookups (1-86400; default "
                                         + DEFAULT_DEADLINE_SECONDS + "), so the run ends, with its report, inside the "
                                         + "runner's monitor timeout; studies not looked up by then are UNVERIFIED", "5400")),
                 List.of(COUNTS_FILE + " and " + DISCREPANCIES_FILE + " in the reports directory; a WARNING issue "
-                        + "per discrepancy; exit 4 when dbGaP could not answer for some study"));
+                        + "per discrepancy or study dbGaP could not answer for; exit 4 when dbGaP answered for no study"));
     }
 
     @Override
@@ -252,14 +255,21 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
         Output output = new Output(results, loadCountsUri, load.counts().size());
         List<String> unverified = output.unverifiedStudies();
-        if (!unverified.isEmpty()) {
+        // Some studies unanswered is a warning (validateOutput adds one per study); none answered
+        // means dbGaP, or the runner's route to it, is down, and nothing was checked.
+        if (!unverified.isEmpty() && output.answeredStudies() == 0) {
             ValidationReport partial = new ValidationReport("output");
             addIssues(output, partial);
-            throw new InfrastructureException("dbGaP gave no usable answer for "
-                    + unverified.size() + " of " + results.size() + " study/studies after retries: "
-                    + String.join(", ", unverified) + ". Their rows in " + COUNTS_FILE + " are UNVERIFIED; "
-                    + "every other study was compared. Retryable.")
+            throw new InfrastructureException("dbGaP gave no usable answer for any of the "
+                    + unverified.size() + " study/studies looked up, after retries: "
+                    + String.join(", ", unverified) + ". Their rows in " + COUNTS_FILE + " are UNVERIFIED. "
+                    + "Retryable.")
                     .withPartialResult(metrics(output), partial);
+        }
+        if (!unverified.isEmpty()) {
+            log.warn("dbGaP gave no usable answer for {} of {} study/studies after retries ({}); they are "
+                    + "UNVERIFIED, every other study was compared", unverified.size(), results.size(),
+                    String.join(", ", unverified));
         }
         return output;
     }
@@ -382,7 +392,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
      * Looks every study with a usable version up in dbGaP, {@code concurrency} at a time (each call
      * takes ~10 s). A study without a version is not looked up and has no entry.
      *
-     * <p>An outage must end the run with exit 4 and its report, not run into the runner's monitor
+     * <p>An outage must end the run with its report, not run into the runner's monitor
      * timeout (exit 124, nothing written): with requests timing out, every study would take ~6 minutes
      * of retries. So no lookup starts once {@code giveUpAfter} studies in a row got no usable answer
      * (any answer, a NOT_FOUND included, resets the count), or once {@code deadline} has passed since
@@ -513,7 +523,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
             StudyInput in = r.input();
             String label = in.studyId() + (in.version() == null ? "" : "." + in.version());
             if (r.studyStatus() == Status.UNVERIFIED) {
-                report.add(ValidationIssue.error("DBGAP_UNAVAILABLE", label + ": " + r.studyNote(), in.studyId(),
+                report.add(ValidationIssue.warning("DBGAP_UNAVAILABLE", label + ": " + r.studyNote(),
                         context(in, null)));
             } else if (r.studyStatus() != null) {
                 report.add(ValidationIssue.warning(r.studyStatus().name(), label + ": " + r.studyNote(),
@@ -599,6 +609,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         m.put("discrepancies", byType.values().stream().mapToInt(Integer::intValue).sum());
         m.put("discrepanciesByType", byTypeNamed);
         m.put("studiesWithDiscrepancies", withDiscrepancies);
+        m.put("studiesAnswered", output.answeredStudies());
         m.put("unverifiedStudies", output.unverifiedStudies());
         m.put("apiAttempts", attempts);
         m.put("apiRetries", retries);
@@ -646,6 +657,12 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         List<String> unverifiedStudies() {
             return results.stream().filter(r -> r.studyStatus() == Status.UNVERIFIED)
                     .map(r -> r.input().studyId()).toList();
+        }
+
+        /** Studies dbGaP answered for (FOUND or NOT_FOUND), whatever the comparison then found. */
+        int answeredStudies() {
+            return (int) results.stream().filter(r -> r.lookup() != null
+                    && r.lookup().outcome() != DbgapLookup.Outcome.FAILED).count();
         }
     }
 }

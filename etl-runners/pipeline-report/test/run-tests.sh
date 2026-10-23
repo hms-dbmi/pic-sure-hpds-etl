@@ -167,6 +167,15 @@ grep -q '^\*\*QA failed: INFRASTRUCTURE_ERROR\*\*: dbGaP gave no usable answer f
             and (.stages[] | select(.stage == "qa-consent-counts") | .result == "FAILED")' "$TMP/qa-failed-out/pipeline-report.json" >/dev/null \
   && pass "a failed QA (dbGaP down) says so at the top and still lists what it compared" \
   || fail "QA failed: $(sed -n '/^## Consent count QA/,/^| Study status/p' "$MD")"
+qa_variant qa-partial '.metrics.unverifiedStudies = ["phs000003"]'
+MD="$TMP/qa-partial-out/pipeline-report.md"
+grep -q '^\*\*dbGaP gave no usable answer\*\* for 1 study/studies after retries: phs000003\. Their rows are `UNVERIFIED`' "$MD" \
+  && ! grep -q '^\*\*QA failed' "$MD" \
+  && jq -e '.consentCountQa.outcome == "DISCREPANCIES" and .consentCountQa.unverifiedStudies == ["phs000003"]' \
+       "$TMP/qa-partial-out/pipeline-report.json" >/dev/null \
+  && grep -q 'dbGaP did not answer for phs000003 (unverified)' "$TMP/qa-partial.log" \
+  && pass "studies dbGaP did not answer for are a warning, named at the top of the report" \
+  || fail "QA partial: $(sed -n '/^## Consent count QA/,/^| Study status/p' "$MD"; cat "$TMP/qa-partial.log")"
 python3 "$ROOT/etl-runners/pipeline-report/pipeline-report.py" --preflight-only "$HERE/fixture/downstream-artifacts" run "$TMP/qa-pre-out" SUCCESS >/dev/null 2>&1
 grep -q '^Skipped: a pre-flight run' "$TMP/qa-pre-out/pipeline-report.md" \
   && pass "a pre-flight run reports QA as skipped" || fail "pre-flight QA: $(grep -A3 'Consent count QA' "$TMP/qa-pre-out/pipeline-report.md")"

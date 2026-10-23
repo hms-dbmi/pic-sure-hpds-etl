@@ -559,9 +559,9 @@ dbGaP lists is still a discrepancy (`MISSING_IN_DB`), noted "source MULTI drops 
 
 Discrepancies (`COUNT_MISMATCH`, `MISSING_IN_DB`, `MISSING_IN_DBGAP`, `DBGAP_COUNT_MISSING`,
 `REPORT_DB_MISMATCH`, `NO_VERSION`, `VERSION_NOT_FOUND`, `VERSION_MISMATCH`) make the build
-UNSTABLE; a study dbGaP could not answer for after its retries fails the stage (exit 4, retryable)
-with every other study still compared and reported, and does not stop the backup from being
-promoted. Retries, outputs and statuses are as in
+UNSTABLE, and so do studies dbGaP could not answer for after the retries (`UNVERIFIED`, every other
+study still compared and reported). Only dbGaP answering for no study fails the stage (exit 4,
+retryable); neither stops the backup from being promoted. Retries, outputs and statuses are as in
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-11-qa-consent-counts). The runner needs HTTPS
 egress to `www.ncbi.nlm.nih.gov`.
 
@@ -594,7 +594,8 @@ sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DAT
 
 The **Consent count QA (dbGaP)** section comes first: a summary and a table of the discrepancies
 only (or "All N consent group(s) match dbGaP"), "QA did not run" when the build stopped before it,
-or "QA failed: <exit>: <reason>" with the unverified studies. QA findings do not change a study's
+or "QA failed: <exit>: <reason>" with the unverified studies; unverified studies on an otherwise
+completed QA are listed after its summary. QA findings do not change a study's
 `status`. Tests: `make -C etl-runners/migration-report test`.
 
 ---

@@ -53,12 +53,12 @@ python3 "$RUNNER/build-load-counts.py" >/dev/null 2>&1
 
 echo "validate.sh"
 HEADER="study_id,version,consent_code,consent_short_name,dbgap_subjects,db_participants,load_participants,load_source,status,note"
-qa_run() {   # <dir> <exitCode> <status> <warnings> <unverifiedJson> <countsRows> <discrepancyRows>
+qa_run() {   # <dir> <exitCode> <status> <warnings> <unverifiedJson> <countsRows> <discrepancyRows> [studiesAnswered]
   mkdir -p "$1"
   local issues='[]'
   [ "$4" -gt 0 ] && issues='[{"severity":"WARNING","code":"COUNT_MISMATCH","message":"phs000001.v4 consent 2: dbGaP 3, DB 2"}]'
-  printf '{"jobName":"qa-consent-counts","jobType":"PERMANENT","runId":"r","exitCode":"%s","status":"%s","durationMillis":1,"inputValidation":{"issues":[],"counts":{"error":0,"warning":0,"info":0}},"outputValidation":{"issues":%s,"counts":{"error":0,"warning":%s,"info":0}},"metrics":{"studiesChecked":1,"studiesVerified":1,"consentsCompared":2,"consentsMatching":1,"discrepancies":%s,"discrepanciesByType":{},"unverifiedStudies":%s,"apiAttempts":1,"apiRetries":0},"errorMessage":%s}\n' \
-    "$2" "$3" "$issues" "$4" "$4" "$5" "$([ "$3" = SUCCESS ] && echo null || echo '"dbGaP down"')" > "$1/qa-consent-counts-r.json"
+  printf '{"jobName":"qa-consent-counts","jobType":"PERMANENT","runId":"r","exitCode":"%s","status":"%s","durationMillis":1,"inputValidation":{"issues":[],"counts":{"error":0,"warning":0,"info":0}},"outputValidation":{"issues":%s,"counts":{"error":0,"warning":%s,"info":0}},"metrics":{"studiesChecked":1,"studiesVerified":1,"consentsCompared":2,"consentsMatching":1,"discrepancies":%s,"discrepanciesByType":{},"studiesAnswered":%s,"unverifiedStudies":%s,"apiAttempts":1,"apiRetries":0},"errorMessage":%s}\n' \
+    "$2" "$3" "$issues" "$4" "$4" "${8:-1}" "$5" "$([ "$3" = SUCCESS ] && echo null || echo '"dbGaP down"')" > "$1/qa-consent-counts-r.json"
   printf '%s\n%b' "$HEADER" "$6" > "$1/qa_consent_counts.csv"
   printf '%s\n%b' "$HEADER" "$7" > "$1/qa_consent_count_discrepancies.csv"
 }
@@ -75,9 +75,14 @@ qa_run "$TMP/warn" SUCCESS_WITH_WARNINGS SUCCESS 1 '[]' "$MATCH$MISMATCH" "$MISM
 expect_rc "discrepancies are warnings" 10 "$TMP/warn"
 grep -q 'phs000001 v4 c2 G2: dbGaP 3 / DB 2 / load 2 COUNT_MISMATCH -- a note, with a comma' "$TMP/v.log" \
   && pass "lists each discrepancy" || { fail "discrepancy not listed"; cat "$TMP/v.log"; }
-qa_run "$TMP/down" INFRASTRUCTURE_ERROR FAILED 0 '["phs000002"]' "$MATCH" ''
-expect_rc "dbGaP not answering fails" 1 "$TMP/down"
+UNVERIFIED='phs000002,v1,1,G1,,6,,,UNVERIFIED,dbGaP gave no usable answer: HTTP 503\n'
+qa_run "$TMP/partial" SUCCESS_WITH_WARNINGS SUCCESS 1 '["phs000002"]' "$MATCH$UNVERIFIED" "$UNVERIFIED" 1
+expect_rc "dbGaP not answering for some studies is a warning" 10 "$TMP/partial"
 grep -q 'not for: phs000002' "$TMP/v.log" && pass "names the unverified study" || fail "unverified study not named"
+qa_run "$TMP/down" INFRASTRUCTURE_ERROR FAILED 0 '["phs000002"]' "$UNVERIFIED" "$UNVERIFIED" 0
+expect_rc "dbGaP answering for no study fails" 1 "$TMP/down"
+grep -q 'FAIL.*answered for at least one study (0)' "$TMP/v.log" && pass "says no study was answered" \
+  || { fail "no-answer failure not named"; cat "$TMP/v.log"; }
 qa_run "$TMP/disagree" SUCCESS_WITH_WARNINGS SUCCESS 1 '[]' "$MATCH$MISMATCH" ''
 expect_rc "a discrepancy file missing a non-MATCH row fails" 1 "$TMP/disagree"
 mkdir -p "$TMP/none"

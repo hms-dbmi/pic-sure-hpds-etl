@@ -130,19 +130,19 @@ variable "dbgap_base_url" {
 variable "dbgap_max_attempts" {
   type        = string
   default     = ""
-  description = "--dbgap-max-attempts: requests per study, retries included (1-20). Blank: 5."
+  description = "--dbgap-max-attempts: requests per study, retries included (1-20). Blank: 3."
 }
 
 variable "dbgap_initial_backoff_seconds" {
   type        = string
   default     = ""
-  description = "--dbgap-initial-backoff-seconds: first retry wait, doubling per retry (0-600). Blank: 2."
+  description = "--dbgap-initial-backoff-seconds: first retry wait, doubling per retry (0-600). Blank: 60."
 }
 
 variable "dbgap_max_backoff_seconds" {
   type        = string
   default     = ""
-  description = "--dbgap-max-backoff-seconds: longest retry wait (1-3600). Blank: 60."
+  description = "--dbgap-max-backoff-seconds: longest retry wait (1-3600). Blank: 120."
 }
 
 variable "dbgap_timeout_seconds" {
@@ -154,7 +154,7 @@ variable "dbgap_timeout_seconds" {
 variable "dbgap_give_up_after" {
   type        = string
   default     = ""
-  description = "--dbgap-give-up-after: stop asking dbGaP after this many studies in a row got no answer (1-1000). Blank: 3."
+  description = "--dbgap-give-up-after: stop asking dbGaP after this many studies in a row got no answer (1-1000). Blank: 20."
 }
 
 variable "dbgap_deadline_seconds" {

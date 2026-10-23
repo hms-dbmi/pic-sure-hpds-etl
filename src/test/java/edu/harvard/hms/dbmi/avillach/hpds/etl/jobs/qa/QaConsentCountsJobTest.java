@@ -193,6 +193,22 @@ class QaConsentCountsJobTest {
     }
 
     @Test
+    void dbgap_is_asked_once_per_study_and_its_answer_covers_every_consent_group() throws IOException {
+        // The same study twice in the managed inputs, with three consent groups in the DB.
+        managedInputs(study("A", "phs000001", "v1", true), study("A2", "phs000001", "v1", true));
+        dbCounts("phs000001", "0", 4, "phs000001", "1", 5, "phs000001", "2", 6);
+        answers.put("phs000001.v1", found("phs000001", 1, 0, 4, 1, 5, 2, 6));
+
+        JobResult r = run(job(), Map.of());
+
+        assertThat(asked).containsExactly("phs000001.v1");
+        assertThat(r.getMetrics().get("apiAttempts")).isEqualTo(1);
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER,
+                "phs000001,v1,0,G0,4,4,,,MATCH,", "phs000001,v1,1,G1,5,5,,,MATCH,", "phs000001,v1,2,G2,6,6,,,MATCH,");
+    }
+
+    @Test
     void the_client_is_configured_from_the_parameters_and_defaults() {
         managedInputs(study("A", "phs000001", "v1", true));
         dbCounts();
@@ -326,10 +342,10 @@ class QaConsentCountsJobTest {
         assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER);
     }
 
-    /* ---- dbGaP unavailable (exit 4, the report and CSVs still written) ---- */
+    /* ---- dbGaP unavailable (some studies: UNSTABLE; every study: exit 4; reports written either way) ---- */
 
     @Test
-    void a_study_dbgap_cannot_answer_fails_the_run_with_exit_4_but_everything_is_still_reported() throws IOException {
+    void a_study_dbgap_cannot_answer_is_a_warning_and_everything_is_still_reported() throws IOException {
         managedInputs(study("OK", "phs000001", "v1", true), study("DOWN", "phs000002", "v1", true),
                 study("BAD", "phs000003", "v1", true));
         dbCounts("phs000001", "1", 5, "phs000002", "1", 6, "phs000003", "1", 7);
@@ -339,23 +355,60 @@ class QaConsentCountsJobTest {
 
         JobResult r = run(job(), Map.of());
 
-        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
-        assertThat(r.getErrorMessage()).contains("1 of 3").contains("phs000002").contains("Retryable");
-        assertThat(codes(r)).containsExactly("ERROR:DBGAP_UNAVAILABLE", "WARNING:COUNT_MISMATCH");
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(r.getErrorMessage()).isNull();
+        assertThat(codes(r)).containsExactly("WARNING:DBGAP_UNAVAILABLE", "WARNING:COUNT_MISMATCH");
         assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER,
                 "phs000001,v1,1,G1,5,5,,,MATCH,",
                 "phs000002,v1,1,abv,,6,,,UNVERIFIED,dbGaP gave no usable answer: no usable answer after 5 attempt(s); last failure: HTTP 503",
                 "phs000003,v1,1,G1,8,7,,,COUNT_MISMATCH,");
         assertThat(csv(QaConsentCountsJob.DISCREPANCIES_FILE)).hasSize(3);
 
-        // The JSON report on the exit-4 path keeps the metrics and issues, not just the error.
         JsonNode report = reportJson();
-        assertThat(report.get("exitCode").asText()).isEqualTo("INFRASTRUCTURE_ERROR");
+        assertThat(report.get("exitCode").asText()).isEqualTo("SUCCESS_WITH_WARNINGS");
         assertThat(report.at("/metrics/unverifiedStudies/0").asText()).isEqualTo("phs000002");
+        assertThat(report.at("/metrics/studiesAnswered").asInt()).isEqualTo(2);
         assertThat(report.at("/metrics/apiAttempts").asInt()).isEqualTo(7);
         assertThat(report.at("/metrics/apiRetries").asInt()).isEqualTo(4);
         assertThat(report.at("/metrics/discrepancies").asInt()).isEqualTo(1);
-        assertThat(report.at("/outputValidation/counts/error").asInt()).isEqualTo(1);
+        assertThat(report.at("/outputValidation/counts/error").asInt()).isEqualTo(0);
+        assertThat(report.at("/outputValidation/counts/warning").asInt()).isEqualTo(2);
+    }
+
+    @Test
+    void no_study_answered_fails_the_run_with_exit_4_but_everything_is_still_reported() throws IOException {
+        managedInputs(study("DOWN1", "phs000001", "v1", true), study("DOWN2", "phs000002", "v1", true),
+                study("NOVER", "phs000003", "", true));
+        dbCounts("phs000001", "1", 5, "phs000002", "1", 6);
+        answers.put("phs000001.v1", DbgapLookup.failed("no usable answer after 3 attempt(s); last failure: HTTP 503", 3));
+        answers.put("phs000002.v1", DbgapLookup.failed("no usable answer after 3 attempt(s); last failure: HTTP 503", 3));
+
+        JobResult r = run(job(), Map.of());
+
+        // A study with no version is never asked, so it does not count as answered.
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(r.getErrorMessage()).contains("any of the 2").contains("phs000001, phs000002").contains("Retryable");
+        assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).hasSize(4)
+                .anyMatch(l -> l.startsWith("phs000001,v1,1,abv,,5,,,UNVERIFIED,"))
+                .anyMatch(l -> l.startsWith("phs000002,v1,1,abv,,6,,,UNVERIFIED,"));
+        JsonNode report = reportJson();
+        assertThat(report.get("exitCode").asText()).isEqualTo("INFRASTRUCTURE_ERROR");
+        assertThat(report.at("/metrics/studiesAnswered").asInt()).isEqualTo(0);
+        assertThat(report.at("/metrics/unverifiedStudies").size()).isEqualTo(2);
+        assertThat(report.at("/outputValidation/counts/warning").asInt()).isEqualTo(3);
+    }
+
+    @Test
+    void a_version_dbgap_does_not_know_still_counts_as_an_answer() {
+        managedInputs(study("GONE", "phs000001", "v9", true), study("DOWN", "phs000002", "v1", true));
+        dbCounts("phs000001", "1", 5, "phs000002", "1", 6);
+        answers.put("phs000001.v9", DbgapLookup.notFound("Invalid or non-existent study with accession phs000001.v9", 1));
+        answers.put("phs000002.v1", DbgapLookup.failed("timed out after 60 s", 3));
+
+        JobResult r = run(job(), Map.of());
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(codes(r)).containsExactly("WARNING:VERSION_NOT_FOUND", "WARNING:DBGAP_UNAVAILABLE");
     }
 
     @Test
@@ -371,12 +424,13 @@ class QaConsentCountsJobTest {
 
         JobResult r = run(job, Map.of());
 
-        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(r.getMetrics().get("unverifiedStudies")).isEqualTo(List.of("phs000002"));
     }
 
     @Test
     void an_outage_stops_the_lookups_after_the_give_up_count_so_the_run_ends_with_its_report() throws IOException {
+        // Every study fails, so nothing was answered: exit 4.
         List<ManagedInputRow> rows = new ArrayList<>();
         for (int i = 1; i <= 6; i++) {
             rows.add(study("S" + i, String.format("phs%06d", i), "v1", true));
@@ -431,7 +485,7 @@ class QaConsentCountsJobTest {
         JobResult r = run(job, Map.of("concurrency", "1", "dbgap-deadline-seconds", "1"));
 
         assertThat(asked).containsExactly("phs000001");
-        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(r.getMetrics().get("unverifiedStudies")).isEqualTo(List.of("phs000002"));
     }
 

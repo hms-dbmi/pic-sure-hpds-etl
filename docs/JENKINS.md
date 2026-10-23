@@ -87,15 +87,15 @@ defaults below. See [PERMANENT_PIPELINE.md](PERMANENT_PIPELINE.md#stage-11-qa-co
 | `STUDY_FILTER`                  | (blank)                                               | `--study-filter`: comma-separated study ids; blank checks every ready study |
 | `CONCURRENCY`                   | `4`                                                   | Studies looked up in dbGaP at once, 1-16 (each call takes ~10 s) |
 | `DBGAP_BASE_URL`                | `https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study`  | `{phs}.{v}/summary` is appended |
-| `DBGAP_MAX_ATTEMPTS`            | `5`                                                   | Requests per study, retries included, 1-20 |
-| `DBGAP_INITIAL_BACKOFF_SECONDS` | `2`                                                   | Wait after the first failure, doubling per retry, 0-600 |
-| `DBGAP_MAX_BACKOFF_SECONDS`     | `60`                                                  | Longest wait, 1-3600; a `Retry-After` header is honoured instead (up to 5 minutes) |
+| `DBGAP_MAX_ATTEMPTS`            | `3`                                                   | Requests per study, retries included, 1-20 (one study, one request: its answer covers every consent group) |
+| `DBGAP_INITIAL_BACKOFF_SECONDS` | `60`                                                  | Wait after the first failure, doubling per retry, 0-600 |
+| `DBGAP_MAX_BACKOFF_SECONDS`     | `120`                                                 | Longest wait, 1-3600; a `Retry-After` header is honoured instead (up to 5 minutes) |
 | `DBGAP_TIMEOUT_SECONDS`         | `60`                                                  | Per-request timeout, 1-600 |
-| `DBGAP_GIVE_UP_AFTER`           | `3`                                                   | Stop asking dbGaP once this many studies in a row got no usable answer, 1-1000; the rest are `UNVERIFIED` and the job exits 4 in minutes rather than retrying every study |
+| `DBGAP_GIVE_UP_AFTER`           | `20`                                                  | Stop asking dbGaP once this many studies in a row got no usable answer, 1-1000; the rest are `UNVERIFIED`, so an outage ends in about half an hour rather than retrying every study |
 | `DBGAP_DEADLINE_SECONDS`        | `5400`                                                | No lookup starts after this many seconds, 1-86400; keep it well inside `JOB_TIMEOUT_SECONDS`, or a slow dbGaP ends in a monitor timeout (exit 124) with no report |
 | `INSTANCE_TYPE`                 | `t3.medium`                                           | Runner instance type |
 | `JOB_TIMEOUT_SECONDS`           | `7200`                                                | Monitor timeout (exit 124) |
-| `RUN_ID`, `PREBUILT_IMAGE_TAR`, `SKIP_TESTS`, `RETRY_ON_INFRA`, `ENV` | | As for every runner job; `RETRY_ON_INFRA` reruns it once after exit 4 (dbGaP still down after its retries) |
+| `RUN_ID`, `PREBUILT_IMAGE_TAR`, `SKIP_TESTS`, `RETRY_ON_INFRA`, `ENV` | | As for every runner job; `RETRY_ON_INFRA` reruns it once after exit 4 (dbGaP answered for no study) |
 
 Discrepancies make the build UNSTABLE (validate.sh exit 10); dbGaP not answering for a study after
 its retries fails it (exit 4), with the report and both CSVs still archived.
@@ -488,8 +488,9 @@ the Jenkins host's security group must allow TCP 5432 from the runners' group
 `qa-consent-counts` calls the dbGaP SSTR API from its runner, so **the runner security group
 (`sg-0932143f21f7c533b`) and the subnet's route must allow outbound HTTPS (TCP 443) to
 `www.ncbi.nlm.nih.gov`** (a public endpoint: it needs a NAT or other internet route; an S3 gateway endpoint does not reach it), besides the
-participant DB and S3. Without it every lookup times out, the job exits 4 after its retries, and
-each study's rows are `UNVERIFIED`. Its pre-flight probes the API from the Jenkins agent, which
+participant DB and S3. Without it every lookup times out, each study's rows are `UNVERIFIED`, and
+the job exits 4 (dbGaP answered for no study). Studies dbGaP fails to answer for while answering
+others are `UNVERIFIED` warnings: the build is UNSTABLE and the reports are published. Its pre-flight probes the API from the Jenkins agent, which
 shows the API is up but says nothing about the runner's own egress. To check from a runner subnet:
 `curl -s -o /dev/null -w '%{http_code}\n' https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study/phs001412.v4/summary`
 should print `200`.
