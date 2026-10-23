@@ -32,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyCollection;
@@ -489,6 +490,80 @@ class QaConsentCountsJobTest {
         assertThat(r.getMetrics().get("unverifiedStudies")).isEqualTo(List.of("phs000002"));
     }
 
+    /* ---- Pausing after dbGaP could not be connected to ---- */
+
+    /** Each study's lookup start time, in ms since the first. */
+    private final List<Long> askedAt = new CopyOnWriteArrayList<>();
+
+    private QaConsentCountsJob timedJob(Function<String, DbgapLookup> answer) {
+        return job((sid, v) -> {
+            askedAt.add(System.nanoTime() / 1_000_000);
+            asked.add(sid);
+            return answer.apply(sid);
+        });
+    }
+
+    private long gapMillis() {
+        return askedAt.get(1) - askedAt.get(0);
+    }
+
+    @Test
+    void after_dbgap_could_not_be_connected_to_the_next_study_waits_the_pause() {
+        managedInputs(study("A", "phs000001", "v1", true), study("B", "phs000002", "v1", true));
+        dbCounts("phs000002", "1", 5);
+        QaConsentCountsJob job = timedJob(sid -> sid.equals("phs000001")
+                ? DbgapLookup.unreachable("request failed: ConnectException", 3) : found(sid, 1, 1, 5));
+
+        JobResult r = run(job, Map.of("concurrency", "1", "dbgap-unreachable-pause-seconds", "1"));
+
+        assertThat(asked).containsExactly("phs000001", "phs000002");
+        assertThat(gapMillis()).isGreaterThanOrEqualTo(950);
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(r.getMetrics().get("unverifiedStudies")).isEqualTo(List.of("phs000001"));
+    }
+
+    @Test
+    void a_failure_where_dbgap_was_reached_does_not_pause() {
+        managedInputs(study("A", "phs000001", "v1", true), study("B", "phs000002", "v1", true));
+        dbCounts();
+        QaConsentCountsJob job = timedJob(sid -> sid.equals("phs000001")
+                ? DbgapLookup.failed("no usable answer after 3 attempt(s); last failure: HTTP 503", 3)
+                : found(sid, 1));
+
+        run(job, Map.of("concurrency", "1", "dbgap-unreachable-pause-seconds", "30"));
+
+        assertThat(asked).containsExactly("phs000001", "phs000002");
+        assertThat(gapMillis()).isLessThan(5_000);
+    }
+
+    @Test
+    void a_pause_of_zero_turns_the_pause_off() {
+        managedInputs(study("A", "phs000001", "v1", true), study("B", "phs000002", "v1", true));
+        dbCounts();
+        QaConsentCountsJob job = timedJob(sid -> DbgapLookup.unreachable("request failed: ConnectException", 3));
+
+        JobResult r = run(job, Map.of("concurrency", "1", "dbgap-unreachable-pause-seconds", "0"));
+
+        assertThat(asked).containsExactly("phs000001", "phs000002");
+        assertThat(gapMillis()).isLessThan(5_000);
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+    }
+
+    @Test
+    void the_deadline_is_checked_again_after_a_pause() throws IOException {
+        managedInputs(study("A", "phs000001", "v1", true), study("B", "phs000002", "v1", true));
+        dbCounts();
+        QaConsentCountsJob job = timedJob(sid -> DbgapLookup.unreachable("request failed: ConnectException", 3));
+
+        JobResult r = run(job, Map.of("concurrency", "1", "dbgap-unreachable-pause-seconds", "2",
+                "dbgap-deadline-seconds", "1"));
+
+        // B waited out the pause, by which time the 1 s deadline had passed, so it was never asked.
+        assertThat(asked).containsExactly("phs000001");
+        assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).anyMatch(l -> l.startsWith("phs000002,") && l.contains("deadline"));
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+    }
+
     @Test
     void padded_numbers_are_accepted_as_validation_accepted_them() {
         managedInputs(study("A", "phs000001", "v1", true));
@@ -521,11 +596,12 @@ class QaConsentCountsJobTest {
         managedInputs(study("A", "phs000001", "v1", true));
 
         JobResult r = run(job(), Map.of("concurrency", "0", "dbgap-max-attempts", "x",
-                "dbgap-base-url", "ftp://nope", "dbgap-timeout-seconds", "601"));
+                "dbgap-base-url", "ftp://nope", "dbgap-timeout-seconds", "601",
+                "dbgap-unreachable-pause-seconds", "3601"));
 
         assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(codes(r)).containsExactly("ERROR:BAD_PARAM", "ERROR:BAD_PARAM", "ERROR:BAD_PARAM",
-                "ERROR:BAD_DBGAP_BASE_URL");
+                "ERROR:BAD_PARAM", "ERROR:BAD_DBGAP_BASE_URL");
         assertThat(asked).isEmpty();
     }
 

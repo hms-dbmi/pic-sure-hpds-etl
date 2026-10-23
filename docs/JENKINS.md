@@ -92,9 +92,10 @@ defaults below. See [PERMANENT_PIPELINE.md](PERMANENT_PIPELINE.md#stage-11-qa-co
 | `DBGAP_MAX_BACKOFF_SECONDS`     | `120`                                                 | Longest wait, 1-3600; a `Retry-After` header is honoured instead (up to 5 minutes) |
 | `DBGAP_TIMEOUT_SECONDS`         | `60`                                                  | Per-request timeout, 1-600 |
 | `DBGAP_GIVE_UP_AFTER`           | `20`                                                  | Stop asking dbGaP once this many studies in a row got no usable answer, 1-1000; the rest are `UNVERIFIED`, so an outage ends in about half an hour rather than retrying every study |
+| `DBGAP_UNREACHABLE_PAUSE_SECONDS` | `120`                                               | After a study fails because dbGaP could not be connected to (connection error or connect timeout, after its retries), no new lookup starts for this long, 0-3600 (0: off); lookups already running carry on |
 | `DBGAP_DEADLINE_SECONDS`        | `5400`                                                | No lookup starts after this many seconds, 1-86400; keep it well inside `JOB_TIMEOUT_SECONDS`, or a slow dbGaP ends in a monitor timeout (exit 124) with no report |
 | `INSTANCE_TYPE`                 | `t3.medium`                                           | Runner instance type |
-| `JOB_TIMEOUT_SECONDS`           | `7200`                                                | Monitor timeout (exit 124) |
+| `JOB_TIMEOUT_SECONDS`           | `14400`                                               | Monitor timeout (exit 124); the job's own Jenkins timeout is 9 h, for two attempts |
 | `RUN_ID`, `PREBUILT_IMAGE_TAR`, `SKIP_TESTS`, `RETRY_ON_INFRA`, `ENV` | | As for every runner job; `RETRY_ON_INFRA` reruns it once after exit 4 (dbGaP answered for no study) |
 
 Discrepancies make the build UNSTABLE (validate.sh exit 10); dbGaP not answering for a study after

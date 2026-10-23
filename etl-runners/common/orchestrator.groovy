@@ -495,7 +495,8 @@ def runQaConsentCounts(String job) {
     // Every child parameter is passed: one left out gets the default the child registered on its
     // previous build. One request per study, up to 3 in all (2 retries, 60 s then 120 s apart,
     // Retry-After honoured), 60 s per request; 4 studies at once; no more lookups after 20 studies
-    // fail in a row or after 90 minutes. Unanswered studies are UNVERIFIED warnings (UNSTABLE); only
+    // fail in a row or after 90 minutes; new lookups pause 2 minutes after dbGaP could not be
+    // connected to. Unanswered studies are UNVERIFIED warnings (UNSTABLE); only
     // dbGaP answering for no study at all is exit 4.
     runDownstream(job, [
         string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs()),
@@ -508,9 +509,10 @@ def runQaConsentCounts(String job) {
         string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
         string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
         string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
+        string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', value: '120'),
         string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
         string(name: 'INSTANCE_TYPE', value: 't3.medium'),
-        string(name: 'JOB_TIMEOUT_SECONDS', value: '7200'),
+        string(name: 'JOB_TIMEOUT_SECONDS', value: '14400'),
         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-qa-consent-counts"),
         string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
         string(name: 'ENV', value: params.ENV),

@@ -11,6 +11,7 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -117,6 +118,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
     public DbgapLookup fetch(String studyId, String version) {
         URI uri = summaryUri(studyId, version);
         String lastFailure = null;
+        boolean lastUnreachable = false;
         for (int attempt = 1; attempt <= config.maxAttempts(); attempt++) {
             Attempt result;
             try {
@@ -135,6 +137,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
                     return DbgapLookup.failed(result.message, attempt);
                 default:
                     lastFailure = result.message;
+                    lastUnreachable = result.unreachable;
             }
             if (attempt == config.maxAttempts()) {
                 break;
@@ -153,7 +156,8 @@ public final class DbgapStudyClient implements DbgapStudySource {
         String message = "no usable answer from " + uri + " after " + config.maxAttempts()
                 + " attempt(s); last failure: " + lastFailure;
         log.warn("dbGaP {}.{}: {}", studyId, version, message);
-        return DbgapLookup.failed(message, config.maxAttempts());
+        return lastUnreachable ? DbgapLookup.unreachable(message, config.maxAttempts())
+                : DbgapLookup.failed(message, config.maxAttempts());
     }
 
     @Override
@@ -179,11 +183,14 @@ public final class DbgapStudyClient implements DbgapStudySource {
         HttpResponse<String> response;
         try {
             response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        } catch (HttpConnectTimeoutException e) {
+            return Attempt.unreachable("could not connect within " + config.requestTimeout().toSeconds() + " s");
         } catch (HttpTimeoutException e) {
             return Attempt.retry("timed out after " + config.requestTimeout().toSeconds() + " s", null);
         } catch (IOException e) {
-            return Attempt.retry("request failed: " + e.getClass().getSimpleName()
-                    + (e.getMessage() == null ? "" : ": " + e.getMessage()), null);
+            // Connection refused or reset, DNS failure, TLS handshake failure, ...: dbGaP not reached.
+            return Attempt.unreachable("request failed: " + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : ": " + e.getMessage()));
         }
 
         int status = response.statusCode();
@@ -261,21 +268,27 @@ public final class DbgapStudyClient implements DbgapStudySource {
 
     private enum Kind { FOUND, NOT_FOUND, RETRY, FATAL }
 
-    private record Attempt(Kind kind, DbgapStudySummary summary, String message, Duration retryAfter) {
+    private record Attempt(Kind kind, DbgapStudySummary summary, String message, Duration retryAfter,
+                           boolean unreachable) {
         static Attempt found(DbgapStudySummary summary) {
-            return new Attempt(Kind.FOUND, summary, null, null);
+            return new Attempt(Kind.FOUND, summary, null, null, false);
         }
 
         static Attempt notFound(String message) {
-            return new Attempt(Kind.NOT_FOUND, null, message, null);
+            return new Attempt(Kind.NOT_FOUND, null, message, null, false);
         }
 
         static Attempt retry(String message, Duration retryAfter) {
-            return new Attempt(Kind.RETRY, null, message, retryAfter);
+            return new Attempt(Kind.RETRY, null, message, retryAfter, false);
+        }
+
+        /** Retried like any other failure, but dbGaP was not reached at all. */
+        static Attempt unreachable(String message) {
+            return new Attempt(Kind.RETRY, null, message, null, true);
         }
 
         static Attempt fatal(String message) {
-            return new Attempt(Kind.FATAL, null, message, null);
+            return new Attempt(Kind.FATAL, null, message, null, false);
         }
     }
 }

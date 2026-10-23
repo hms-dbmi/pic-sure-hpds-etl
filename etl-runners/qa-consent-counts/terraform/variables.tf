@@ -157,6 +157,12 @@ variable "dbgap_give_up_after" {
   description = "--dbgap-give-up-after: stop asking dbGaP after this many studies in a row got no answer (1-1000). Blank: 20."
 }
 
+variable "dbgap_unreachable_pause_seconds" {
+  type        = string
+  default     = ""
+  description = "--dbgap-unreachable-pause-seconds: after a study fails because dbGaP could not be connected to, no new lookup starts for this long (0-3600). Blank: 120."
+}
+
 variable "dbgap_deadline_seconds" {
   type        = string
   default     = ""

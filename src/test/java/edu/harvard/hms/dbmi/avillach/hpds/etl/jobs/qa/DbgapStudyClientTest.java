@@ -191,6 +191,8 @@ class DbgapStudyClientTest {
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(5);
         assertThat(lookup.message()).contains("after 5 attempt(s)").contains("HTTP 503");
+        // dbGaP was reached; it just could not answer.
+        assertThat(lookup.unreachable()).isFalse();
         assertThat(waits).containsExactly(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(8),
                 Duration.ofSeconds(16));
         assertThat(s.requestsFor("phs001412.v4")).isEqualTo(5);
@@ -256,7 +258,39 @@ class DbgapStudyClientTest {
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(5);
         assertThat(lookup.message()).contains("request failed");
+        assertThat(lookup.unreachable()).isTrue();
         assertThat(waits).hasSize(4);
+    }
+
+    @Test
+    void a_slow_answer_that_times_out_every_time_is_not_unreachable() {
+        StubDbgapServer s = server().on("phs001412.v4", Reply.json(200, StubDbgapServer.sample()).delayed(2_000));
+        DbgapStudyClient c = client(s.baseUrl(), new DbgapStudyClient.Config(s.baseUrl(), 2, Duration.ofSeconds(1),
+                Duration.ofSeconds(1), Duration.ofMillis(300)), waits::add);
+
+        DbgapLookup lookup = c.fetch("phs001412", "v4");
+
+        assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
+        assertThat(lookup.message()).contains("timed out");
+        assertThat(lookup.unreachable()).isFalse();
+    }
+
+    @Test
+    void only_the_last_attempt_decides_whether_dbgap_was_unreachable() throws IOException {
+        int port = freePort();
+        String baseUrl = "http://127.0.0.1:" + port + "/study";
+        // Refused first; then up, but answering 503.
+        DbgapStudyClient c = client(baseUrl, new DbgapStudyClient.Config(baseUrl, 2, Duration.ofSeconds(1),
+                Duration.ofSeconds(1), Duration.ofSeconds(5)), d -> {
+            waits.add(d);
+            closeables.add(new StubDbgapServer(port).on("phs001412.v4", Reply.json(503, "busy")));
+        });
+
+        DbgapLookup lookup = c.fetch("phs001412", "v4");
+
+        assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
+        assertThat(lookup.message()).contains("HTTP 503");
+        assertThat(lookup.unreachable()).isFalse();
     }
 
     @Test

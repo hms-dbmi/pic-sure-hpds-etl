@@ -36,17 +36,18 @@ module "etl_runner" {
 
   # Blank values are left out, so the job applies its own defaults.
   job_params = { for k, v in {
-    managed_inputs                = var.managed_inputs_uri
-    load_counts                   = var.load_counts_uri
-    study_filter                  = var.study_filter
-    concurrency                   = var.concurrency
-    dbgap_base_url                = var.dbgap_base_url
-    dbgap_max_attempts            = var.dbgap_max_attempts
-    dbgap_initial_backoff_seconds = var.dbgap_initial_backoff_seconds
-    dbgap_max_backoff_seconds     = var.dbgap_max_backoff_seconds
-    dbgap_timeout_seconds         = var.dbgap_timeout_seconds
-    dbgap_give_up_after           = var.dbgap_give_up_after
-    dbgap_deadline_seconds        = var.dbgap_deadline_seconds
+    managed_inputs                  = var.managed_inputs_uri
+    load_counts                     = var.load_counts_uri
+    study_filter                    = var.study_filter
+    concurrency                     = var.concurrency
+    dbgap_base_url                  = var.dbgap_base_url
+    dbgap_max_attempts              = var.dbgap_max_attempts
+    dbgap_initial_backoff_seconds   = var.dbgap_initial_backoff_seconds
+    dbgap_max_backoff_seconds       = var.dbgap_max_backoff_seconds
+    dbgap_timeout_seconds           = var.dbgap_timeout_seconds
+    dbgap_give_up_after             = var.dbgap_give_up_after
+    dbgap_unreachable_pause_seconds = var.dbgap_unreachable_pause_seconds
+    dbgap_deadline_seconds          = var.dbgap_deadline_seconds
   } : k => v if v != "" }
 
   tags = merge({

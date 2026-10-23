@@ -693,7 +693,11 @@ not the expected JSON: up to 3 requests in all (2 retries), waiting 60 s then 12
 `Retry-After` header, seconds or HTTP-date, is honoured instead, up to 5 minutes), 60 s per
 request. Any other 4xx is not retried. So that an outage ends quickly, with its report, rather than
 in the runner's monitor timeout (exit 124, nothing written), no lookup starts once 20 studies in a
-row got no usable answer (about half an hour of retries, 4 at a time), or 90 minutes into the lookups; those studies are `UNVERIFIED` too. A
+row got no usable answer (about half an hour of retries, 4 at a time), or 90 minutes into the lookups; those studies are `UNVERIFIED` too.
+A study that failed because dbGaP could not be **connected to** at all (connection refused or
+reset, DNS or TLS failure, connect timeout) holds back every lookup not yet started for 2 minutes
+(`DBGAP_UNREACHABLE_PAUSE_SECONDS`), giving dbGaP, or the route to it, room to recover; a slow or
+error answer does not. The runner's monitor timeout is 4 hours. A
 study still unanswered is `UNVERIFIED`, one `DBGAP_UNAVAILABLE` WARNING each: the job **succeeds
 with warnings** (UNSTABLE), every other study is compared, and both CSVs and the JSON report are
 written and published as usual. Only when dbGaP answered for **no** study does the job fail with

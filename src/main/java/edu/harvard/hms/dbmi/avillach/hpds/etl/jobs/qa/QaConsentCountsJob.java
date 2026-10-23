@@ -49,7 +49,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
@@ -101,7 +103,9 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
     static final int DEFAULT_CONCURRENCY = 4;
     static final int DEFAULT_GIVE_UP_AFTER = 20;
-    /** 90 minutes: plus one in-flight lookup's retries (~6 min), inside the runner's 7200 s monitor timeout. */
+    /** After a study fails because dbGaP could not be connected to, no new lookup starts for this long. */
+    static final int DEFAULT_UNREACHABLE_PAUSE_SECONDS = 120;
+    /** 90 minutes: plus the in-flight lookups' retries (~6 min), well inside the runner's 14400 s monitor timeout. */
     static final int DEFAULT_DEADLINE_SECONDS = 5400;
     static final int MAX_CONCURRENCY = 16;
 
@@ -174,6 +178,11 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                                         + "(1-1000; default " + DEFAULT_GIVE_UP_AFTER + "): an outage then ends the lookups "
                                         + "in about half an hour (4 at a time), the rest UNVERIFIED, instead of retrying "
                                         + "every study", "20"),
+                        ParamSpec.optional("dbgap-unreachable-pause-seconds",
+                                "After a study fails because dbGaP could not be connected to (connection error or "
+                                        + "connect timeout, after its retries), wait this long before starting the next "
+                                        + "study's lookup (0-3600; default " + DEFAULT_UNREACHABLE_PAUSE_SECONDS + ")",
+                                "120"),
                         ParamSpec.optional("dbgap-deadline-seconds",
                                 "No dbGaP lookup starts after this many seconds of lookups (1-86400; default "
                                         + DEFAULT_DEADLINE_SECONDS + "), so the run ends, with its report, inside the "
@@ -190,6 +199,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         intParam(ctx, report, "dbgap-max-backoff-seconds", 1, 3600);
         intParam(ctx, report, "dbgap-timeout-seconds", 1, 600);
         intParam(ctx, report, "dbgap-give-up-after", 1, 1000);
+        intParam(ctx, report, "dbgap-unreachable-pause-seconds", 0, 3600);
         intParam(ctx, report, "dbgap-deadline-seconds", 1, 86400);
         ctx.get("dbgap-base-url").ifPresent(url -> {
             if (!isHttpUrl(url.trim())) {
@@ -245,6 +255,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         }
         Map<String, DbgapLookup> lookups = lookUp(inputs, clientConfig(ctx), intValue(ctx, "concurrency", DEFAULT_CONCURRENCY),
                 intValue(ctx, "dbgap-give-up-after", DEFAULT_GIVE_UP_AFTER),
+                Duration.ofSeconds(intValue(ctx, "dbgap-unreachable-pause-seconds", DEFAULT_UNREACHABLE_PAUSE_SECONDS)),
                 Duration.ofSeconds(intValue(ctx, "dbgap-deadline-seconds", DEFAULT_DEADLINE_SECONDS)));
 
         List<StudyResult> results = new ArrayList<>();
@@ -397,9 +408,13 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
      * of retries. So no lookup starts once {@code giveUpAfter} studies in a row got no usable answer
      * (any answer, a NOT_FOUND included, resets the count), or once {@code deadline} has passed since
      * the first; the studies not asked are FAILED with 0 attempts, i.e. UNVERIFIED.
+     *
+     * <p>To give an unreachable dbGaP (or our route to it) room to recover, a study that failed
+     * because dbGaP could not be connected to holds back every lookup not yet started for
+     * {@code unreachablePause}; lookups already in flight carry on.
      */
     private Map<String, DbgapLookup> lookUp(List<StudyInput> inputs, DbgapStudyClient.Config config, int concurrency,
-                                            int giveUpAfter, Duration deadline) {
+                                            int giveUpAfter, Duration unreachablePause, Duration deadline) {
         List<StudyInput> toAsk = inputs.stream().filter(i -> i.version() != null).toList();
         Map<String, DbgapLookup> lookups = new LinkedHashMap<>();
         if (toAsk.isEmpty()) {
@@ -410,6 +425,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         AtomicInteger threads = new AtomicInteger();
         AtomicInteger failedInARow = new AtomicInteger();
         long stopAt = System.nanoTime() + deadline.toNanos();
+        AtomicLong pausedUntil = new AtomicLong(System.nanoTime());
         Map<String, String> mdc = MDC.getCopyOfContextMap();
         ExecutorService pool = Executors.newFixedThreadPool(Math.min(concurrency, toAsk.size()), r -> {
             Thread t = new Thread(r, "dbgap-" + threads.incrementAndGet());
@@ -424,6 +440,19 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                         MDC.setContextMap(mdc);
                     }
                     try {
+                        long pause = pausedUntil.get() - System.nanoTime();
+                        if (pause > 0) {
+                            log.info("dbGaP {}.{}: waiting {} s after dbGaP could not be connected to", in.studyId(),
+                                    in.version(), TimeUnit.NANOSECONDS.toSeconds(pause) + 1);
+                            try {
+                                while ((pause = pausedUntil.get() - System.nanoTime()) > 0) {
+                                    TimeUnit.NANOSECONDS.sleep(pause);
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                return DbgapLookup.failed("not asked: interrupted while waiting for dbGaP to recover", 0);
+                            }
+                        }
                         if (failedInARow.get() >= giveUpAfter) {
                             return DbgapLookup.failed("not asked: dbGaP gave no usable answer for the last "
                                     + failedInARow.get() + " studies in a row, so the run stopped asking", 0);
@@ -443,6 +472,12 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                             failedInARow.set(0);
                         } else {
                             failedInARow.incrementAndGet();
+                        }
+                        if (lookup != null && lookup.unreachable() && !unreachablePause.isZero()) {
+                            long until = System.nanoTime() + unreachablePause.toNanos();
+                            pausedUntil.accumulateAndGet(until, Math::max);
+                            log.warn("dbGaP could not be connected to for {}.{}; no new lookup starts for {} s",
+                                    in.studyId(), in.version(), unreachablePause.toSeconds());
                         }
                         return lookup;
                     } finally {

@@ -20,7 +20,9 @@
 // (default 60 s then 120 s, gentle on dbGaP; Retry-After honoured). A study still unanswered is
 // UNVERIFIED, a DBGAP_UNAVAILABLE warning: the build is UNSTABLE and the CSVs and report are written
 // and published as usual. Only when dbGaP answered for no study at all does the job fail (exit 4;
-// RETRY_ON_INFRA reruns it once). DBGAP_GIVE_UP_AFTER (default 20) studies failing in a row, or
+// RETRY_ON_INFRA reruns it once). A study that failed because dbGaP could not be connected to
+// holds back the next study's lookup for DBGAP_UNREACHABLE_PAUSE_SECONDS (default 120), to give it
+// room to recover. DBGAP_GIVE_UP_AFTER (default 20) studies failing in a row, or
 // DBGAP_DEADLINE_SECONDS passing, stops further lookups, so an outage ends with the report rather
 // than in a monitor timeout.
 //
@@ -65,8 +67,8 @@ pipeline {
         copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
-        // Two attempts of up to JOB_TIMEOUT_SECONDS each (RETRY_ON_INFRA), plus provisioning.
-        timeout(time: 5, unit: 'HOURS')
+        // Two attempts of up to JOB_TIMEOUT_SECONDS (default 4 h) each (RETRY_ON_INFRA), plus provisioning.
+        timeout(time: 9, unit: 'HOURS')
     }
 
     parameters {
@@ -90,13 +92,15 @@ pipeline {
                description: '--dbgap-timeout-seconds: per-request timeout, 1-600.')
         string(name: 'DBGAP_GIVE_UP_AFTER', defaultValue: '20',
                description: '--dbgap-give-up-after: stop asking dbGaP once this many studies in a row got no usable answer (1-1000), so an outage ends with the report rather than retrying every study; the rest are UNVERIFIED.')
+        string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', defaultValue: '120',
+               description: '--dbgap-unreachable-pause-seconds: after a study fails because dbGaP could not be connected to (connection error or connect timeout, after its retries), no new study lookup starts for this long, 0-3600 (0: no pause). Lookups already running carry on.')
         string(name: 'DBGAP_DEADLINE_SECONDS', defaultValue: '5400',
                description: '--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Keep it well inside JOB_TIMEOUT_SECONDS, so a slow dbGaP still ends with the report written rather than a monitor timeout (exit 124, no report).')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
                description: 'Runner instance type.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '14400',
                description: 'How long to wait for the runner before giving up (monitor exits 124). ~600 studies at 4 at a time take ~30 minutes when dbGaP is healthy.')
         string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
                description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
@@ -124,6 +128,7 @@ pipeline {
         TF_VAR_dbgap_max_backoff_seconds     = "${params.DBGAP_MAX_BACKOFF_SECONDS.trim()}"
         TF_VAR_dbgap_timeout_seconds         = "${params.DBGAP_TIMEOUT_SECONDS.trim()}"
         TF_VAR_dbgap_give_up_after           = "${params.DBGAP_GIVE_UP_AFTER.trim()}"
+        TF_VAR_dbgap_unreachable_pause_seconds = "${params.DBGAP_UNREACHABLE_PAUSE_SECONDS.trim()}"
         TF_VAR_dbgap_deadline_seconds        = "${params.DBGAP_DEADLINE_SECONDS.trim()}"
         TF_VAR_instance_type                 = "${params.INSTANCE_TYPE.trim()}"
 
