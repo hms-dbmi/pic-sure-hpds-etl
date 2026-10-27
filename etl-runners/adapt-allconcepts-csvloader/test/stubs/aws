@@ -1,0 +1,70 @@
+#!/bin/bash
+# Test stub for the aws CLI, read-only. S3 is a directory tree: $STUB_S3/<bucket>/<key>. Knobs (environment):
+#   STUB_LOG            file that receives one line per call
+#   STUB_VERSIONING     what get-bucket-versioning reports (default Enabled)
+#   STUB_NO_LIST_VERSIONS=1   list-object-versions fails with AccessDenied
+#   STUB_NO_GET_VERSION=1     get-object with --version-id fails with AccessDenied
+# Anything that would write (s3 rm/mv/sync/mb, put-object, ...) fails the test run.
+S3=${STUB_S3:?STUB_S3 is not set}
+[ -z "${STUB_LOG:-}" ] || echo "aws $*" >>"$STUB_LOG"
+group=$1
+op=$2
+shift 2 || true
+bucket='' key='' prefix='' query='' maxkeys='' version='' dest='' src=''
+while [ $# -gt 0 ]; do
+    case $1 in
+        --bucket) bucket=$2; shift 2 ;;
+        --key) key=$2; shift 2 ;;
+        --prefix) prefix=$2; shift 2 ;;
+        --query) query=$2; shift 2 ;;
+        --max-keys | --max-items) maxkeys=$2; shift 2 ;;
+        --version-id) version=$2; shift 2 ;;
+        --region | --output | --range) shift 2 ;;
+        --no-progress | --only-show-errors) shift ;;
+        s3://*) if [ -z "$src" ]; then src=$1; else dest=$1; fi; shift ;;
+        -*) shift ;;
+        *) if [ -z "$src" ]; then src=$1; else dest=$1; fi; shift ;;
+    esac
+done
+denied() { echo "An error occurred (AccessDenied) when calling the $1 operation" >&2; exit 254; }
+etag() { if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | cut -d' ' -f1; else md5 -q "$1"; fi; }
+size() { wc -c <"$1" | tr -d ' '; }
+
+case "$group $op" in
+    "s3api head-bucket") [ -d "$S3/$bucket" ] || denied HeadBucket ;;
+    "s3api get-bucket-versioning") echo "${STUB_VERSIONING:-Enabled}" ;;
+    "s3api head-object")
+        f="$S3/$bucket/$key"
+        [ -f "$f" ] || { echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 254; }
+        printf '"%s"\tNone\t%s\n' "$(etag "$f")" "$(size "$f")"
+        ;;
+    "s3api list-objects-v2")
+        dir="$S3/$bucket"
+        keys=$(cd "$dir" 2>/dev/null && find . -type f | sed 's|^\./||' | LC_ALL=C sort | awk -v p="$prefix" 'index($0, p) == 1')
+        if [ "$query" = KeyCount ]; then
+            n=$(printf '%s' "$keys" | grep -c '' || true)
+            [ -z "$maxkeys" ] || [ "$n" -le "$maxkeys" ] || n=$maxkeys
+            echo "$n"
+        else
+            while IFS= read -r k; do
+                [ -n "$k" ] || continue
+                printf '%s\t%s\t"%s"\n' "$k" "$(size "$dir/$k")" "$(etag "$dir/$k")"
+            done <<<"$keys"
+        fi
+        ;;
+    "s3api list-object-versions")
+        [ -z "${STUB_NO_LIST_VERSIONS:-}" ] || denied ListObjectVersions
+        echo "v-1"
+        ;;
+    "s3api get-object")
+        [ -z "$version" ] || [ -z "${STUB_NO_GET_VERSION:-}" ] || denied GetObject
+        echo '{}'
+        ;;
+    "s3 cp")
+        case $src in
+            s3://*) f="$S3/${src#s3://}"; [ -f "$f" ] || { echo "download failed: $src" >&2; exit 1; }; mkdir -p "$(dirname "$dest")"; cp "$f" "$dest" ;;
+            *) echo "stub: uploads are not allowed ($*)" >&2; exit 99 ;;
+        esac
+        ;;
+    *) echo "stub aws: unsupported or write call: $group $op" >&2; exit 99 ;;
+esac

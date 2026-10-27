@@ -1,0 +1,14 @@
+Vendored, unmodified, from the in-boundary runner hpds-pheno-load. These are the runner's own gates over a
+split output (the adapter's contract); do not edit them here, re-copy them if the runner changes.
+
+repo:   avillach-jenkins-bdc-etl (SRCE GitLab; local forge thomas/avillach-jenkins-bdc-etl), branch integration
+commit: d052492 (all four files below as of that commit)
+
+file here                         path in the repo (under pipelines/hpds-pheno-load/)   blob sha at d052492
+scripts/stage-inputs.sh           scripts/stage-inputs.sh                               a08cebf8dc94085d737f33013b80da284bd2ca59
+lib.sh                            lib.sh                                                26e9425f5f14740d12e83829019319479d3e1a07
+flow-lib.sh                       flow-lib.sh                                           ff7af7322dda811e68981ba044bd083fb2b0d11b
+decrypt-check/InputCheck.java     decrypt-check/InputCheck.java                         b15fe9227a523573da8539e2ed3117c59b616fd6
+
+stage-inputs.sh sources ../lib.sh, so the scripts/ sub-directory is kept as in the runner. InputCheck needs
+commons-csv on the class path (the runner image bundles it); run-tests.sh finds one in ~/.m2 or takes CSV_JAR.
