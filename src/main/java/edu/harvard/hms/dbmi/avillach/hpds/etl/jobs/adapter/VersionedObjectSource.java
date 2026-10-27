@@ -22,7 +22,8 @@ public interface VersionedObjectSource {
     /**
      * Opens exactly {@code versionId} of {@code uri}. The caller closes the stream.
      *
-     * @throws edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException         the object or version does not exist
+     * @throws edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException           the version does not exist (a pin that failed)
+     * @throws edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException         no version id was given, or a local file is missing
      * @throws edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException the read failed
      */
     InputStream open(String uri, String versionId);

@@ -427,4 +427,158 @@ class AdaptAllConceptsForCsvLoaderJobTest {
         assertThat(o.exit()).isEqualTo(3);
         assertThat(o.message()).contains("INVALID_UTF8").contains("phs000000.c1");
     }
+
+    // ------------------------------------------------------------------------------------------------ added after review
+
+    @Test
+    void patient_counts_do_not_depend_on_how_large_the_ids_are() throws IOException {
+        file("global", "global.csv", lines(q(Integer.MAX_VALUE, C, "", "phs000000.c1", 0), q(2_000_000_000, C, "", "phs000000.c1", 0)));
+        file("phs000000.c1", "c1.csv", lines(q(Integer.MAX_VALUE, AGE0, "40", "", 0), q(2_000_000_000, AGE0, "41", "", 0)));
+        publishManifest();
+
+        Outcome o = run();
+
+        assertThat(o.exit()).as(o.message()).isZero();
+        JsonNode m = AdapterTestSupport.json(out.resolve("split_manifest.json"));
+        assertThat(m.at("/partitions/0/patients").asInt()).isEqualTo(2);
+        assertThat(m.at("/partitions/0/rows").asInt()).isEqualTo(4);
+    }
+
+    @Test
+    void a_row_of_an_s3_manifest_that_is_not_an_s3_object_is_refused_naming_the_partition() {
+        src.put(MANIFEST, "partition,s3_uri,version_id,last_updated,md5\n"
+                + "global," + BASE + "g.csv,v1,t," + "0".repeat(32) + "\n"
+                + "phs000000.c1,/mnt/other/c1.csv,,t," + "0".repeat(32) + "\n");
+        Outcome o = run();
+        assertThat(o.exit()).isEqualTo(2);
+        assertThat(o.issueCodes()).contains("MANIFEST_BAD_URI");
+        assertThat(((edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ValidationFailedException) o.error()).report().getIssues())
+                .anyMatch(i -> i.message().contains("phs000000.c1"));
+    }
+
+    @Test
+    void a_pinned_version_that_no_longer_exists_is_a_data_error() throws IOException {
+        file("global", "global.csv", lines(q(1, C, "", "phs000000.c1", 0)));
+        file("phs000000.c1", "c1.csv", lines(q(1, AGE0, "40", "", 0)));
+        rows.get(1)[2] = "v9";
+        publishManifest();
+
+        Outcome o = run();
+
+        assertThat(o.exit()).isEqualTo(3);
+        assertThat(o.message()).contains("VERSION_NOT_FOUND").contains("v9");
+        assertThat(outputIsEmpty()).isTrue();
+    }
+
+    /** Serves c1.csv for a few bytes and then fails the way a dropped S3 connection does. */
+    private static final class BreakingSource extends InMemoryVersionedObjectSource {
+        @Override
+        public java.io.InputStream open(String uri, String versionId) {
+            java.io.InputStream real = super.open(uri, versionId);
+            if (!uri.endsWith("c1.csv")) {
+                return real;
+            }
+            return new java.io.InputStream() {
+                int n;
+
+                @Override
+                public int read() throws IOException {
+                    if (n++ > 5) {
+                        throw new IOException("Connection reset");
+                    }
+                    return real.read();
+                }
+            };
+        }
+    }
+
+    @Test
+    void a_read_that_breaks_part_way_is_reported_as_a_read_failure_naming_the_object_with_the_failure_report_kept() throws IOException {
+        src = new BreakingSource();
+        job = new AdaptAllConceptsForCsvLoaderJob(new IoResolver(null), src, AdapterTestSupport.JSON);
+        file("global", "global.csv", lines(q(1, C, "", "phs000000.c1", 0)));
+        file("phs000000.c1", "c1.csv", lines(q(1, AGE0, "40", "", 0), q(1, AGE0, "41", "", 0)));
+        publishManifest();
+
+        Outcome o = run();
+
+        assertThat(o.exit()).isEqualTo(4);
+        assertThat(o.message()).contains("READ_FAILED").contains("phs000000.c1").contains(BASE + "c1.csv").contains("Connection reset");
+        assertThat(outputIsEmpty()).isTrue();
+        JsonNode report = AdapterTestSupport.json(reports.resolve("adapt-allconcepts-csvloader-test-run-report.json"));
+        assertThat(report.at("/status").asText()).isEqualTo("failed");
+        assertThat(report.at("/failures/0").asText()).contains("READ_FAILED");
+    }
+
+    /** Uploads and deletes through the local filesystem, failing the chosen upload and deletes. */
+    private static final class FlakyIo extends IoResolver {
+        int uploads;
+        int failUpload;
+        final java.util.Set<String> failDeleteOf = new java.util.HashSet<>();
+        final List<String> deleted = new ArrayList<>();
+
+        FlakyIo() {
+            super(null);
+        }
+
+        @Override
+        public void writeOutputFile(String uri, Path file) {
+            if (++uploads == failUpload) {
+                throw new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException("S3 is down: " + uri);
+            }
+            super.writeOutputFile(uri, file);
+        }
+
+        @Override
+        public void delete(String uri) {
+            if (failDeleteOf.stream().anyMatch(uri::endsWith)) {
+                throw new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException("cannot delete " + uri);
+            }
+            deleted.add(uri);
+            super.delete(uri);
+        }
+    }
+
+    @Test
+    void a_failed_upload_removes_what_was_already_written_and_exits_4_with_the_output_empty() throws IOException {
+        FlakyIo io = new FlakyIo();
+        io.failUpload = 3; // the partition file and report.json are in place; split_manifest.json fails
+        job = new AdaptAllConceptsForCsvLoaderJob(io, src, AdapterTestSupport.JSON);
+        simple();
+
+        Outcome o = run();
+
+        assertThat(o.exit()).isEqualTo(4);
+        assertThat(o.message()).contains("S3 is down");
+        assertThat(outputIsEmpty()).isTrue();
+        assertThat(io.deleted).hasSize(3).anyMatch(u -> u.endsWith("phs000000.c1-allConcepts.csv")).anyMatch(u -> u.endsWith("report.json"))
+                .anyMatch(u -> u.endsWith("split_manifest.json"));
+        assertThat(AdapterTestSupport.json(reports.resolve("adapt-allconcepts-csvloader-test-run-report.json")).at("/status").asText())
+                .isEqualTo("failed");
+
+        // and the retry Jenkins makes finds an empty output
+        FlakyIo healthy = new FlakyIo();
+        job = new AdaptAllConceptsForCsvLoaderJob(healthy, src, AdapterTestSupport.JSON);
+        Outcome again = run();
+        assertThat(again.exit()).as(again.message()).isZero();
+    }
+
+    @Test
+    void a_failed_upload_whose_cleanup_also_fails_exits_3_naming_the_leftover_keys() throws IOException {
+        FlakyIo io = new FlakyIo();
+        io.failUpload = 3;
+        io.failDeleteOf.add("phs000000.c1-allConcepts.csv");
+        job = new AdaptAllConceptsForCsvLoaderJob(io, src, AdapterTestSupport.JSON);
+        simple();
+
+        Outcome o = run();
+
+        assertThat(o.exit()).isEqualTo(3);
+        assertThat(o.message()).contains("PUBLISH_CLEANUP_FAILED").contains("NOT empty").contains("phs000000.c1-allConcepts.csv")
+                .contains("S3 is down");
+        assertThat(o.message()).doesNotContain("report.json]"); // the one that could be removed is not named as left over
+        assertThat(Files.exists(out.resolve("phs000000.c1-allConcepts.csv"))).isTrue();
+        assertThat(Files.exists(out.resolve("report.json"))).isFalse();
+        assertThat(o.error().getSuppressed()).hasSize(1);
+    }
 }

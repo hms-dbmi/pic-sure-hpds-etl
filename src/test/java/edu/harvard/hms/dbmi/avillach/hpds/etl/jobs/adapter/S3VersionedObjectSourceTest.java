@@ -1,6 +1,7 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.adapter;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -73,11 +74,18 @@ class S3VersionedObjectSourceTest {
     }
 
     @Test
-    void reading_without_a_version_id_or_a_missing_version_is_a_config_error() {
+    void reading_without_a_version_id_is_a_config_error() {
         assertThatThrownBy(() -> source.open("s3://bucket/k", "")).isInstanceOf(ConfigException.class);
         assertThatThrownBy(() -> source.open("s3://bucket/k", "null")).isInstanceOf(ConfigException.class);
+    }
+
+    @Test
+    void a_pinned_version_that_no_longer_exists_is_a_data_error_not_a_config_error() {
         when(s3.getObject(any(GetObjectRequest.class))).thenThrow(S3Exception.builder().statusCode(404).message("NoSuchVersion").build());
-        assertThatThrownBy(() -> source.open("s3://bucket/k", "gone")).isInstanceOf(ConfigException.class);
+        assertThatThrownBy(() -> source.open("s3://bucket/k", "gone")).isInstanceOf(DataException.class)
+                .hasMessageContaining("VERSION_NOT_FOUND").hasMessageContaining("gone");
+        when(s3.getObject(any(GetObjectRequest.class))).thenThrow(NoSuchKeyException.builder().build());
+        assertThatThrownBy(() -> source.open("s3://bucket/k", "gone")).isInstanceOf(DataException.class);
     }
 
     @Test

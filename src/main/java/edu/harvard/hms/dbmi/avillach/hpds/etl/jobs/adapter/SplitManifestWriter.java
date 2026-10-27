@@ -29,6 +29,11 @@ final class SplitManifestWriter {
     /** What the documents say about the run, besides the engine's counts. */
     record RunMeta(String job, String runId, String generatedAt, String manifestUri, String manifestVersionId, String manifestMd5,
                    int manifestRows, String output, AdapterOptions options, List<String> failures, List<String> warnings) {
+
+        RunMeta withFailures(List<String> why) {
+            return new RunMeta(job, runId, generatedAt, manifestUri, manifestVersionId, manifestMd5, manifestRows, output, options,
+                    why, warnings);
+        }
     }
 
     static Map<String, Object> splitManifest(RunMeta meta, AdaptationEngine e) {
@@ -40,7 +45,7 @@ final class SplitManifestWriter {
             entry.put("kind", "study");
             entry.put("file", p.file());
             entry.put("rows", e.rowsWritten(p));
-            entry.put("patients", e.patients[p.index()].cardinality());
+            entry.put("patients", e.patientsOf(p));
             partitions.add(entry);
         }
         m.put("partitions", partitions);
@@ -80,7 +85,7 @@ final class SplitManifestWriter {
             entry.put("file", p.file());
             entry.put("source", Map.of("uri", p.row().s3Uri(), "versionId", p.row().versionId(), "md5", p.row().md5()));
             entry.put("rows", e.rowsWritten(p));
-            entry.put("patients", e.patients[p.index()].cardinality());
+            entry.put("patients", e.patientsOf(p));
             entry.put("rowsRead", t.input);
             entry.put("rowsWrittenFromPartition", t.written);
             entry.put("rowsWrittenFromGlobal", e.globalRows[p.index()]);

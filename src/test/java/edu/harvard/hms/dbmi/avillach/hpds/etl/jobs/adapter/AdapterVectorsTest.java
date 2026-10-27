@@ -118,7 +118,7 @@ class AdapterVectorsTest {
         Outcome strict = run(vectorDir("v2").resolve("inputs"), "allConcepts_manifest.csv", Map.of(), tmp.resolve("strict"));
         assertThat(strict.exit()).isEqualTo(3);
         assertThat(strict.message()).contains("REJECT_FRACTION_EXCEEDED").contains("EMBEDDED_LINE_BREAK=1").contains("NUMERIC_NVAL=1")
-                .contains("BAD_TIMESTAMP=1").contains("NON_CANONICAL_PATH=1");
+                .contains("BAD_TIMESTAMP=1").contains("NON_CANONICAL_PATH=1").contains("MALFORMED_RECORD=1");
     }
 
     @Test

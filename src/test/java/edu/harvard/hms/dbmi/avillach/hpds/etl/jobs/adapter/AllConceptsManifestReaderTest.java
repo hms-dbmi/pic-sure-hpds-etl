@@ -141,4 +141,23 @@ class AllConceptsManifestReaderTest {
         assertThat(AllConceptsManifestReader.resolve("/data/in/m.csv", "s3://b/k")).isEqualTo("s3://b/k");
         assertThat(AllConceptsManifestReader.resolve("/data/in/m.csv", "/abs/x.csv")).isEqualTo("/abs/x.csv");
     }
+
+    @Test
+    void an_s3_manifest_refuses_a_row_that_is_not_an_s3_object_and_a_local_manifest_keeps_local_paths() throws IOException {
+        String csv = AllConceptsManifestReader.HEADER + "\n"
+                + "global,s3://b/data/g.csv,v1,t," + MD5 + "\n"
+                + "phs000000.c1,/mnt/data/c1.csv,,t," + MD5 + "\n"
+                + "phs999999.c1,rel/c1.csv,,t," + MD5 + "\n";
+        Plan[] p = new Plan[1];
+        ValidationReport r = plan(csv, Set.of(), Set.of(), p);
+        assertThat(codes(r)).containsExactly("MANIFEST_BAD_URI", "MANIFEST_BAD_URI");
+        assertThat(r.getIssues()).extracting(ValidationIssue::message)
+                .anyMatch(m -> m.contains("phs000000.c1") && m.contains("/mnt/data/c1.csv"))
+                .anyMatch(m -> m.contains("phs999999.c1") && m.contains("rel/c1.csv"));
+
+        ValidationReport local = new ValidationReport("input");
+        AllConceptsManifestReader.plan(read(csv.replace("s3://b/data/g.csv", "g.csv")), "/data/in/allConcepts_manifest.csv", Set.of(),
+                Set.of(), local);
+        assertThat(local.hasErrors()).isFalse();
+    }
 }

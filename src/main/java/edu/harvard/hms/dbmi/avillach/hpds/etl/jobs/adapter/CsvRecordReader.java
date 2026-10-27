@@ -75,7 +75,8 @@ final class CsvRecordReader implements AutoCloseable {
             StringBuilder joined = new StringBuilder(line);
             List<String> extra = new ArrayList<>();
             for (int i = 0; i < MAX_CONTINUATION_LINES; i++) {
-                String more = reader.readLine();
+                // through nextLine(), so lines queued by an earlier give-up are read before the file, in order
+                String more = nextLine();
                 if (more == null) {
                     break;
                 }

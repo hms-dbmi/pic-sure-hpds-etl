@@ -1,6 +1,6 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.adapter;
 
-import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -41,7 +41,7 @@ class InMemoryVersionedObjectSource implements VersionedObjectSource {
         List<byte[]> versions = objects.get(uri);
         if (versions == null || versionId == null || !versionId.matches("v[0-9]+")
                 || Integer.parseInt(versionId.substring(1)) > versions.size()) {
-            throw new ConfigException("No version " + versionId + " of " + uri);
+            throw new DataException("VERSION_NOT_FOUND: no version " + versionId + " of " + uri);
         }
         opened.add(uri + "#" + versionId);
         beforeOpen.accept(uri + "#" + versionId);

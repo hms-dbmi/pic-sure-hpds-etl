@@ -45,4 +45,18 @@ class PatientConsentIndexTest {
         assertThat(index.partitionsOfStudy(1, 1)).containsExactly(2);
         assertThat(index.partitionsOfStudy(2, 0)).isEmpty();
     }
+
+    @Test
+    void patients_are_counted_per_partition_whatever_the_size_of_their_ids() {
+        // ids near 2^31-1 would make a bit set per partition 256 MiB; a count needs one long per partition
+        index.grant(2_000_000_000, 0);
+        index.grant(Integer.MAX_VALUE, 0);
+        index.grant(Integer.MAX_VALUE, 0); // repeated grant: not counted again
+        index.grant(Integer.MAX_VALUE, 2);
+        index.grant(5, 1);
+        assertThat(index.patientsOf(0)).isEqualTo(2);
+        assertThat(index.patientsOf(1)).isEqualTo(1);
+        assertThat(index.patientsOf(2)).isEqualTo(1);
+        assertThat(index.patients()).isEqualTo(3);
+    }
 }

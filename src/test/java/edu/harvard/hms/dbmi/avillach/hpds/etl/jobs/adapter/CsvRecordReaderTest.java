@@ -96,4 +96,19 @@ class CsvRecordReaderTest {
         byte[] bad = {'a', ',', (byte) 0xC3, (byte) 0x28, '\n'};
         assertThatThrownBy(() -> read(bad)).isInstanceOf(CharacterCodingException.class);
     }
+
+    @Test
+    void a_pushed_back_line_that_opens_a_quote_reads_its_continuation_from_the_queue_before_the_file() throws IOException {
+        // Line 1 opens a quote; the quote is closed by line 2 and re-opened, so the lines join until line 3 puts text after
+        // a closing quote: line 1 is malformed and lines 2 and 3 are pushed back. Line 2 opens a quote standalone and its
+        // continuation is the queued line 3, not the file's line 4 (which a read straight from the file would take, queueing
+        // the lines out of order).
+        List<CsvRecordReader.Record> r = read("1,\"a\n2\",b,\"c\nd\"x\n5,6\n");
+        assertThat(r).extracting(CsvRecordReader.Record::raw).containsExactly("1,\"a", "2\",b,\"c", "d\"x", "5,6");
+        assertThat(r).extracting(CsvRecordReader.Record::number).containsExactly(1L, 2L, 3L, 4L);
+        assertThat(r.get(0).malformed()).isTrue();
+        assertThat(r.get(1).malformed()).isTrue();
+        assertThat(r.get(2).fields()).containsExactly("d\"x");
+        assertThat(r.get(3).fields()).containsExactly("5", "6");
+    }
 }

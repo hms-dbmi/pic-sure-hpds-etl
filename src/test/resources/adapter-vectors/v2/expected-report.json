@@ -1,17 +1,18 @@
 {
   "rows": {
-    "input": 17,
+    "input": 18,
     "globalCopies": 0,
     "written": 9,
-    "rejected": 4,
+    "rejected": 5,
     "dropped": 4,
     "balanced": true
   },
   "rejects": {
-    "total": 4,
+    "total": 5,
     "byCode": {
       "BAD_TIMESTAMP": 1,
       "EMBEDDED_LINE_BREAK": 1,
+      "MALFORMED_RECORD": 1,
       "NON_CANONICAL_PATH": 1,
       "NUMERIC_NVAL": 1
     }

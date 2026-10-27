@@ -242,9 +242,9 @@ final class AllConceptsManifestReader {
                 report.error("MANIFEST_VERSION_MISSING", "the manifest row of '" + r.partition() + "' names an S3 object but no "
                         + "version id, so its content cannot be pinned", where);
             }
-        } else if (manifestUri.startsWith("s3://") && !Path.of(r.s3Uri()).isAbsolute()) {
-            report.error("MANIFEST_BAD_URI", "the manifest row of '" + r.partition() + "' is neither an s3:// URI nor an absolute path",
-                    where);
+        } else if (manifestUri.startsWith("s3://")) {
+            report.error("MANIFEST_BAD_URI", "the manifest is an s3:// object, so every row must name an s3:// object, but the row of '"
+                    + r.partition() + "' has s3_uri '" + r.s3Uri() + "'", where);
         }
         if (!r.md5().matches("[0-9a-fA-F]{32}")) {
             report.error("MANIFEST_MD5_MISSING", "the manifest row of '" + r.partition() + "' has no 32-digit hex md5", where);

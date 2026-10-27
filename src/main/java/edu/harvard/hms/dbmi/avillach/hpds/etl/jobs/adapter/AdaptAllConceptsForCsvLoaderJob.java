@@ -165,7 +165,12 @@ public class AdaptAllConceptsForCsvLoaderJob extends AbstractJob<AdaptAllConcept
                 e.withPartialResult(summary(engine, why), null);
                 throw e;
             } catch (IOException e) {
-                throw new InfrastructureException("Failed to write scratch files under " + work, e);
+                InfrastructureException scratch = new InfrastructureException("Failed to write scratch files under " + work, e);
+                List<String> why = List.of(scratch.getMessage());
+                failureArtifacts(ctx, engine, rejectsDir, meta(ctx, manifestUri, manifestVersion, content, outputDir, options, plan,
+                        why, List.of()));
+                scratch.withPartialResult(summary(engine, why), null);
+                throw scratch;
             }
 
             List<String> failures = evaluate(engine, options, manifestUri, manifestVersion);
@@ -291,28 +296,70 @@ public class AdaptAllConceptsForCsvLoaderJob extends AbstractJob<AdaptAllConcept
         SplitManifestWriter.write(mapper, reportFile, report);
 
         // Everything is checked. Upload the data, then the report, and the manifest last: a prefix with a
-        // split_manifest.json is complete.
-        for (PartitionSpec p : engine.plan().partitions) {
-            io.writeOutputFile(outputDir + p.file(), engine.partitionFile(p.name()));
-        }
-        List<String> rejectFiles = new ArrayList<>();
-        if (engine.global.rejected > 0) {
-            rejectFiles.add(AdaptationEngine.GLOBAL);
-        }
-        for (Tally t : engine.parts) {
-            if (t.rejected > 0) {
-                rejectFiles.add(t.name);
+        // split_manifest.json is complete. If an upload fails part-way, what was already written is deleted
+        // again (see cleanUp), so the output is not left half-filled for a retry to trip over.
+        List<String> uploaded = new ArrayList<>();
+        try {
+            for (PartitionSpec p : engine.plan().partitions) {
+                upload(uploaded, outputDir + p.file(), engine.partitionFile(p.name()));
             }
+            List<String> rejectFiles = new ArrayList<>();
+            if (engine.global.rejected > 0) {
+                rejectFiles.add(AdaptationEngine.GLOBAL);
+            }
+            for (Tally t : engine.parts) {
+                if (t.rejected > 0) {
+                    rejectFiles.add(t.name);
+                }
+            }
+            for (String f : rejectFiles) {
+                upload(uploaded, outputDir + "rejects/" + f + ".csv", engine.rejectsFile(f));
+            }
+            upload(uploaded, outputDir + SplitManifestWriter.REPORT, reportFile);
+            copyReport(ctx, reportFile);
+            upload(uploaded, outputDir + SplitManifestWriter.SPLIT_MANIFEST, manifestFile);
+        } catch (RuntimeException e) {
+            log.error("Publishing to {} failed after {} object(s): {}", outputDir, uploaded.size(), e.getMessage());
+            failureArtifacts(ctx, engine, work.resolve("rejects"), meta.withFailures(List.of("PUBLISH_FAILED: " + e.getMessage())));
+            cleanUp(uploaded, e);
+            throw e;
         }
-        for (String f : rejectFiles) {
-            io.writeOutputFile(outputDir + "rejects/" + f + ".csv", engine.rejectsFile(f));
-        }
-        io.writeOutputFile(outputDir + SplitManifestWriter.REPORT, reportFile);
-        copyReport(ctx, reportFile);
-        io.writeOutputFile(outputDir + SplitManifestWriter.SPLIT_MANIFEST, manifestFile);
         log.info("Wrote {} partition file(s) and {} to {}", engine.plan().partitions.size(), SplitManifestWriter.SPLIT_MANIFEST,
                 outputDir);
         return new Output(summary(engine, List.of()), meta.warnings(), engine.plan().partitions.size());
+    }
+
+    /** Uploads one file; the key is remembered before the call, since a failed multipart upload may still have left something. */
+    private void upload(List<String> uploaded, String uri, Path file) {
+        uploaded.add(uri);
+        io.writeOutputFile(uri, file);
+    }
+
+    /**
+     * Best-effort removal of what a failed publish wrote, newest first, each logged. If every delete works the caller
+     * rethrows the original failure (infrastructure, exit 4) and the output is empty again. If one fails, the output
+     * is NOT empty and a blind retry would only trip over it, so this throws a {@link DataException} (exit 3, not
+     * retried by Jenkins) naming the keys left behind.
+     */
+    private void cleanUp(List<String> uploaded, RuntimeException cause) {
+        List<String> left = new ArrayList<>();
+        for (int i = uploaded.size() - 1; i >= 0; i--) {
+            String uri = uploaded.get(i);
+            try {
+                io.delete(uri);
+                log.warn("Removed {} after the failed publish", uri);
+            } catch (RuntimeException e) {
+                log.error("Could not remove {}: {}", uri, e.getMessage());
+                left.add(uri);
+            }
+        }
+        if (!left.isEmpty()) {
+            DataException leftover = new DataException("PUBLISH_CLEANUP_FAILED: publishing failed (" + cause.getMessage() + ") and "
+                    + left.size() + " object(s) written before the failure could not be removed, so the output is NOT empty. "
+                    + "Remove them, or use a new output prefix, before running again: " + left);
+            leftover.addSuppressed(cause);
+            throw leftover;
+        }
     }
 
     /** A failed run's report and rejects go to the reports directory, so --output stays empty and can be reused. */

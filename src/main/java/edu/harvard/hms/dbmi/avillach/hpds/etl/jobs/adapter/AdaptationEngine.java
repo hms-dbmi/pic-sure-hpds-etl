@@ -17,7 +17,6 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,7 +32,7 @@ import java.util.TreeMap;
  * </ol>
  * Every file is read by its manifest version id and its MD5 is computed while streaming; a mismatch is a
  * {@link DataException} naming the partition. Nothing is held per row except what the routing needs: the
- * patient index, the id rows of patients in several studies, one {@link BitSet} per partition and counters.
+ * patient index, the id rows of patients in several studies, and counters (a patient count per partition lives in the index).
  *
  * <p><b>Global routing</b> (D1: study-scoped, D2: copy):
  * <ul>
@@ -83,7 +82,6 @@ final class AdaptationEngine {
     final PatientConsentIndex index;
     final Tally global = new Tally(GLOBAL);
     final Tally[] parts;
-    final BitSet[] patients;
     final long[] globalRows;
     final Map<String, String> md5Seen = new TreeMap<>();
     final List<String> warnings = new ArrayList<>();
@@ -109,11 +107,9 @@ final class AdaptationEngine {
         int n = plan.partitions.size();
         this.inScope = n;
         this.parts = new Tally[n];
-        this.patients = new BitSet[n];
         this.globalRows = new long[n];
         for (PartitionSpec p : plan.partitions) {
             parts[p.index()] = new Tally(p.name());
-            patients[p.index()] = new BitSet();
         }
     }
 
@@ -152,15 +148,25 @@ final class AdaptationEngine {
              DigestInputStream in = new DigestInputStream(raw, md5);
              CsvRecordReader reader = new CsvRecordReader(in)) {
             boolean first = true;
-            CsvRecordReader.Record rec;
-            while ((rec = reader.next()) != null) {
+            while (true) {
+                CsvRecordReader.Record rec;
+                try {
+                    rec = reader.next();
+                } catch (CharacterCodingException e) {
+                    throw new DataException("INVALID_UTF8: " + what + " (" + uri + ") is not valid UTF-8");
+                } catch (IOException e) {
+                    // the read itself failed (a dropped S3 connection): a read failure naming the object, not a scratch-disk one
+                    throw new InfrastructureException("READ_FAILED: " + what + " (" + uri + ", version " + row.versionId()
+                            + ") could not be read to the end: " + e.getMessage(), e);
+                }
+                if (rec == null) {
+                    break;
+                }
                 handler.handle(rec, first);
                 first = false;
             }
-        } catch (CharacterCodingException e) {
-            throw new DataException("INVALID_UTF8: " + what + " (" + uri + ") is not valid UTF-8");
         } catch (SdkException e) {
-            throw new InfrastructureException("Failed to read " + uri + " (version " + row.versionId() + ")", e);
+            throw new InfrastructureException("READ_FAILED: " + what + " (" + uri + ", version " + row.versionId() + "): " + e.getMessage(), e);
         }
         String actual = HexFormat.of().formatHex(md5.digest());
         md5Seen.put(what, actual);
@@ -292,7 +298,6 @@ final class AdaptationEngine {
         for (int t : targets) {
             out.write(plan.partitions.get(t).name(), line);
             globalRows[t]++;
-            patients[t].set(patient);
         }
         global.written += targets.length;
         global.copies += targets.length - 1;
@@ -330,8 +335,7 @@ final class AdaptationEngine {
                 for (int t : held) {
                     out.write(plan.partitions.get(t).name(), row.getKey());
                     globalRows[t]++;
-                    patients[t].set(patient);
-                }
+                        }
                 global.written += held.length;
                 global.copies += held.length - 1;
                 int extra = Math.max(0, row.getValue()[0] - k);
@@ -398,7 +402,6 @@ final class AdaptationEngine {
         noteTimestamp();
         out.write(p.name(), check.outputLine());
         t.written++;
-        patients[p.index()].set(check.patient());
     }
 
     // ------------------------------------------------------------------------------------------------ shared
@@ -465,6 +468,11 @@ final class AdaptationEngine {
 
     Plan plan() {
         return plan;
+    }
+
+    /** The patients of the partition: those granted it by a valid {@code _consents} row (see {@link PatientConsentIndex}). */
+    long patientsOf(PartitionSpec p) {
+        return index.patientsOf(p.index());
     }
 
     /** Rows written to the partition's file: its own rows plus the global rows delivered to it. */

@@ -12,16 +12,23 @@ import java.util.Map;
  * <p>Memory bound: about 100 bytes per patient that holds a consent (a boxed key, an entry and the array); a
  * million patients is on the order of 100 MB. It is the only structure that grows with the number of patients,
  * besides the per-patient id rows of multi-study patients that the job buffers.
+ *
+ * <p>It also counts, per partition, the patients that hold it. Every patient granted a partition has its
+ * {@code _consents} row written to that partition, and every other row written there belongs to such a patient,
+ * so this count is the partition's number of patients; it needs one {@code long} per partition and does not
+ * depend on how large patient ids are.
  */
 final class PatientConsentIndex {
 
     private final int[] studyOfPartition;
     private final Map<Integer, int[]> held = new HashMap<>();
+    private final long[] patientsOfPartition;
     private long multiStudyPatients;
 
     /** @param studyOfPartition for partition i, the index of its study */
     PatientConsentIndex(int[] studyOfPartition) {
         this.studyOfPartition = studyOfPartition.clone();
+        this.patientsOfPartition = new long[studyOfPartition.length];
     }
 
     /** Records that {@code patient} holds {@code partition}; a repeated grant changes nothing. */
@@ -29,6 +36,7 @@ final class PatientConsentIndex {
         int[] now = held.get(patient);
         if (now == null) {
             held.put(patient, new int[]{partition});
+            patientsOfPartition[partition]++;
             return;
         }
         int at = Arrays.binarySearch(now, partition);
@@ -42,6 +50,7 @@ final class PatientConsentIndex {
         next[insert] = partition;
         System.arraycopy(now, insert, next, insert + 1, now.length - insert);
         held.put(patient, next);
+        patientsOfPartition[partition]++;
         if (studiesBefore == 1 && studyCount(next) == 2) {
             multiStudyPatients++;
         }
@@ -100,6 +109,11 @@ final class PatientConsentIndex {
             }
         }
         return distinct;
+    }
+
+    /** The number of patients granted {@code partition}. */
+    long patientsOf(int partition) {
+        return patientsOfPartition[partition];
     }
 
     long patients() {

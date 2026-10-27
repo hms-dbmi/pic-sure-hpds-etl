@@ -1,6 +1,7 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.adapter;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,16 +92,22 @@ public class S3VersionedObjectSource implements VersionedObjectSource {
             log.info("Opened {} version {}", uri, versionId);
             return in;
         } catch (NoSuchKeyException e) {
-            throw new ConfigException("Version " + versionId + " of " + uri + " does not exist", e);
+            throw versionGone(uri, versionId, e);
         } catch (S3Exception e) {
             // a version id that names no version answers 404 (NoSuchVersion), which has no exception class of its own
             if (e.statusCode() == 404) {
-                throw new ConfigException("Version " + versionId + " of " + uri + " does not exist", e);
+                throw versionGone(uri, versionId, e);
             }
             throw new InfrastructureException("Failed to read " + uri + " (version " + versionId + ")", e);
         } catch (RuntimeException e) {
             throw new InfrastructureException("Failed to read " + uri + " (version " + versionId + ")", e);
         }
+    }
+
+    /** The manifest pins a version that is no longer there (deleted or expired): the pin failed, the input is not what it names. */
+    private static DataException versionGone(String uri, String versionId, Exception cause) {
+        return new DataException("VERSION_NOT_FOUND: version " + versionId + " of " + uri + " named by the manifest does not exist (any more)",
+                cause);
     }
 
     private static Optional<String> localFingerprint(Path path) {
