@@ -1,0 +1,46 @@
+{
+  "rows": {
+    "input": 8,
+    "globalCopies": 0,
+    "written": 4,
+    "rejected": 4,
+    "dropped": 0,
+    "balanced": true
+  },
+  "rejects": {
+    "total": 4,
+    "byCode": {
+      "CONSENT_NOT_IN_MANIFEST": 1,
+      "DATA_ROW_WITHOUT_CONSENT": 1,
+      "STUDY_PARTITION_MISMATCH": 1,
+      "UNKNOWN_GLOBAL_PATH": 1
+    }
+  },
+  "multiStudyPatients": 0,
+  "consentCodesSeen": [
+    "1"
+  ],
+  "partitions": [
+    {
+      "name": "phs000000.c1",
+      "kind": "study",
+      "file": "phs000000.c1-allConcepts.csv",
+      "rows": 2,
+      "patients": 1
+    },
+    {
+      "name": "phs999999.c1",
+      "kind": "study",
+      "file": "phs999999.c1-allConcepts.csv",
+      "rows": 2,
+      "patients": 1
+    }
+  ],
+  "cases": {
+    "study-specific-ids": {
+      "inputs": "inputs-study-specific-ids",
+      "exit": 3,
+      "message": "ID_ROWS_NOT_PATIENT_LEVEL"
+    }
+  }
+}

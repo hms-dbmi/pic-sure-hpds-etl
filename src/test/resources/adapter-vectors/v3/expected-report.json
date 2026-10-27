@@ -1,0 +1,50 @@
+{
+  "cases": {
+    "ok": {
+      "exit": 0
+    },
+    "md5-mismatch": {
+      "exit": 3,
+      "message": "MD5_MISMATCH"
+    },
+    "code-0": {
+      "exit": 2,
+      "issue": "CONSENT_CODE_NOT_ALLOWED"
+    },
+    "code-0-allowed": {
+      "exit": 0,
+      "consentCodesSeen": [
+        "0"
+      ]
+    },
+    "hyphenated-partition": {
+      "exit": 2,
+      "issue": "HYPHENATED_PARTITION"
+    },
+    "patient-id-over-int": {
+      "exit": 3,
+      "message": "REJECT_FRACTION_EXCEEDED",
+      "rejectsByCode": {
+        "BAD_PATIENT_ID": 1
+      }
+    },
+    "patient-id-over-int-tolerated": {
+      "exit": 0,
+      "rejectsByCode": {
+        "BAD_PATIENT_ID": 1
+      }
+    },
+    "manifest-version-moved": {
+      "exit": 3,
+      "message": "MANIFEST_CHANGED"
+    },
+    "output-under-mirror": {
+      "exit": 2,
+      "issue": "OUTPUT_UNDER_MIRROR"
+    },
+    "output-not-empty": {
+      "exit": 2,
+      "issue": "OUTPUT_NOT_EMPTY"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "rows": {
+    "input": 17,
+    "globalCopies": 0,
+    "written": 9,
+    "rejected": 4,
+    "dropped": 4,
+    "balanced": true
+  },
+  "rejects": {
+    "total": 4,
+    "byCode": {
+      "BAD_TIMESTAMP": 1,
+      "EMBEDDED_LINE_BREAK": 1,
+      "NON_CANONICAL_PATH": 1,
+      "NUMERIC_NVAL": 1
+    }
+  },
+  "multiStudyPatients": 0,
+  "consentCodesSeen": [
+    "1"
+  ],
+  "partitions": [
+    {
+      "name": "phs123456.c1",
+      "kind": "study",
+      "file": "phs123456.c1-allConcepts.csv",
+      "rows": 9,
+      "patients": 2
+    }
+  ]
+}

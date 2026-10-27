@@ -1,0 +1,5 @@
+partition,s3_uri,version_id,last_updated,md5,rows,excluded
+global,global_AllConcepts.csv,,2026-01-01T00:00:00Z,ae83bfbd81d42daa9d2a563714fd64bd,0,0
+phs000000.c1,phs000000_c1_allConcepts_MERGED.csv,,2026-01-01T00:00:00Z,afba16184c58bdd3fbbaebc8fa153497,0,0
+phs000000.c2,phs000000_c2_allConcepts_MERGED.csv,,2026-01-01T00:00:00Z,e3615cff2d1fc50501725cb184df57eb,0,0
+phs999999.c1,phs999999_c1_allConcepts_MERGED.csv,,2026-01-01T00:00:00Z,ce7e35547d100960e5acaed8d2685feb,0,0

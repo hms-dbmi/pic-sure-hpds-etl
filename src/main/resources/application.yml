@@ -71,6 +71,12 @@ etl:
     generate-identity-consent-mapping:
       enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}
 
+    # TEMPORARY bridge from the per-study allConcepts layout (allConcepts_manifest.csv) to the input of the
+    # hpds-pheno-load runner's csvloader-split flow. Disable it and delete the class once the per-study
+    # pipeline writes that layout itself (docs/ADAPT_ALLCONCEPTS_CSVLOADER.md).
+    adapt-allconcepts-csvloader:
+      enabled: ${ETL_JOB_ADAPT_ALLCONCEPTS_CSVLOADER_ENABLED:true}
+
     # TEMPORARY migration. Set these to false once the migration has run in every environment,
     # then delete the jobs. NOTE: participants-migration also requires
     # sstr-populate-rds-participants and multi-populate-rds-participants to be enabled -- it

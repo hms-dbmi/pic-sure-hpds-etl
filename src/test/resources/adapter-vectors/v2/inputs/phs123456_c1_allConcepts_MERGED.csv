@@ -1,0 +1,10 @@
+patient_num,concept_path,nval,tval,timestamp
+1,\phs123456\demo\age\,41,,2020-01-02T03:04:05Z
+1,\phs123456\demo\sex\,,F,2020-01-02
+2,\phs123456\demo\age\,nan,,0
+2,"\phs123456\demo\note\",,"line one
+line two",0
+2,\phs123456\demo\site\,,"North, East",2020-01-02 03:04:05
+2,\phs123456\demo\bad\,,x,yesterday
+2,phs123456\demo\unwrapped,,x,0
+2,\phs123456\demo\q\,,"say ""hi""",0

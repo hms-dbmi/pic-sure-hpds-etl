@@ -1,0 +1,42 @@
+{
+  "rows": {
+    "input": 30,
+    "globalCopies": 2,
+    "written": 30,
+    "rejected": 0,
+    "dropped": 2,
+    "balanced": true
+  },
+  "rejects": {
+    "total": 0,
+    "byCode": {}
+  },
+  "multiStudyPatients": 1,
+  "consentCodesSeen": [
+    "1",
+    "2"
+  ],
+  "partitions": [
+    {
+      "name": "phs000000.c1",
+      "kind": "study",
+      "file": "phs000000.c1-allConcepts.csv",
+      "rows": 13,
+      "patients": 2
+    },
+    {
+      "name": "phs000000.c2",
+      "kind": "study",
+      "file": "phs000000.c2-allConcepts.csv",
+      "rows": 5,
+      "patients": 1
+    },
+    {
+      "name": "phs999999.c1",
+      "kind": "study",
+      "file": "phs999999.c1-allConcepts.csv",
+      "rows": 12,
+      "patients": 2
+    }
+  ]
+}
