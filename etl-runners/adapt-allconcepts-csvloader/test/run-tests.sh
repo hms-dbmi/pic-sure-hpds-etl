@@ -76,7 +76,7 @@ setup() {
     mkdir -p "$STUB_S3"
     : >"$STUB_LOG"
     export PATH="$HERE/stubs:$PATH" AWS_REGION=us-east-1
-    unset STUB_VERSIONING STUB_NO_LIST_VERSIONS STUB_NO_GET_VERSION
+    unset STUB_VERSIONING STUB_NO_LIST_VERSIONS STUB_NO_GET_VERSION STUB_HEAD_SIZE
 }
 teardown() { rm -rf "$T"; }
 
@@ -266,6 +266,42 @@ test_preflight_passes_with_a_versioned_manifest_an_empty_output_and_version_perm
     expect_out "role can GetObjectVersion"
     # read-only: the stub fails any write
     ! grep -qE ' (rm|mv|sync|mb|rb|put-object|delete-object)' "$STUB_LOG" || fail "preflight called a write"
+}
+
+# a manifest with a global row and two partitions of two studies, whose objects exist in the stub bucket
+given_sized_manifest() {
+    mkdir -p "$STUB_S3/bkt/data"
+    local f
+    for f in global.csv a.csv b.csv; do echo x >"$STUB_S3/bkt/data/$f"; done
+    cat >"$STUB_S3/bkt/data/allConcepts_manifest.csv" <<'MANIFEST'
+partition,s3_uri,version_id,last_updated,md5
+global,s3://bkt/data/global.csv,v1,2026-01-01T00:00:00Z,00000000000000000000000000000000
+phs000000.c1,s3://bkt/data/a.csv,v2,2026-01-01T00:00:00Z,00000000000000000000000000000000
+phs999999.c1,s3://bkt/data/b.csv,v3,2026-01-01T00:00:00Z,00000000000000000000000000000000
+MANIFEST
+}
+
+test_preflight_passes_when_the_root_volume_holds_twice_the_input_plus_10_gib() {
+    given_sized_manifest
+    # 3 objects of 2 GiB = 6 GiB; 2 x 6 + 10 = 22 GiB
+    STUB_HEAD_SIZE=2147483648 TF_VAR_root_volume_size=22 preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
+    expect_rc 0
+    expect_out "in-scope objects: 3, 6.00 GiB; need 2 x that + 10 GiB = 22.00 GiB; root volume: 22 GiB"
+    grep -q 'head-object .*--version-id v2' "$STUB_LOG" || fail "the size was not read for the pinned version"
+}
+
+test_preflight_refuses_a_root_volume_that_is_too_small_and_counts_only_the_selected_studies() {
+    given_sized_manifest
+    STUB_HEAD_SIZE=2147483648 TF_VAR_root_volume_size=21 preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
+    expect_rc 1
+    expect_out "[FAIL] root volume (21 GiB) holds 2 x the input"
+    expect_out "root volume: 21 GiB"
+    # with one study selected only global + that study count: 2 x 4 + 10 = 18 GiB, which fits 21
+    STUB_HEAD_SIZE=2147483648 TF_VAR_root_volume_size=21 TF_VAR_studies=phs000000 preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
+    expect_rc 0
+    expect_out "in-scope objects: 2, 4.00 GiB"
+    TF_VAR_root_volume_size=big preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
+    expect_rc 1
 }
 
 test_preflight_refuses_an_output_under_the_legacy_bucket_prefix() {

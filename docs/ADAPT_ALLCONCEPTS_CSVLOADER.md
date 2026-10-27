@@ -76,9 +76,22 @@ scripts): a non-empty `partitions[]`; `name` matching the regex with no `..`; `k
 `<name>-allConcepts.csv`; `rows` a whole number above 0; in the container, the file's CSV record count equals `rows` and so does its
 count of non-empty lines (hence no field may hold a line break).
 
-A failed run leaves `--output` **untouched** (so it can be retried at once). Its `report.json` and rejects are in the reports
-directory of the run (`adapt-allconcepts-csvloader-<runId>-report.json`, `...-rejects/`), which Jenkins archives; a successful run
-writes the same report there too. The JobResult is `adapt-allconcepts-csvloader-<runId>.json`.
+What a failed run leaves in `--output`:
+
+- **A run that fails before publishing** (a refusal, any check, a failed read): nothing; `--output` is as it was, and a retry runs
+  at once.
+- **A run whose upload fails part-way**: the objects it had already written are deleted again, newest first, each one logged, and the
+  run exits with the upload's own code (4 for S3 or network). `--output` is empty again and Jenkins' automatic retry is safe. (On a
+  versioned bucket a delete leaves a delete marker; the prefix reads as empty.)
+- **A run whose upload fails and whose cleanup also fails**: exit **3** (`PUBLISH_CLEANUP_FAILED`), which Jenkins does not retry,
+  and the message names the keys that are still there. `--output` is NOT empty: remove those keys, or use a new prefix, before
+  running again.
+- A run that is killed (instance lost, timeout) while uploading cannot clean up. A prefix with partition files but no
+  `split_manifest.json` is incomplete; the next run's guard refuses it as not empty.
+
+In every case the failed run's `report.json` and rejects are in the reports directory of the run
+(`adapt-allconcepts-csvloader-<runId>-report.json`, `...-rejects/`), which Jenkins archives; a successful run writes the same report
+there too. The JobResult is `adapt-allconcepts-csvloader-<runId>.json`.
 
 ## Routing of the global file
 
@@ -137,10 +150,10 @@ Accounting: every record read ends as written, rejected or dropped, and a global
 | exit | cases |
 |---|---|
 | 0 | done; notes such as dropped headers or rejects within the allowed fraction are warnings in the report (`SUCCESS_WITH_WARNINGS`, still exit 0, which `validate.sh` turns into an UNSTABLE build) |
-| 2 | the refusals listed under Inputs |
-| 3 | `MD5_MISMATCH`; `MANIFEST_CHANGED`; `ID_ROWS_NOT_PATIENT_LEVEL`; `MULTI_STUDY_PATIENTS`; `INVALID_UTF8`; `REJECT_FRACTION_EXCEEDED` (more rejects than `--max-reject-fraction` of the input rows); `EMPTY_PARTITION` (a partition ends with 0 rows); `ROW_ACCOUNTING_UNBALANCED` |
-| 4 | S3 or disk failure (Jenkins retries once) |
-| 5 | an input does not exist (manifest, a pinned version) |
+| 2 | the refusals listed under Inputs (including a row of an `s3://` manifest that does not name an `s3://` object, `MANIFEST_BAD_URI`) |
+| 3 | `MD5_MISMATCH`; `VERSION_NOT_FOUND` (a version the manifest pins no longer exists); `PUBLISH_CLEANUP_FAILED`; `MANIFEST_CHANGED`; `ID_ROWS_NOT_PATIENT_LEVEL`; `MULTI_STUDY_PATIENTS`; `INVALID_UTF8`; `REJECT_FRACTION_EXCEEDED` (more rejects than `--max-reject-fraction` of the input rows); `EMPTY_PARTITION` (a partition ends with 0 rows); `ROW_ACCOUNTING_UNBALANCED` |
+| 4 | S3 or disk failure, including a read that breaks part-way (`READ_FAILED`, naming the object) and an upload that fails once its cleanup worked (Jenkins retries once) |
+| 5 | an input does not exist (the manifest, a local file), or a version id is missing |
 
 Rejected rows are kept out of the data and listed in `rejects/`; set `--max-reject-fraction` deliberately, and only after reading the
 report of a run at `0`.
@@ -148,10 +161,15 @@ report of a run at `0`.
 ## Memory and disk
 
 Files are streamed (a record at a time), never loaded. What is kept: the patient-to-consents index (about 100 bytes per patient that
-holds a consent), the id rows of patients in more than one study, one `BitSet` per partition for the patient counts (up to
-highest-id/8 bytes each; HPDS ids are small sequence numbers), and counters. At most 64 output files are open at once. The output is
+holds a consent), the id rows of patients in more than one study, and counters. The patient count of a partition is the number of
+patients granted it by a valid `_consents` row (every such patient has that row written to the partition, and no other patient has a
+row there), counted in the index as a patient gains the partition: one `long` per partition, whatever the patient ids are. At most
+64 output files are open at once. The output is
 built in `--work-dir`, so the disk needs room for the **whole output**, which is about the size of the partition files plus the
-global rows copied into them (the runner's root volume is `ROOT_VOLUME_GB`, default 500). The global file is read twice and each
+global rows copied into them (the runner's root volume is `ROOT_VOLUME_GB`, default 500). **500 GiB fits a proof of concept of a few
+partitions, not a full manifest**; pre-flight sums the sizes of the in-scope manifest objects and refuses when
+`2 x sum + 10 GiB` exceeds `ROOT_VOLUME_GB` (it prints the numbers). The root volume is gp3 at its default 125 MiB/s, which bounds
+the throughput, and so the duration, of a full run (no Terraform change is made for it here). The global file is read twice and each
 partition file once, each time with its MD5 checked.
 
 ## Local proof of concept (v1 vector only)
@@ -178,7 +196,8 @@ runner-side gates are, by `etl-runners/adapt-allconcepts-csvloader/test/run-test
 ## Running it
 
 Jenkins job `adapt-allconcepts-csvloader` (`etl-runners/adapt-allconcepts-csvloader/Jenkinsfile`): `MANIFEST` and `OUTPUT` are required;
-pre-flight refuses an output under the legacy bucket prefix or not empty, and probes `ListBucketVersions` / `GetObjectVersion` on the
+pre-flight refuses an output under the legacy bucket prefix or not empty, refuses a root volume too small for the in-scope input
+(above), and probes `ListBucketVersions` / `GetObjectVersion` on the
 manifest's bucket once. Start it by hand; it is in no orchestrator. Then load with the in-boundary runner `hpds-pheno-load`:
 
 ```

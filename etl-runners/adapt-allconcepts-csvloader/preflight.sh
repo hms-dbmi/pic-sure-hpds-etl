@@ -6,6 +6,8 @@
 # Environment:
 #   TF_VAR_manifest_uri         required   s3:// URI of allConcepts_manifest.csv
 #   TF_VAR_output_uri           required   s3:// prefix that must be empty
+#   TF_VAR_studies              optional   comma-separated study ids (the size check counts only these)
+#   TF_VAR_root_volume_size     optional   runner root volume in GiB (default 500, as in variables.tf)
 #   AWS_REGION                  optional   default us-east-1
 #
 # Checks:
@@ -13,6 +15,9 @@
 #     (avillach-73-bdcatalyst-etl anywhere in it) and holds no object yet
 #   - the manifest exists, its bucket is versioned, and this role can ListBucketVersions and
 #     GetObjectVersion there (the job reads every file by version id). One probe per run, not per file.
+#   - the runner's root volume can hold the output: the job writes its output once locally before uploading, so
+#     2 x (ContentLength of the in-scope manifest objects, global included) + 10 GiB of headroom (global rows
+#     copied into several partitions, the container image) must fit TF_VAR_root_volume_size GiB
 #
 # Exit: 0 clean | 10 clean but with warnings | 1 problems found
 set -uo pipefail
@@ -73,6 +78,50 @@ else
             --region "$REGION" /dev/null
     }
     check "role can GetObjectVersion on '$BUCKET'" probe_get_version
+fi
+
+# --- the runner's disk ------------------------------------------------------
+
+# Sums the sizes of the objects the job will read. The manifest is read here only for its s3_uri and version_id
+# columns (simple CSV: quotes are stripped; a comma inside a quoted field is not supported).
+check_disk() {
+    local root_gib="${TF_VAR_root_volume_size:-500}" studies sum=0 n=0 part uri ver size b k study rows
+    studies=",$(trim "${TF_VAR_studies:-}"),"
+    studies="${studies// /}"
+    if [[ ! "$root_gib" =~ ^[0-9]+$ ]]; then
+        fail "ROOT_VOLUME_GB must be a whole number of GiB, got: $root_gib"
+        return
+    fi
+    if ! rows=$(aws s3 cp "$MANIFEST" - --region "$REGION" 2>/dev/null | tail -n +2 | tr -d '\r'); then
+        fail "cannot read the manifest to size the run: $MANIFEST"
+        return
+    fi
+    while IFS=, read -r part uri ver _; do
+        [[ -n "$part" ]] || continue
+        part="${part//\"/}"
+        uri="${uri//\"/}"
+        ver="${ver//\"/}"
+        if [[ "$studies" != ",," && "$part" != global ]]; then
+            study="${part%.c*}"
+            [[ "$studies" == *",$study,"* ]] || continue
+        fi
+        b="$(bucket_of "$uri")"
+        k="$(key_of "$uri")"
+        if ! size=$(aws s3api head-object --bucket "$b" --key "$k" --version-id "$ver" --query ContentLength --output text \
+            --region "$REGION" 2>/dev/null) || [[ ! "$size" =~ ^[0-9]+$ ]]; then
+            fail "cannot read the size of $uri (version $ver) for partition $part"
+            return
+        fi
+        sum=$((sum + size))
+        n=$((n + 1))
+    done <<<"$rows"
+    local need=$((2 * sum + 10 * 1024 * 1024 * 1024)) have=$((root_gib * 1024 * 1024 * 1024))
+    note "in-scope objects: $n, $(awk -v b="$sum" 'BEGIN { printf "%.2f", b / 1073741824 }') GiB; need 2 x that + 10 GiB = $(awk -v b="$need" 'BEGIN { printf "%.2f", b / 1073741824 }') GiB; root volume: $root_gib GiB"
+    check "root volume ($root_gib GiB) holds 2 x the input ($sum bytes) + 10 GiB" test "$need" -le "$have"
+}
+
+if [[ "$MANIFEST" == s3://*/* ]]; then
+    check_disk
 fi
 
 summary

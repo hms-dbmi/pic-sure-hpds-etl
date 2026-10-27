@@ -31,7 +31,8 @@
 //
 // Runner disk
 //   The output is built on the runner before anything is uploaded, so the root volume (ROOT_VOLUME_GB)
-//   must hold the whole output.
+//   must hold the whole output (pre-flight checks 2 x the in-scope input + 10 GiB). The default 500 GiB fits a proof
+//   of concept of a few partitions, not a full manifest; the gp3 throughput default (125 MiB/s) bounds a full run.
 // =============================================================================
 
 pipeline {
@@ -66,7 +67,7 @@ pipeline {
         string(name: 'INSTANCE_TYPE', defaultValue: 'c5.xlarge',
                description: 'Runner instance type.')
         string(name: 'ROOT_VOLUME_GB', defaultValue: '500',
-               description: 'Root volume of the runner in GiB. The whole output is built on it before upload.')
+               description: 'Root volume of the runner in GiB. The whole output is built on it before upload. The default 500 fits a proof of concept of a few partitions, NOT a full manifest; pre-flight refuses when 2 x the in-scope input + 10 GiB does not fit. The gp3 default of 125 MiB/s bounds the speed of a full run.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '14400',
                description: 'How long to wait for the runner before giving up (monitor exits 124). A retry gets at most what is left of the 9h build timeout.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
@@ -212,9 +213,10 @@ pipeline {
                             break
                         }
 
-                        // A retry writes to the same OUTPUT, which a failed attempt left empty (nothing is
-                        // uploaded before every check passes). Checked before tearing down, so a skipped retry
-                        // leaves this attempt's reports and state for the stages below.
+                        // A retry writes to the same OUTPUT. An exit 4 leaves it empty: nothing is uploaded before
+                        // every check passes, and an upload that fails part-way deletes what it had written (if that
+                        // cleanup fails the job exits 3, which is not retried, naming the keys left). Checked before
+                        // tearing down, so a skipped retry leaves this attempt's reports and state for the stages below.
                         long remaining = (deadlineMillis - System.currentTimeMillis()) / 1000 - 60 - TEARDOWN_MARGIN_SECONDS
                         if (remaining < MIN_RETRY_SECONDS) {
                             echo "Exit 4, but not retrying: only ${remaining}s of the ${BUILD_TIMEOUT_HOURS}h build timeout would be left for the run"

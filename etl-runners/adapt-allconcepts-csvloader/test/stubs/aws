@@ -4,6 +4,7 @@
 #   STUB_VERSIONING     what get-bucket-versioning reports (default Enabled)
 #   STUB_NO_LIST_VERSIONS=1   list-object-versions fails with AccessDenied
 #   STUB_NO_GET_VERSION=1     get-object with --version-id fails with AccessDenied
+#   STUB_HEAD_SIZE      what head-object --query ContentLength reports for every object (default: the file's size)
 # Anything that would write (s3 rm/mv/sync/mb, put-object, ...) fails the test run.
 S3=${STUB_S3:?STUB_S3 is not set}
 [ -z "${STUB_LOG:-}" ] || echo "aws $*" >>"$STUB_LOG"
@@ -22,6 +23,7 @@ while [ $# -gt 0 ]; do
         --region | --output | --range) shift 2 ;;
         --no-progress | --only-show-errors) shift ;;
         s3://*) if [ -z "$src" ]; then src=$1; else dest=$1; fi; shift ;;
+        -) dest=-; shift ;;
         -*) shift ;;
         *) if [ -z "$src" ]; then src=$1; else dest=$1; fi; shift ;;
     esac
@@ -36,7 +38,11 @@ case "$group $op" in
     "s3api head-object")
         f="$S3/$bucket/$key"
         [ -f "$f" ] || { echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 254; }
-        printf '"%s"\tNone\t%s\n' "$(etag "$f")" "$(size "$f")"
+        if [ "$query" = ContentLength ]; then
+            if [ -n "${STUB_HEAD_SIZE:-}" ]; then echo "$STUB_HEAD_SIZE"; else size "$f"; fi
+        else
+            printf '"%s"\tNone\t%s\n' "$(etag "$f")" "$(size "$f")"
+        fi
         ;;
     "s3api list-objects-v2")
         dir="$S3/$bucket"
@@ -62,7 +68,11 @@ case "$group $op" in
         ;;
     "s3 cp")
         case $src in
-            s3://*) f="$S3/${src#s3://}"; [ -f "$f" ] || { echo "download failed: $src" >&2; exit 1; }; mkdir -p "$(dirname "$dest")"; cp "$f" "$dest" ;;
+            s3://*)
+                f="$S3/${src#s3://}"
+                [ -f "$f" ] || { echo "download failed: $src" >&2; exit 1; }
+                if [ "$dest" = - ]; then cat "$f"; else mkdir -p "$(dirname "$dest")"; cp "$f" "$dest"; fi
+                ;;
             *) echo "stub: uploads are not allowed ($*)" >&2; exit 99 ;;
         esac
         ;;
