@@ -1,0 +1,88 @@
+#!/bin/bash
+# Test stub for the aws CLI: a versioned bucket under $STUB_STATE/s3/<key>, each key holding
+# "content" and "meta" (size dumped-at), and a running version count.
+#   versioning     get-bucket-versioning status (default Enabled)
+#   head_error     makes head-object fail with AccessDenied
+#   head_error_key the same, only for keys containing this file's content
+#   upload_error_key  makes uploads to keys containing this file's content fail
+#   get_error_key  makes downloads of keys containing this file's content fail with AccessDenied
+#   upload_short   makes uploads land one byte short
+S="$STUB_STATE"
+echo "aws $*" >> "$S/aws.log"
+f() { [[ -f "$S/$1" ]] && cat "$S/$1" || echo "$2"; }
+keydir() { local u="${1#s3://}"; echo "$S/s3/${u#*/}"; }
+
+if [[ "$1" == ssm ]]; then
+  # SSM parameters under $S/ssm/<name with / as _>. Switches:
+  #   ssm_put_error / ssm_get_error   that call always fails (throttled)
+  #   ssm_put_fail_times <n>          the next n put-parameter calls fail, then they succeed
+  op="$2"; shift 2
+  name="" value="" type="" overwrite=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --name) name="$2"; shift ;; --value) value="$2"; shift ;; --type) type="$2"; shift ;; --overwrite) overwrite=true ;; esac; shift
+  done
+  p="$S/ssm/$(tr / _ <<<"$name")"
+  case "$op" in
+    put-parameter)
+      if [[ -f "$S/ssm_put_error" ]]; then echo "An error occurred (ThrottlingException) when calling the PutParameter operation: Rate exceeded" >&2; exit 254; fi
+      n=$(f ssm_put_fail_times 0)
+      if (( n > 0 )); then echo $((n - 1)) > "$S/ssm_put_fail_times"; echo "An error occurred (ThrottlingException) when calling the PutParameter operation: Rate exceeded" >&2; exit 254; fi
+      [[ "$type" == SecureString && "$overwrite" == true ]] || { echo "aws stub: put-parameter without --type SecureString --overwrite" >&2; exit 2; }
+      [[ "$value" == file://* ]] || { echo "aws stub: put-parameter value not passed as file://" >&2; exit 2; }
+      mkdir -p "$S/ssm"
+      cat "${value#file://}" > "$p"
+      echo $(( $(cat "$p.version" 2>/dev/null || echo 0) + 1 )) > "$p.version"
+      cat "$p.version"
+      exit 0 ;;
+    get-parameter)
+      if [[ -f "$S/ssm_get_error" ]]; then echo "An error occurred (ThrottlingException) when calling the GetParameter operation: Rate exceeded" >&2; exit 254; fi
+      [[ -f "$p" ]] || { echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: " >&2; exit 254; }
+      cat "$p"
+      exit 0 ;;
+  esac
+fi
+if [[ "$1" == s3api && "$2" == get-bucket-versioning ]]; then f versioning Enabled; exit 0; fi
+if [[ "$1" == s3api && "$2" == head-object ]]; then
+  key="" query=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --key) key="$2"; shift ;; --query) query="$2"; shift ;; esac; shift
+  done
+  if [[ -f "$S/head_error" ]] || { [[ -f "$S/head_error_key" ]] && [[ "$key" == *"$(cat "$S/head_error_key")"* ]]; }; then echo "An error occurred (403) when calling the HeadObject operation: Forbidden" >&2; exit 255; fi
+  d="$S/s3/$key"
+  if [[ ! -f "$d/content" ]]; then echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 255; fi
+  # meta: <size> <dumped-at> [<db-bytes>]
+  if [[ "$query" == *db-bytes* ]]; then awk '{print $1, ($3 == "" ? "None" : $3)}' "$d/meta"
+  elif [[ -n "$query" ]]; then awk '{print $1, $2}' "$d/meta"
+  fi
+  exit 0
+fi
+if [[ "$1" == s3 && "$2" == cp ]]; then
+  src="$3" dst="$4"; shift 4
+  size="" at=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --expected-size) size="$2"; shift ;;
+      --metadata) at=$(sed -n 's/.*dumped-at=\([^,]*\).*/\1/p' <<<"$2"); db=$(sed -n 's/.*db-bytes=\([^,]*\).*/\1/p' <<<"$2"); shift ;;
+    esac; shift
+  done
+  if [[ "$src" == - ]]; then
+    if [[ -f "$S/upload_error_key" && "$dst" == *"$(cat "$S/upload_error_key")"* ]]; then
+      cat >/dev/null; echo "upload failed: $dst An error occurred (AccessDenied)" >&2; exit 1
+    fi
+    d=$(keydir "$dst"); mkdir -p "$d"
+    cat > "$d/content"
+    [[ -f "$S/upload_short" && -n "$size" ]] && size=$((size - 1))
+    echo "${size:-0} ${at:-None} ${db:-None}" > "$d/meta"
+    echo $(( $(cat "$d/versions" 2>/dev/null || echo 0) + 1 )) > "$d/versions"
+    exit 0
+  fi
+  if [[ -f "$S/get_error_key" && "$src" == *"$(cat "$S/get_error_key")"* ]]; then
+    echo "download failed: $src An error occurred (AccessDenied) when calling the GetObject operation: Access Denied" >&2; exit 1
+  fi
+  d=$(keydir "$src")
+  [[ -f "$d/content" ]] || { echo "download failed: $src (404)" >&2; exit 1; }
+  cat "$d/content"
+  exit 0
+fi
+echo "aws stub: unhandled $*" >&2
+exit 2

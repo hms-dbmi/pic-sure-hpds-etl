@@ -1,0 +1,41 @@
+{
+  "jobName": "all-concepts-data-generator",
+  "jobType": "PERMANENT",
+  "runId": "t-allconcepts-phs000003",
+  "exitCode": "DATA_ERROR",
+  "status": "FAILED",
+  "startedAt": "2026-10-16T00:00:00Z",
+  "finishedAt": "2026-10-16T00:10:00Z",
+  "durationMillis": 600000,
+  "inputValidation": {
+    "phase": "input",
+    "issues": [],
+    "counts": {
+      "error": 0,
+      "warning": 0,
+      "info": 0
+    }
+  },
+  "outputValidation": {
+    "phase": "output",
+    "issues": [
+      {
+        "severity": "ERROR",
+        "code": "MALFORMED_ROWS",
+        "message": "12 malformed rows",
+        "location": "s3://b/r/phs000003/decoded_data/x.csv",
+        "context": {}
+      }
+    ],
+    "counts": {
+      "error": 1,
+      "warning": 0,
+      "info": 0
+    }
+  },
+  "metrics": {
+    "consentGroups": 0,
+    "rowsProcessed": 0
+  },
+  "errorMessage": "malformed decoded data"
+}

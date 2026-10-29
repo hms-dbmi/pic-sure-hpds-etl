@@ -3,7 +3,7 @@
 #
 # Build from the REPOSITORY ROOT so target/hpds-etl.jar is in context:
 #   ./mvnw -B clean package
-#   docker build --platform linux/amd64 -f etl-runners/Dockerfile -t hpds-etl-runner .
+#   docker buildx build --platform linux/amd64 -f etl-runners/Dockerfile -t hpds-etl-runner .
 #
 # The JAR is built on the Jenkins agent rather than in a builder stage: the agent already has
 # JDK 25 and the Maven cache, the image therefore runs the exact artifact the tests ran against,

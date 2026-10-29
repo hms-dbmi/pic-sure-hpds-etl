@@ -1,0 +1,5 @@
+study_id	result	build	url	reason
+phs000001	SUCCESS	21	https://j/gen/21/	
+phs000003	FAILURE	22	https://j/gen/22/	DATA ERROR (exit 3): malformed decoded data
+phs000002	SUCCESS	23	https://j/gen/23/	
+phs000006	NOT_RUN			

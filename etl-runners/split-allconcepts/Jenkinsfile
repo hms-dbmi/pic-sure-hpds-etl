@@ -18,15 +18,30 @@
 //   --abbreviation   study abbreviated name     (params.ABBREVIATION)
 //   --input          allConcepts CSV S3 URI     (params.INPUT)
 //   --mapping        hpds_id_mapping CSV S3 URI (params.MAPPING)
-//   --output         output directory           (params.OUTPUT)
-//   RDS credentials  fetched on the runner from Secrets Manager by instance role
+//   --output         root of per-study folders  (params.OUTPUT)
+//   RDS credentials  read by the runner at boot from the SSM parameter
+//                    /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
-//   Per-consent CSVs:  {output}/split_allconcepts/{study_id}/c{code}/{ABV}_allConcepts_c{code}.csv
+//   Per-consent CSVs:  {output}/{study_id}/allConcepts/c{code}/{study_id}_allConcepts_c{code}.csv
 //   split-allconcepts-<runId>.json   the JobResult
 //
 // Exit codes (see ExitCode.java)
 //   0 success | 2 validation | 3 data | 4 infrastructure, retried once | 5 config | 1 unknown
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The migration orchestrator runs one of these per study (hundreds at a time), so it builds
+//   the image once and passes it as PREBUILT_IMAGE_TAR; this build then skips both build stages,
+//   uses that tarball, and leaves deleting it to the orchestrator.
+//
+// Runner pool
+//   With POOL_INSTANCE_ID and POOL_MAILBOX set (the orchestrator does this), the study runs on an
+//   already-running worker of the orchestrator's runner pool (etl-runners/runner-pool) instead of a
+//   fresh instance: no image is built and nothing is provisioned or destroyed here. The study is
+//   handed over through the worker's S3 mailbox (etl-runners/common/pool-dispatch.sh) and its
+//   reports, log and status sentinel land where a single run's would, so monitoring and validation
+//   are unchanged. The orchestrator owns the pool and tears it down.
 // =============================================================================
 
 pipeline {
@@ -38,8 +53,13 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the migration orchestrator (Jenkinsfile.migration) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '30'))
-        timeout(time: 2, unit: 'HOURS')
+        // Large studies run here on their own instance and can take many hours (30 GiB+ inputs);
+        // JOB_TIMEOUT_SECONDS, which the orchestrator scales with the input, bounds the run itself.
+        // This is only a backstop above it.
+        timeout(time: 48, unit: 'HOURS')
     }
 
     parameters {
@@ -56,30 +76,35 @@ pipeline {
                defaultValue: '',
                description: '--mapping: S3 URI of the hpds_id_mapping.csv from participants-migration')
         string(name: 'OUTPUT',
-               defaultValue: 's3://avillach-73-bdcatalyst-etl/__migration__/split_allconcepts/',
-               description: '--output: output location for split files. Must be an s3:// URI (or a path under /reports): any other local path resolves inside the runner container and is destroyed with the instance.')
+               defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing/',
+               description: '--output: root of the per-study folders; split files go to {output}/{study_id}/allConcepts/c{code}/. Must be an s3:// URI (or a path under /reports): any other local path resolves inside the runner container and is destroyed with the instance.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank uses a sanitised BUILD_TAG.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'r6i.large',
                description: 'Runner instance type.')
+        string(name: 'ROOT_VOLUME_GB', defaultValue: '50',
+               description: 'Runner root volume in GiB. It holds the per-consent spool, roughly the input size; the migration orchestrator sizes it for large studies.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
+        string(name: 'POOL_INSTANCE_ID', defaultValue: '',
+               description: 'Runner-pool worker to run on (the orchestrator sets this, with POOL_MAILBOX). Blank provisions a fresh runner.')
+        string(name: 'POOL_MAILBOX', defaultValue: '',
+               description: 'The runner pool\'s mailbox root, s3://<bucket>/etl-runner/pools/<pool-id> (runner-pool output mailbox_s3_prefix).')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the input layout and stop, without provisioning anything')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/split-allconcepts'
 
@@ -88,8 +113,8 @@ pipeline {
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_mapping_uri               = "${params.MAPPING.trim()}"
         TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
+        TF_VAR_root_volume_size          = "${params.ROOT_VOLUME_GB.trim()}"
         TF_VAR_name_suffix   = "${env.BUILD_NUMBER}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -99,14 +124,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     // Fail fast on paths the container cannot see. A non-s3 value resolves
                     // against the container CWD (/app); only /reports is mounted. Anything
@@ -122,13 +139,36 @@ EOF
                     env.BASE_RUN_ID = base.replaceAll(/[^A-Za-z0-9._-]/, '-')
                     env.EFFECTIVE_RUN_ID = env.BASE_RUN_ID
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    if (!(params.ROOT_VOLUME_GB.trim() ==~ /[1-9][0-9]{1,4}/)) {
+                        error("ROOT_VOLUME_GB must be a whole number of GiB (10 or more), got '${params.ROOT_VOLUME_GB}'.")
+                    }
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+
+                    def poolInstance = params.POOL_INSTANCE_ID?.trim()
+                    def poolMailbox  = params.POOL_MAILBOX?.trim()
+                    if (poolInstance || poolMailbox) {
+                        if (!(poolInstance ==~ /i-[0-9a-f]+/) ||
+                            !(poolMailbox ==~ /s3:\/\/[a-z0-9.-]+\/[A-Za-z0-9._\/-]+/) || poolMailbox.contains('..')) {
+                            error("POOL_INSTANCE_ID and POOL_MAILBOX must be set together: an instance id (i-...) and " +
+                                  "the pool's s3:// mailbox root. Got '${poolInstance}' and '${poolMailbox}'.")
+                        }
+                        env.USE_POOL = 'true'
+                        env.POOL_INSTANCE = poolInstance
+                        env.POOL_MAILBOX_URI = poolMailbox
+                        echo "runner: pool worker ${poolInstance} (${poolMailbox})"
+                    }
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
 
                     echo "run id: ${env.BASE_RUN_ID}"
                     echo "study:  ${params.STUDY_ID} (${params.ABBREVIATION})"
                     echo "input:  ${params.INPUT}"
                     echo "mapping: ${params.MAPPING}"
+                    echo "image:  ${env.IMAGE_TAR}" + (env.USE_PREBUILT_IMAGE == 'true' ? ' (pre-built)' : ' (built by this job)')
                 }
                 sh '''
                     set -e
@@ -142,7 +182,9 @@ EOF
             }
         }
 
+        // Pre-flight needs no JAR, and a pre-built image already contains one.
         stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' && env.USE_POOL != 'true' && !params.PREFLIGHT_ONLY } }
             steps {
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
@@ -158,22 +200,38 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc})")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
                     }
                 }
             }
         }
 
+        // A pool worker loaded its image when it booted.
         stage('Package runner image') {
-            when { expression { !params.PREFLIGHT_ONLY } }
+            when { expression { !params.PREFLIGHT_ONLY && env.USE_POOL != 'true' } }
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" \
+                              --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
             }
         }
 
@@ -181,10 +239,69 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
 
-                    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+                    for (int attempt = 1; env.USE_POOL == 'true' && attempt <= maxAttempts; attempt++) {
+                        env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
+                                                              : "${env.BASE_RUN_ID}-r${attempt}"
+                        echo "Attempt ${attempt}/${maxAttempts} -- run id ${env.EFFECTIVE_RUN_ID} on pool worker ${env.POOL_INSTANCE}"
+
+                        def handoff = sh(returnStdout: true, script: '''
+                            etl-runners/common/pool-dispatch.sh "$POOL_INSTANCE" "$POOL_MAILBOX_URI" \
+                              split-allconcepts split-allconcepts "$EFFECTIVE_RUN_ID" \
+                              study_id="$TF_VAR_study_id" abbreviation="$TF_VAR_abbreviation" \
+                              input="$TF_VAR_input_uri" mapping="$TF_VAR_mapping_uri" output="$TF_VAR_output_uri"
+                        ''').trim()
+                        for (line in handoff.readLines()) {
+                            if (line.startsWith('STATUS_URI='))  { env.POOL_STATUS_URI  = line.substring(11) }
+                            if (line.startsWith('REPORTS_URI=')) { env.POOL_REPORTS_URI = line.substring(12) }
+                            if (line.startsWith('LOG_URI='))     { env.POOL_LOG_URI     = line.substring(8) }
+                        }
+                        if (!env.POOL_STATUS_URI || !env.POOL_REPORTS_URI) {
+                            error("pool-dispatch.sh did not report where run ${env.EFFECTIVE_RUN_ID} will publish:\n${handoff}")
+                        }
+                        env.POOL_DISPATCHED = 'true'
+
+                        rc = sh(returnStatus: true, script: '''
+                            etl-runners/common/monitor-runner.sh "$POOL_INSTANCE" "$POOL_STATUS_URI" "$POOL_LOG_URI"
+                        ''')
+
+                        env.JOB_EXIT_CODE = "${rc}"
+                        if (rc == 124) {
+                            // The timed-out run may still be going on the worker; the next study
+                            // handed to it could not start, and later ones would be refused.
+                            int retireRc = sh(returnStatus: true, script: '''
+                                etl-runners/common/pool-retire-worker.sh "$POOL_INSTANCE" "run $EFFECTIVE_RUN_ID timed out"
+                            ''')
+                            echo(retireRc == 0
+                                 ? "Pool worker ${env.POOL_INSTANCE} terminated after the timeout"
+                                 : "WARNING: could not terminate pool worker ${env.POOL_INSTANCE}; run ${env.EFFECTIVE_RUN_ID} " +
+                                   'may still be running on it. Give it no more studies.')
+                        }
+                        if (rc != 4 || attempt == maxAttempts) {
+                            break
+                        }
+                        // Retry on the same worker only while it is alive; a dead worker fails the study.
+                        def state = sh(returnStdout: true, script: '''
+                            aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$POOL_INSTANCE" \
+                              --query "Reservations[0].Instances[0].State.Name" --output text 2>/dev/null || echo unknown
+                        ''').trim()
+                        if (state != 'running') {
+                            echo "Exit 4 (INFRASTRUCTURE_ERROR) and pool worker ${env.POOL_INSTANCE} is ${state}: not retrying"
+                            break
+                        }
+                        echo 'Exit 4 (INFRASTRUCTURE_ERROR) is retryable -- handing the study to the same worker again'
+                        sleep time: 30, unit: 'SECONDS'
+                    }
+
+                    for (int attempt = 1; env.USE_POOL != 'true' && attempt <= maxAttempts; attempt++) {
                         env.EFFECTIVE_RUN_ID = (attempt == 1) ? env.BASE_RUN_ID
                                                               : "${env.BASE_RUN_ID}-r${attempt}"
                         env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
@@ -232,25 +349,45 @@ EOF
         }
 
         stage('Fetch reports') {
-            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
+            when { expression { !params.PREFLIGHT_ONLY && (env.TF_INITIALISED == 'true' || env.POOL_DISPATCHED == 'true') } }
             steps {
-                sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+                script {
+                    if (env.POOL_DISPATCHED == 'true') {
+                        // What `make fetch-reports` does, from the URI pool-dispatch.sh printed.
+                        sh '''
+                            rm -rf "$RUNNER_DIR/reports" && mkdir -p "$RUNNER_DIR/reports"
+                            aws s3 sync "$POOL_REPORTS_URI" "$RUNNER_DIR/reports" --region "$AWS_REGION" --no-progress
+                            ls -l "$RUNNER_DIR/reports"
+                        '''
+                    } else {
+                        sh "make -C ${RUNNER_DIR} fetch-reports STATE_KEY=${env.STATE_KEY}"
+                    }
+                }
             }
         }
 
         stage('Validate') {
-            when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
+            when { expression { !params.PREFLIGHT_ONLY && (env.TF_INITIALISED == 'true' || env.POOL_DISPATCHED == 'true') } }
             steps {
                 script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/split-allconcepts-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
                     int rc = sh(returnStatus: true, script:
                         "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc})")
                     }
                     echo "Split allConcepts validated for study ${params.STUDY_ID}."
@@ -271,18 +408,28 @@ EOF
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }
         failure {
-            echo "split-allconcepts FAILED for study ${params.STUDY_ID} at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''}"
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "split-allconcepts FAILED for study ${params.STUDY_ID}: ${currentBuild.description}."
         }
         unstable {
             echo "split-allconcepts completed WITH WARNINGS for study ${params.STUDY_ID}."

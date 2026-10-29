@@ -29,9 +29,33 @@ variable "instance_type" {
   EOT
 }
 
+variable "aws_account_id" {
+  type        = string
+  description = "Account the environment lives in; the provider refuses any other"
+}
+
+variable "vpc_id" {
+  type        = string
+  default     = ""
+  description = "VPC to launch in; its lowest-id subnet is used when subnet_id is blank"
+}
+
 variable "subnet_id" {
   type        = string
-  description = "Subnet to launch the runner in. Must have a route to RDS and to S3."
+  default     = ""
+  description = "Subnet to launch the runner in. Must reach the participant DB and S3. Blank = looked up from vpc_id."
+}
+
+variable "iam_role_name" {
+  type        = string
+  default     = "bdc-etl-jenkins-role"
+  description = "Instance profile role; the job does all S3 work as this role"
+}
+
+variable "iam_instance_profile_name" {
+  type        = string
+  default     = ""
+  description = "Pre-existing instance profile to attach (environments/<ENV>.tfvars). Blank creates one around iam_role_name."
 }
 
 variable "vpc_security_group_ids" {
@@ -46,33 +70,9 @@ variable "root_volume_size" {
   description = "Root EBS size in GiB. Holds the container image plus the per-study mapping CSVs."
 }
 
-variable "rds_secret_id" {
+variable "environment" {
   type        = string
-  description = "Secrets Manager id holding the RDS credentials"
-}
-
-variable "rds_secret_arn" {
-  type        = string
-  default     = ""
-  description = "Secret ARN; only needed when manage_secret_access is true"
-}
-
-variable "manage_secret_access" {
-  type        = bool
-  default     = false
-  description = "Let this run attach a GetSecretValue policy to the instance role"
-}
-
-variable "rds_host" {
-  type        = string
-  default     = ""
-  description = "RDS endpoint hostname, used when the secret contains only username/password"
-}
-
-variable "rds_dbname" {
-  type        = string
-  default     = ""
-  description = "RDS database name, used when the secret contains only username/password"
+  description = "ETL environment (common.mk sets TF_VAR_environment from ENV). Names the participant DB credentials' SSM parameter, /hpds-etl/<environment>/participant-db/app-credentials."
 }
 
 variable "tags" {
@@ -105,8 +105,9 @@ variable "managed_inputs_uri" {
 variable "data_folder_uri" {
   type        = string
   description = <<-EOT
-    --data-folder: folder containing, per study, an optional {studyid}_sstr.tsv and a
-    {ABV}_PatientMapping.v2.csv, plus one shared consents.csv. Local path or s3:// URI.
+    --data-folder: root of the per-study folders. Per study: {study_id}/rawData/sstr_{study_id}.{v}.txt
+    or, as a fallback, {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt and
+    *Subject.data_dict.xml); and {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv. Local path or s3:// URI.
   EOT
 }
 
@@ -116,10 +117,10 @@ variable "batch_size" {
   description = "--batch-size: rows per batch insert"
 }
 
-variable "container_assume_role_arn" {
+variable "parallelism" {
   type        = string
-  default     = ""
-  description = "Cross-account IAM role ARN for the container to assume when accessing S3 inputs."
+  default     = "4"
+  description = "--parallelism: studies migrated at once (1-8); each holds one database connection"
 }
 
 variable "image_tar" {
@@ -136,6 +137,21 @@ variable "study_filter" {
   type        = string
   default     = ""
   description = "--study-filter: comma-separated study ids to process; blank processes every ready study"
+}
+
+variable "resume_from_run_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    --resume-from: run id of an earlier participants-migration run over the same data folder.
+    Studies it migrated successfully are copied from its reports instead of migrated again.
+    Blank migrates every study.
+  EOT
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]*$", var.resume_from_run_id))
+    error_message = "resume_from_run_id must be a run id: letters, digits, '.', '_' and '-' only."
+  }
 }
 
 variable "java_opts" {

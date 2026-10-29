@@ -97,16 +97,14 @@ public class GenerateIdentityConsentMappingJob
                                 "IAM role assumed for all reads of --base (required for the NHLBI exchange bucket)",
                                 "arn:aws:iam::714862078411:role/nih-nhlbi-TopMed-EC2Access-S3"),
                         ParamSpec.optional("output", "Directory (URI or local path) the mapping CSV(s) are written to", "output"),
-                        ParamSpec.optional("per-study", "true = one CSV per study instead of a single combined file", "false")),
+                        ParamSpec.optional("per-study", "true = one CSV per study instead of a single combined file. "
+                                + "Accepts true/yes/y/1/on or false/no/n/0/off", "false")),
                 List.of("identity_consent_mapping.csv (or identity_consent_mapping_<phs>.csv per study) at --output"));
     }
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
-        String perStudy = ctx.get("per-study", "false");
-        if (!perStudy.equals("true") && !perStudy.equals("false")) {
-            report.error("BAD_PER_STUDY", "per-study must be 'true' or 'false', got: " + perStudy, "--per-study");
-        }
+        validateBooleanParam(ctx, report, "per-study");
         String base = ctx.get("base", "s3://nih-nhlbi-bdc-harmdata-exchange");
         if (io.isS3(base) && ctx.get("role-arn").isEmpty()) {
             report.error("MISSING_ROLE", "an s3:// base requires --role-arn (the exchange bucket is not "
@@ -117,7 +115,7 @@ public class GenerateIdentityConsentMappingJob
     @Override
     protected Output execute(JobContext ctx) {
         String base = trimTrailingSlash(ctx.get("base", "s3://nih-nhlbi-bdc-harmdata-exchange"));
-        boolean perStudy = ctx.get("per-study", "false").equals("true");
+        boolean perStudy = ctx.getBoolean("per-study", false);
         String outputDir = trimTrailingSlash(ctx.get("output", "output"));
 
         // Input may need the exchange role; output always goes through default credentials.

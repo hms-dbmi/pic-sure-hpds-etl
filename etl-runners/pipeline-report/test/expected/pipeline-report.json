@@ -1,0 +1,489 @@
+{
+  "reportVersion": 1,
+  "runId": "jenkins-test-1",
+  "pipelineResult": "FAILURE",
+  "preflightOnly": false,
+  "generatedAt": "2026-10-16T00:00:00Z",
+  "studyPlanFound": true,
+  "summary": {
+    "studies": 6,
+    "studiesByStatus": {
+      "FAILED": 1,
+      "EXCLUDED": 1,
+      "NOT_REACHED": 4,
+      "COMPLETE_WITH_WARNINGS": 0,
+      "COMPLETE": 0,
+      "ALREADY_PROCESSED": 0
+    },
+    "excludedStudies": [
+      "phs000004"
+    ],
+    "reviewItems": 15,
+    "heldBackVcfGroups": 0
+  },
+  "stages": [
+    {
+      "stage": "sstr-populate-rds-participants",
+      "ran": true,
+      "result": null,
+      "exitCode": null,
+      "errors": null,
+      "warnings": null,
+      "note": "3 SUCCESS, 1 UNSTABLE"
+    },
+    {
+      "stage": "all-concepts-data-generator",
+      "ran": true,
+      "result": null,
+      "exitCode": null,
+      "errors": null,
+      "warnings": null,
+      "note": "2 SUCCESS, 1 FAILURE, 1 NOT_RUN"
+    },
+    {
+      "stage": "generate-global-all-concepts",
+      "ran": true,
+      "result": "SUCCESS",
+      "exitCode": "SUCCESS",
+      "errors": 0,
+      "warnings": 0,
+      "note": null,
+      "report": "all-concepts/etl-runners/generate-global-all-concepts/reports/generate-global-all-concepts-t-all-concepts.json"
+    },
+    {
+      "stage": "create-vcf-indexes",
+      "ran": true,
+      "result": "SUCCESS",
+      "exitCode": "SUCCESS_WITH_WARNINGS",
+      "errors": 0,
+      "warnings": 1,
+      "note": null,
+      "report": "vcf-indexes/etl-runners/create-vcf-indexes/reports/create-vcf-indexes-t-vcf-indexes.json"
+    },
+    {
+      "stage": "merge-allconcepts",
+      "ran": false,
+      "result": null,
+      "exitCode": null,
+      "errors": null,
+      "warnings": null,
+      "note": "no report: the stage did not run (or its artifacts were not copied)"
+    },
+    {
+      "stage": "generate-allconcepts-manifest",
+      "ran": false,
+      "result": null,
+      "exitCode": null,
+      "errors": null,
+      "warnings": null,
+      "note": "no report: the stage did not run (or its artifacts were not copied)"
+    }
+  ],
+  "studyIdsByStatus": {
+    "FAILED": [
+      "phs000003"
+    ],
+    "EXCLUDED": [
+      "phs000004"
+    ],
+    "NOT_REACHED": [
+      "phs000001",
+      "phs000002",
+      "phs000005",
+      "phs000006"
+    ],
+    "COMPLETE_WITH_WARNINGS": [],
+    "COMPLETE": [],
+    "ALREADY_PROCESSED": []
+  },
+  "studies": [
+    {
+      "studyId": "phs000001",
+      "abv": "ONE",
+      "plan": "load",
+      "status": "NOT_REACHED",
+      "decodedBytes": 2147483648,
+      "sstrInput": "s3://b/r/phs000001/rawData/sstr_phs000001.v1.txt",
+      "stages": {
+        "sstr-populate-rds-participants": {
+          "result": "SUCCESS",
+          "build": 11,
+          "url": "https://j/sstr/11/",
+          "report": "sstr/phs000001/etl-runners/sstr-populate-rds-participants/reports/sstr-populate-rds-participants-t-phs000001.json",
+          "exitCode": "SUCCESS",
+          "warnings": 0
+        },
+        "all-concepts-data-generator": {
+          "result": "SUCCESS",
+          "build": 21,
+          "url": "https://j/gen/21/",
+          "report": "per-study-all-concepts/phs000001/etl-runners/all-concepts-data-generator/reports/all-concepts-data-generator-t-allconcepts-phs000001.json",
+          "exitCode": "SUCCESS",
+          "warnings": 0
+        }
+      },
+      "metrics": {
+        "participants": 120,
+        "participantsInserted": 120,
+        "consentGroups": 2,
+        "rowsProcessed": 9000
+      },
+      "review": [
+        {
+          "stage": "merge-allconcepts",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+        },
+        {
+          "stage": "generate-allconcepts-manifest",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+        }
+      ]
+    },
+    {
+      "studyId": "phs000002",
+      "abv": "TWO",
+      "plan": "load",
+      "status": "NOT_REACHED",
+      "decodedBytes": 1000,
+      "sstrInput": "s3://b/r/phs000002/rawData/sstr_phs000002.v2.txt",
+      "stages": {
+        "sstr-populate-rds-participants": {
+          "result": "UNSTABLE",
+          "build": 12,
+          "url": "https://j/sstr/12/",
+          "report": "sstr/phs000002/etl-runners/sstr-populate-rds-participants/reports/sstr-populate-rds-participants-t-phs000002.json",
+          "exitCode": "SUCCESS_WITH_WARNINGS",
+          "warnings": 1
+        },
+        "all-concepts-data-generator": {
+          "result": "SUCCESS",
+          "build": 23,
+          "url": "https://j/gen/23/",
+          "report": "per-study-all-concepts/phs000002/etl-runners/all-concepts-data-generator/reports/all-concepts-data-generator-t-allconcepts-phs000002.json",
+          "exitCode": "SUCCESS",
+          "warnings": 0
+        }
+      },
+      "metrics": {
+        "participants": 40,
+        "participantsInserted": 0,
+        "consentGroups": 1,
+        "rowsProcessed": 10
+      },
+      "review": [
+        {
+          "stage": "sstr-populate-rds-participants",
+          "severity": "WARNING",
+          "code": "NO_NEW_PARTICIPANTS",
+          "detail": "0 new participants: a reload?"
+        },
+        {
+          "stage": "merge-allconcepts",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+        },
+        {
+          "stage": "generate-allconcepts-manifest",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+        }
+      ]
+    },
+    {
+      "studyId": "phs000003",
+      "abv": "THREE",
+      "plan": "load",
+      "status": "FAILED",
+      "decodedBytes": 5000,
+      "sstrInput": "s3://b/r/phs000003/rawData/sstr_phs000003.v1.txt",
+      "stages": {
+        "sstr-populate-rds-participants": {
+          "result": "SUCCESS",
+          "build": 13,
+          "url": "https://j/sstr/13/",
+          "report": "sstr/phs000003/etl-runners/sstr-populate-rds-participants/reports/sstr-populate-rds-participants-t-phs000003.json",
+          "exitCode": "SUCCESS",
+          "warnings": 0
+        },
+        "all-concepts-data-generator": {
+          "result": "FAILURE",
+          "build": 22,
+          "url": "https://j/gen/22/",
+          "report": "per-study-all-concepts/phs000003/etl-runners/all-concepts-data-generator/reports/all-concepts-data-generator-t-allconcepts-phs000003.json",
+          "exitCode": "DATA_ERROR",
+          "warnings": 0
+        }
+      },
+      "metrics": {
+        "participants": 7,
+        "participantsInserted": 7,
+        "consentGroups": 0,
+        "rowsProcessed": 0
+      },
+      "review": [
+        {
+          "stage": "all-concepts-data-generator",
+          "severity": "FAILED",
+          "code": "FAILURE",
+          "detail": "DATA ERROR (exit 3): malformed decoded data (https://j/gen/22/)"
+        },
+        {
+          "stage": "merge-allconcepts",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+        },
+        {
+          "stage": "generate-allconcepts-manifest",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+        }
+      ]
+    },
+    {
+      "studyId": "phs000004",
+      "abv": "FOUR",
+      "plan": "excluded",
+      "status": "EXCLUDED",
+      "decodedBytes": null,
+      "sstrInput": null,
+      "stages": {},
+      "metrics": {},
+      "review": [
+        {
+          "stage": "resolve-studies",
+          "severity": "EXCLUDED",
+          "code": "MISSING_INPUTS",
+          "detail": "no decoded data CSVs in s3://b/r/phs000004/decoded_data/; no concept mapping at s3://b/r/phs000004/mappings/mapping2.csv"
+        }
+      ]
+    },
+    {
+      "studyId": "phs000005",
+      "abv": "FIVE",
+      "plan": "already_processed",
+      "status": "NOT_REACHED",
+      "decodedBytes": null,
+      "sstrInput": null,
+      "stages": {},
+      "metrics": {},
+      "review": [
+        {
+          "stage": "create-vcf-indexes",
+          "severity": "WARNING",
+          "code": "NO_VCF_FILES",
+          "detail": "phs000005 has no VCF files"
+        },
+        {
+          "stage": "merge-allconcepts",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+        },
+        {
+          "stage": "generate-allconcepts-manifest",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+        }
+      ]
+    },
+    {
+      "studyId": "phs000006",
+      "abv": "SIX",
+      "plan": "load",
+      "status": "NOT_REACHED",
+      "decodedBytes": 10,
+      "sstrInput": "s3://b/r/phs000006/rawData/sstr_phs000006.v1.txt",
+      "stages": {
+        "sstr-populate-rds-participants": {
+          "result": "SUCCESS",
+          "build": 14,
+          "url": "https://j/sstr/14/",
+          "report": "sstr/phs000006/etl-runners/sstr-populate-rds-participants/reports/sstr-populate-rds-participants-t-phs000006.json",
+          "exitCode": "SUCCESS",
+          "warnings": 0
+        },
+        "all-concepts-data-generator": {
+          "result": "NOT_RUN",
+          "build": null,
+          "url": null,
+          "report": null,
+          "exitCode": null,
+          "warnings": null
+        }
+      },
+      "metrics": {
+        "participants": 3,
+        "participantsInserted": 3,
+        "consentGroups": null,
+        "rowsProcessed": null
+      },
+      "review": [
+        {
+          "stage": "all-concepts-data-generator",
+          "severity": "NOT_REACHED",
+          "code": "NOT_STARTED",
+          "detail": "not started: the stage stopped first (a failure with CONTINUE_ON_STUDY_FAILURE off, an abort, or the timeout)"
+        },
+        {
+          "stage": "merge-allconcepts",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+        },
+        {
+          "stage": "generate-allconcepts-manifest",
+          "severity": "NOT_REACHED",
+          "code": "STAGE_NOT_RUN",
+          "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+        }
+      ]
+    }
+  ],
+  "review": [
+    {
+      "studyId": "phs000001",
+      "abv": "ONE",
+      "status": "NOT_REACHED",
+      "stage": "merge-allconcepts",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000001",
+      "abv": "ONE",
+      "status": "NOT_REACHED",
+      "stage": "generate-allconcepts-manifest",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000002",
+      "abv": "TWO",
+      "status": "NOT_REACHED",
+      "stage": "sstr-populate-rds-participants",
+      "severity": "WARNING",
+      "code": "NO_NEW_PARTICIPANTS",
+      "detail": "0 new participants: a reload?"
+    },
+    {
+      "studyId": "phs000002",
+      "abv": "TWO",
+      "status": "NOT_REACHED",
+      "stage": "merge-allconcepts",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000002",
+      "abv": "TWO",
+      "status": "NOT_REACHED",
+      "stage": "generate-allconcepts-manifest",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000003",
+      "abv": "THREE",
+      "status": "FAILED",
+      "stage": "all-concepts-data-generator",
+      "severity": "FAILED",
+      "code": "FAILURE",
+      "detail": "DATA ERROR (exit 3): malformed decoded data (https://j/gen/22/)"
+    },
+    {
+      "studyId": "phs000003",
+      "abv": "THREE",
+      "status": "FAILED",
+      "stage": "merge-allconcepts",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000003",
+      "abv": "THREE",
+      "status": "FAILED",
+      "stage": "generate-allconcepts-manifest",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000004",
+      "abv": "FOUR",
+      "status": "EXCLUDED",
+      "stage": "resolve-studies",
+      "severity": "EXCLUDED",
+      "code": "MISSING_INPUTS",
+      "detail": "no decoded data CSVs in s3://b/r/phs000004/decoded_data/; no concept mapping at s3://b/r/phs000004/mappings/mapping2.csv"
+    },
+    {
+      "studyId": "phs000005",
+      "abv": "FIVE",
+      "status": "NOT_REACHED",
+      "stage": "create-vcf-indexes",
+      "severity": "WARNING",
+      "code": "NO_VCF_FILES",
+      "detail": "phs000005 has no VCF files"
+    },
+    {
+      "studyId": "phs000005",
+      "abv": "FIVE",
+      "status": "NOT_REACHED",
+      "stage": "merge-allconcepts",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000005",
+      "abv": "FIVE",
+      "status": "NOT_REACHED",
+      "stage": "generate-allconcepts-manifest",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000006",
+      "abv": "SIX",
+      "status": "NOT_REACHED",
+      "stage": "all-concepts-data-generator",
+      "severity": "NOT_REACHED",
+      "code": "NOT_STARTED",
+      "detail": "not started: the stage stopped first (a failure with CONTINUE_ON_STUDY_FAILURE off, an abort, or the timeout)"
+    },
+    {
+      "studyId": "phs000006",
+      "abv": "SIX",
+      "status": "NOT_REACHED",
+      "stage": "merge-allconcepts",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "merge-allconcepts did not run (or its report was not copied), so this study's outputs were not published"
+    },
+    {
+      "studyId": "phs000006",
+      "abv": "SIX",
+      "status": "NOT_REACHED",
+      "stage": "generate-allconcepts-manifest",
+      "severity": "NOT_REACHED",
+      "code": "STAGE_NOT_RUN",
+      "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
+    }
+  ],
+  "heldBackVcfGroups": []
+}

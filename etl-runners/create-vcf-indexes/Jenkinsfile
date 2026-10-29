@@ -13,16 +13,35 @@
 // Inputs
 //   --output       where vcfIndex.tsv and SampleIds.csv are written (local path or s3:// URI)
 //   Managed inputs URI from configuration
-//   RDS credentials fetched on the runner from Secrets Manager by instance role
+//   RDS credentials read by the runner at boot from the SSM parameter
+//                   /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
 //   vcfIndex.tsv and SampleIds.csv at the --output location
 //   create-vcf-indexes-<runId>.json report with studiesProcessed, consentGroupsProcessed,
-//   totalSamples, and outputFiles.
+//   totalSamples, outputFiles, skippedStudies, heldBackGroups and heldBackFilesDeleted.
+//
+// Held-back consent groups
+//   A consent group whose data would produce unparseable files (a sample id containing a
+//   comma, tab or line break: ID_COUNT_MISMATCH; a study abbreviation containing a comma or
+//   line break, which holds back every group of that study: BAD_STUDY_ABV) is not written, and
+//   its previously published _vcfIndex.tsv / _SampleIds.csv, where they exist, are DELETED so
+//   stale data cannot be read beside this run's groups (the versioned bucket keeps the old
+//   versions; with a group to hold back, an s3:// output on a bucket without versioning Enabled
+//   fails the run with exit 5 before anything is written or deleted). Every good group is still written. Each held-back group is an output-validation
+//   error (exit 2), listed in metrics.heldBackGroups with its study, consent, reasons, a sample of
+//   the bad ids and the deletedFiles URIs (count: metrics.heldBackFilesDeleted), and validate.sh
+//   prints them. NO_FILES_WRITTEN is an error only when nothing at all was written.
 //
 // Exit codes (see ExitCode.java)
-//   0 success | 2 validation | 3 data | 4 infrastructure | 5 config | 1 unknown |
-//   124 monitor timeout
+//   0 success | 2 validation (incl. held-back consent groups) | 3 data | 4 infrastructure |
+//   5 config | 1 unknown | 124 monitor timeout
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The permanent orchestrator (/Jenkinsfile) builds the image once and passes it as
+//   PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball, and leaves
+//   deleting it to the orchestrator.
 // =============================================================================
 
 pipeline {
@@ -34,6 +53,8 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
         timeout(time: 2, unit: 'HOURS')
@@ -52,29 +73,27 @@ pipeline {
                description: 'Runner instance type.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR).')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate inputs and stop without provisioning anything')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/create-vcf-indexes'
 
         TF_VAR_output_uri                = "${params.OUTPUT.trim()}"
         TF_VAR_managed_inputs_uri        = "${params.MANAGED_INPUTS.trim()}"
         TF_VAR_include_processed         = "${params.INCLUDE_PROCESSED}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -84,14 +103,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     if (!params.OUTPUT?.trim()) {
                         error('OUTPUT is required: the s3:// URI or local path for vcfIndex.tsv and SampleIds.csv.')
@@ -104,8 +115,14 @@ EOF
 
                     env.TF_VAR_name_suffix = "vcf-indexes-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} vcf-indexes"
                     echo "output: ${params.OUTPUT}"
@@ -123,7 +140,9 @@ EOF
             }
         }
 
+        // Pre-flight needs no JAR, and a pre-built image already contains one.
         stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' && !params.PREFLIGHT_ONLY } }
             steps {
                 sh "make -C ${RUNNER_DIR} jar SKIP_TESTS=${params.SKIP_TESTS}"
             }
@@ -138,13 +157,11 @@ EOF
             steps {
                 script {
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc})")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc})")
                     }
                 }
             }
@@ -153,7 +170,23 @@ EOF
         stage('Package runner image') {
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
             }
         }
 
@@ -161,6 +194,12 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
 
@@ -223,15 +262,24 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
             steps {
                 script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/create-vcf-indexes-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
                     int rc = sh(returnStatus: true, script:
                         "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
                     }
                     echo "VCF indexes generated and validated."
@@ -252,18 +300,28 @@ EOF
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }
         failure {
-            echo "create-vcf-indexes FAILED at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''} Reports are archived on this build."
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "create-vcf-indexes FAILED: ${currentBuild.description}. Reports are archived on this build."
         }
         unstable {
             echo 'create-vcf-indexes completed WITH WARNINGS. ' +

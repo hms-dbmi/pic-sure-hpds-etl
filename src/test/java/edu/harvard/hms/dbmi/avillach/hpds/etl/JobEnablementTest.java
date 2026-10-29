@@ -15,8 +15,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Verifies that {@code etl.jobs.<name>.enabled} controls what can run: a job whose flag is false is
  * never instantiated, so {@link JobRegistry} never sees it.
  *
- * <p>The property overrides below invert the shipped defaults ({@code template} on, the two loaders
- * off), which also proves the flags are read from configuration rather than baked in.
+ * <p>The property overrides below invert the shipped defaults ({@code template} on,
+ * {@code sstr-populate-rds-participants} and {@code generate-global-all-concepts} off), which also
+ * proves the flags are read from configuration rather than baked in.
  *
  * <p>{@code participants-migration} injects
  * {@link edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob},
@@ -28,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestPropertySource(properties = {
         "etl.jobs.template.enabled=true",
         "etl.jobs.sstr-populate-rds-participants.enabled=false",
-        "etl.jobs.single-consent-data-populate-rds-participants.enabled=false",
+        "etl.jobs.generate-global-all-concepts.enabled=false",
         "etl.jobs.participants-migration.enabled=true",
         // The datasource has no defaults in application.yml; nothing here connects.
         "spring.datasource.url=jdbc:postgresql://localhost:5432/hpds",
@@ -48,7 +49,7 @@ class JobEnablementTest {
     @Test
     void a_disabled_job_is_not_registered() {
         assertThat(registry.contains("sstr-populate-rds-participants")).isFalse();
-        assertThat(registry.contains("single-consent-data-populate-rds-participants")).isFalse();
+        assertThat(registry.contains("generate-global-all-concepts")).isFalse();
     }
 
     @Test

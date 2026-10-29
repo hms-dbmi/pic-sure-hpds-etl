@@ -23,13 +23,13 @@
 //   --study-id     phs###### (params.STUDY_ID)
 //   --input        the SSTR TSV, local or s3:// (params.INPUT)
 //   --batch-size   rows per batch insert (params.BATCH_SIZE)
-//   RDS credentials fetched on the runner from Secrets Manager by instance role; they never pass
-//                   through Jenkins
+//   RDS credentials read by the runner at boot from the SSM parameter
+//                   /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
 // Outputs
 //   RDS rows in participants / consents / samples for this study
 //   sstr-populate-rds-participants-<runId>.json with rowsRead, distinctParticipants,
-//   participantsInserted, consentsWritten, samplesInserted, and countsByConsentGroup.
+//   participantsInserted, consentsWritten, samplesSeen, samplesInserted, and countsByConsentGroup.
 //   Archived on this build and left in S3 under the runner's report prefix.
 //
 // Exit codes (see ExitCode.java)
@@ -37,7 +37,13 @@
 //   5 config | 1 unknown | 124 monitor timeout
 //
 // Agent requirements: JDK 25, Maven wrapper, Docker, Terraform >= 1.3, AWS CLI v2, jq, and the
-// jenkins-s3-role instance profile.
+// bdc-etl-jenkins-role instance profile.
+//
+// Runner image
+//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
+//   The permanent orchestrator (/Jenkinsfile) runs one of these per study, so it builds the image once and
+//   passes it as PREBUILT_IMAGE_TAR; this build then skips both build stages, uses that tarball,
+//   and leaves deleting it to the orchestrator.
 // =============================================================================
 
 pipeline {
@@ -49,6 +55,8 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the permanent orchestrator (/Jenkinsfile) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         // Concurrency is deliberately ALLOWED so the orchestrator can load several studies at
         // once. Study-scoped work is isolated (the purge is scoped to one study_id; resource
@@ -65,7 +73,7 @@ pipeline {
                description: 'REQUIRED. --input: the dbGaP SSTR subject/sample mapping TSV (local path or s3:// URI)')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
-        string(name: 'EXPECTED_consent_codeS', defaultValue: '',
+        string(name: 'EXPECTED_CONSENT_CODES', defaultValue: '',
                description: 'Optional. Comma-separated CONSENT values this study must produce. When set, a mismatch fails the build — this is what catches a file swapped for the wrong study.')
         string(name: 'EXPECTED_MIN_PARTICIPANTS', defaultValue: '',
                description: 'Optional. Minimum distinct participants. Catches a truncated or partially-staged input file.')
@@ -75,22 +83,21 @@ pipeline {
                description: 'Runner instance type. One record is held per input row, so size against this study, not the average.')
         string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '7200',
                description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites. Off by default: the image the runner executes should be the artifact the tests ran against.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
                description: 'Retry once on exit 4 (INFRASTRUCTURE_ERROR). Safe: purge + load is one transaction and upserts are idempotent.')
-        string(name: 'CONTAINER_ASSUME_ROLE_ARN', defaultValue: 'arn:aws:iam::736265540791:role/dbgap-etl',
-               description: 'Cross-account IAM role ARN for the container to assume when reading S3 inputs. Blank disables cross-account access.')
         booleanParam(name: 'PREFLIGHT_ONLY', defaultValue: false,
                description: 'Validate the study id and input header, then stop without provisioning anything')
-        choice(name: 'ENV', choices: ['integration'],
+        choice(name: 'ENV', choices: ['development'],
                description: 'Target environment. Selects etl-runners/environments/<ENV>.tfvars.')
     }
 
     environment {
-        ENV             = "${params.ENV ?: 'integration'}"
+        ENV             = "${params.ENV ?: 'development'}"
         AWS_REGION      = 'us-east-1'
-        AWS_CONFIG_FILE = "${WORKSPACE}/.aws-config"
 
         RUNNER_DIR = 'etl-runners/sstr-populate-rds-participants'
 
@@ -99,10 +106,9 @@ pipeline {
         TF_VAR_study_id                  = "${params.STUDY_ID.trim()}"
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
-        TF_VAR_container_assume_role_arn = "${params.CONTAINER_ASSUME_ROLE_ARN.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
-        EXPECTED_consent_codeS   = "${params.EXPECTED_consent_codeS.trim()}"
+        EXPECTED_CONSENT_CODES   = "${params.EXPECTED_CONSENT_CODES.trim()}"
         EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
@@ -112,14 +118,6 @@ pipeline {
 
         stage('Init') {
             steps {
-                sh '''
-                    cat > "$AWS_CONFIG_FILE" <<'EOF'
-[profile dbgap-etl]
-role_arn = arn:aws:iam::736265540791:role/dbgap-etl
-credential_source = Ec2InstanceMetadata
-role_session_name = jenkins-hpds-etl
-EOF
-                '''
                 script {
                     if (!params.STUDY_ID?.trim()) {
                         error('STUDY_ID is required. Run the permanent orchestrator (Jenkinsfile) to sweep every ready study from managed inputs.')
@@ -141,8 +139,14 @@ EOF
                     // Unique per study AND per build: a sweep may run several of these at once.
                     env.TF_VAR_name_suffix = "${params.STUDY_ID}-${env.BUILD_NUMBER}".replaceAll(/[^A-Za-z0-9-]/, '-')
 
-                    env.IMAGE_TAR = "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
+                    def prebuilt = params.PREBUILT_IMAGE_TAR?.trim()
+                    if (prebuilt && !(prebuilt ==~ /[A-Za-z0-9._-]+\.tar\.gz/)) {
+                        error("PREBUILT_IMAGE_TAR must be a tarball file name under etl-runner/container/, got '${prebuilt}'.")
+                    }
+                    env.USE_PREBUILT_IMAGE = prebuilt ? 'true' : 'false'
+                    env.IMAGE_TAR = prebuilt ?: "hpds-etl-runner-${env.BASE_RUN_ID}.tar.gz"
                     env.TF_VAR_image_tar = env.IMAGE_TAR
+                    echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.STUDY_ID}"
                     echo "study:  ${params.STUDY_ID}"
@@ -161,7 +165,9 @@ EOF
             }
         }
 
+        // Pre-flight needs no JAR, and a pre-built image already contains one.
         stage('Build JAR') {
+            when { expression { env.USE_PREBUILT_IMAGE != 'true' && !params.PREFLIGHT_ONLY } }
             steps {
                 // `package` runs the unit suites; a failing test must stop the run before any
                 // infrastructure exists. The Testcontainers *IT suites bind on `verify` and
@@ -182,13 +188,11 @@ EOF
                     // Called directly, not through make: make collapses every failure to 2 and
                     // would lose the validator's "10 = warnings" signal.
                     env.TF_VAR_run_id = env.EFFECTIVE_RUN_ID
-                    withEnv(['AWS_PROFILE=dbgap-etl']) {
-                        int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
-                        if (rc == 10) {
-                            unstable('Pre-flight found warnings in the input file')
-                        } else if (rc != 0) {
-                            error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
-                        }
+                    int rc = sh(script: "cd ${RUNNER_DIR} && ./preflight.sh", returnStatus: true)
+                    if (rc == 10) {
+                        unstable('Pre-flight found warnings in the input file')
+                    } else if (rc != 0) {
+                        error("Pre-flight failed (rc=${rc}): this input would fail the job at run time")
                     }
                 }
             }
@@ -197,7 +201,23 @@ EOF
         stage('Package runner image') {
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
-                sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                script {
+                    if (env.USE_PREBUILT_IMAGE == 'true') {
+                        // Fail now rather than after provisioning an instance that cannot pull it.
+                        int rc = sh(returnStatus: true, script: '''
+                            bucket=$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' etl-runners/environments/$ENV.tfvars)
+                            aws s3api head-object --bucket "$bucket" --key "etl-runner/container/$IMAGE_TAR" --region "$AWS_REGION" >/dev/null
+                        ''')
+                        if (rc != 0) {
+                            error("Pre-built image ${env.IMAGE_TAR} is not in the stack bucket under etl-runner/container/.")
+                        }
+                        echo "Using pre-built image ${env.IMAGE_TAR}"
+                    } else {
+                        // Set first, so a partial upload is still cleaned up in post.
+                        env.OWNS_IMAGE = 'true'
+                        sh "make -C ${RUNNER_DIR} package IMAGE_TAR=${env.IMAGE_TAR}"
+                    }
+                }
             }
         }
 
@@ -205,6 +225,12 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY } }
             steps {
                 script {
+                    // The participant DB is up only between participant-db-start and -stop.
+                    // Fail here, in seconds, rather than after ~5 minutes of provisioning.
+                    if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
+                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                    }
+
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
                     int rc = 1
 
@@ -269,6 +295,13 @@ EOF
             when { expression { !params.PREFLIGHT_ONLY && env.TF_INITIALISED == 'true' } }
             steps {
                 script {
+                    // A job that stopped before writing its report (a timeout, a crash, the instance lost)
+                    // leaves validate.sh nothing to check. Report the job's failure, not the missing file.
+                    String reportFile = "${RUNNER_DIR}/reports/sstr-populate-rds-participants-${env.EFFECTIVE_RUN_ID}.json"
+                    if (env.JOB_EXIT_CODE != '0' && !fileExists(reportFile)) {
+                        env.FAILURE_REASON = "${env.FAILURE_MEANING}; it stopped before writing its report, so there was nothing to validate"
+                        error("Job failed: ${env.FAILURE_REASON}. The runner log above shows how far it got.")
+                    }
                     int rc = sh(returnStatus: true, script:
                         "cd ${RUNNER_DIR} && ./validate.sh reports ${env.EFFECTIVE_RUN_ID}")
 
@@ -276,11 +309,13 @@ EOF
                     // load that exits 0 but wrote fewer consent rows than it found subjects
                     // is still a failed load.
                     if (env.JOB_EXIT_CODE != '0') {
-                        error("Job failed: ${env.FAILURE_MEANING}. See the validation output above.")
+                        env.FAILURE_REASON = env.FAILURE_MEANING
+                        error("Job failed: ${env.FAILURE_MEANING}. The report checks above show what it recorded.")
                     }
                     if (rc == 10) {
                         unstable('Validation passed with warnings')
                     } else if (rc != 0) {
+                        env.FAILURE_REASON = "report validation failed (rc=${rc})"
                         error("Report validation failed (rc=${rc}): the job exited 0 but its output does not hold up")
                     }
                     echo "Study ${params.STUDY_ID} validated: consent rows match distinct participants and every group is accounted for."
@@ -295,28 +330,37 @@ EOF
                              allowEmptyArchive: true, fingerprint: true
             script {
                 if (env.TF_INITIALISED == 'true') {
-                    // The instance self-terminates, so this only reclaims the Terraform state
-                    // and the instance profile -- never fatal.
+                    // The instance self-terminates, so this only reclaims the Terraform state --
+                    // never fatal.
                     int rc = sh(returnStatus: true,
                                 script: "make -C ${RUNNER_DIR} destroy STATE_KEY=${env.STATE_KEY}")
                     if (rc != 0) {
-                        echo "WARNING: terraform destroy returned ${rc}. The runner terminates itself, " +
-                             "but check for a leftover instance profile: " +
-                             "sstr-populate-rds-participants-etl-instance-profile-${env.TF_VAR_name_suffix}"
+                        echo "WARNING: terraform destroy returned ${rc}. The runner terminates itself; " +
+                             "only its Terraform state is left behind."
                     }
                 }
-                if (env.IMAGE_TAR) {
+                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
                           etl-runners/environments/${ENV}.tfvars)/etl-runner/container/${env.IMAGE_TAR} \
                           --region ${AWS_REGION} || true
                     """)
+                    // The local tarball and image make package left on this host.
+                    sh(returnStatus: true, script: '''
+                        rm -f "$RUNNER_DIR/$IMAGE_TAR"
+                        docker rmi "${IMAGE_TAR%.tar.gz}" >/dev/null 2>&1 || true
+                    ''')
                 }
             }
         }
         failure {
-            echo "sstr-populate-rds-participants FAILED for ${params.STUDY_ID} at stage '${env.STAGE_NAME}'. " +
-                 "${env.FAILURE_MEANING ?: ''} On exit 3 the study was rolled back and RDS is unchanged — " +
+            script {
+                // Read by the orchestrators, which quote it when this build fails their stage.
+                currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
+                    (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
+            }
+            echo "sstr-populate-rds-participants FAILED for ${params.STUDY_ID}: ${currentBuild.description}. On exit 3 the study was rolled back and RDS is unchanged — " +
                  "fix the file and re-run. Reports are archived on this build; the full runner log is in S3 " +
                  "under etl-runner/logs/sstr-populate-rds-participants-${env.EFFECTIVE_RUN_ID}.log"
         }

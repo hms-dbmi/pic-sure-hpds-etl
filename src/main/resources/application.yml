@@ -6,9 +6,12 @@ spring:
     web-application-type: none
     banner-mode: "off"
   datasource:
-    url: ${RDS_URL:jdbc:postgresql://unset:5432/unset}
-    username: ${RDS_USERNAME:}
-    password: ${RDS_PASSWORD:}
+    # Supplied on a runner from the participant DB credentials (see docs/PARTICIPANT_DB.md).
+    # The RDS_* fallback is transitional: older runner user_data still writes RDS_URL etc.
+    # Remove it once all runners write DB_*.
+    url: ${DB_URL:${RDS_URL:jdbc:postgresql://unset:5432/unset}}
+    username: ${DB_USERNAME:${RDS_USERNAME:}}
+    password: ${DB_PASSWORD:${RDS_PASSWORD:}}
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:8}
       schema: ${DB_SCHEMA:etl}
@@ -18,7 +21,8 @@ spring:
       initialization-fail-timeout: -1
   sql:
     init:
-      # Schema is owned/managed externally (Flyway/DBA). Never auto-run against RDS.
+      # Schema is created by participant-db-start (fresh database) or arrives with the restored
+      # dump. Never auto-run at application startup.
       mode: never
 
 etl:
@@ -39,8 +43,6 @@ etl:
     # PERMANENT ingestion.
     sstr-populate-rds-participants:
       enabled: ${ETL_JOB_SSTR_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
-    single-consent-data-populate-rds-participants:
-      enabled: ${ETL_JOB_SINGLE_CONSENT_DATA_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
 
     generate-global-all-concepts:
       enabled: ${ETL_JOB_GENERATE_GLOBAL_ALL_CONCEPTS_ENABLED:true}
@@ -51,16 +53,27 @@ etl:
     create-vcf-indexes:
       enabled: ${ETL_JOB_CREATE_VCF_INDEXES_ENABLED:true}
 
+    merge-allconcepts:
+      enabled: ${ETL_JOB_MERGE_ALLCONCEPTS_ENABLED:true}
+
+    # Runs last in both pipelines: verifies every ready consent group's MERGED file and writes the
+    # versioned allConcepts_manifest.csv handed to production ingestion.
+    generate-allconcepts-manifest:
+      enabled: ${ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED:true}
+
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:
       enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}
 
     # TEMPORARY migration. Set these to false once the migration has run in every environment,
     # then delete the jobs. NOTE: participants-migration also requires
-    # sstr-populate-rds-participants to be enabled -- it injects that job to load the
-    # sstr-backed studies, and its condition lists both flags.
+    # sstr-populate-rds-participants and multi-populate-rds-participants to be enabled -- it
+    # injects them to load each study from its SSTR, or from its dbGaP MULTI files when the
+    # SSTR is missing or malformed, and its condition lists all three flags.
     participants-migration:
       enabled: ${ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED:true}
+    multi-populate-rds-participants:
+      enabled: ${ETL_JOB_MULTI_POPULATE_RDS_PARTICIPANTS_ENABLED:true}
     split-allconcepts:
       enabled: ${ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED:true}
 

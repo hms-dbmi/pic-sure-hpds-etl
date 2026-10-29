@@ -1,9 +1,9 @@
--- Reference schema for the three PIC-SURE HPDS identity tables on AWS RDS Postgres.
+-- Reference schema for the three PIC-SURE HPDS identity tables in the participant database.
 --
--- This file documents the target shape and is used to initialize the Postgres
--- Testcontainer during integration tests. In production the schema is owned and
--- migrated externally (spring.sql.init.mode=never) -- this file does NOT run
--- against RDS at application startup.
+-- Used to initialize the Postgres Testcontainer during integration tests, and by
+-- participant-db-start to create the `etl` schema when there is no dump to restore (see
+-- docs/PARTICIPANT_DB.md). It does NOT run at application startup
+-- (spring.sql.init.mode=never). Once a dump exists, the dump is the schema of record.
 
 -- Sequence shared by all three tables: every HPDS identity gets a unique integer.
 CREATE SEQUENCE IF NOT EXISTS hpds_id_seq AS BIGINT;
@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS consents (
     CONSTRAINT uq_consents_hpds_id_study UNIQUE (hpds_id, study_id)
 );
 CREATE INDEX IF NOT EXISTS ix_consents_hpds_id ON consents (hpds_id);
+-- Every study load starts with DELETE ... WHERE study_id = ?; the unique key leads with hpds_id,
+-- so without this index each delete scans the whole table.
+CREATE INDEX IF NOT EXISTS ix_consents_study_id ON consents (study_id);
 
 -- Table 3: samples
 -- Maps an HPDS id to potentially many source_sample_id/sample_source pairs.

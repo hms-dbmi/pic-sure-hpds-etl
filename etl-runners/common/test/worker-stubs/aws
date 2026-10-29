@@ -1,0 +1,39 @@
+#!/bin/bash
+# aws CLI stub for running a rendered user_data.sh.tpl locally (run-tests.sh worker_* / boot_*).
+# S3 is $W/s3/<bucket>/<key>. Mailbox: a `task.json` download that finds no task moves the next
+# file of $W/queue/ into place; with the queue empty it creates the mailbox's `stop` object
+# (unless $W/nostop exists) and reports 404. State: $W/param = the SSM parameter's value.
+echo "aws $*" >> "$W/calls"
+p() { echo "$W/s3/${1#s3://}"; }
+case "$1 $2" in
+  "ssm get-parameter")
+    [[ -f "$W/param" ]] || { echo "An error occurred (ParameterNotFound) when calling the GetParameter operation" >&2; exit 254; }
+    cat "$W/param"; echo ;;
+  "s3api head-object")
+    b="" k=""
+    while [[ $# -gt 0 ]]; do case "$1" in --bucket) b="$2"; shift ;; --key) k="$2"; shift ;; esac; shift; done
+    [[ -f "$W/s3/$b/$k" ]] || { echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 255; } ;;
+  "s3 cp")
+    src="$3" dst="$4"
+    if [[ "$src" == s3://* ]]; then
+      f="$(p "$src")"
+      if [[ "$src" == */task.json && ! -f "$f" ]]; then
+        next=$(ls "$W/queue" 2>/dev/null | head -1)
+        mkdir -p "$(dirname "$f")"
+        if [[ -n "$next" ]]; then mv "$W/queue/$next" "$f"
+        else
+          [[ -f "$W/nostop" ]] || touch "$(dirname "$f")/stop"
+          echo "fatal error: An error occurred (404) when calling the HeadObject operation: Key \"x\" does not exist" >&2; exit 1
+        fi
+      fi
+      [[ -f "$f" ]] || { echo "An error occurred (404) Not Found" >&2; exit 1; }
+      cp "$f" "$dst"
+    else
+      mkdir -p "$(dirname "$(p "$dst")")"; cp "$src" "$(p "$dst")"
+    fi ;;
+  "s3 rm") rm -f "$(p "$3")" ;;
+  "s3 sync")
+    d="$(p "$4")"; mkdir -p "$d"
+    for f in "$3"/*; do [[ -e "$f" && "$f" != *.partial ]] && cp -R "$f" "$d/"; done; exit 0 ;;
+  *) echo "aws stub: unsupported: $*" >&2; exit 2 ;;
+esac

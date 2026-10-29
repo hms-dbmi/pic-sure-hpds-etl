@@ -25,6 +25,10 @@
         <java.version>25</java.version>
         <aws.sdk.version>2.52.1</aws.sdk.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <!-- Test JVMs size their GC and JIT thread pools for 4 CPUs instead of every core on the
+             host. The Jenkins container has a process/thread limit shared by every build;
+             .mvn/jvm.config does the same for the Maven JVM itself. -->
+        <test.jvm.args>-XX:ActiveProcessorCount=4</test.jvm.args>
     </properties>
 
     <dependencyManagement>
@@ -137,11 +141,38 @@
                 </configuration>
             </plugin>
 
+            <!-- Sets ${org.mockito:mockito-core:jar} to the Mockito jar's path, for the -javaagent below. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Mockito is loaded as an agent rather than self-attaching: self-attach launches a
+                 second JVM inside the test fork, and on the Jenkins agent that JVM can fail with
+                 "unable to create native thread", which kills the fork. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>${test.jvm.args} -javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
+            </plugin>
+
             <!-- Runs integration tests (*IT) on `mvn verify`. These require Docker
                  (Testcontainers). Unit tests (*Test) run on `mvn test` via surefire. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <argLine>${test.jvm.args} -javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
                 <executions>
                     <execution>
                         <goals>

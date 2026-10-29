@@ -350,4 +350,18 @@ class GenerateGlobalAllConceptsJobTest {
             throw new RuntimeException(e);
         }
     }
+
+    @Test
+    void rejects_a_misspelt_allow_empty_flag_before_running() {
+        when(managedInputsService.read()).thenReturn(List.of(
+                ManagedInputRow.of("STUDY1", "phs001412", true)));
+
+        String outputPath = tempDir.resolve("output.csv").toString();
+        JobResult result = executor.run(job,
+                Map.of("output", outputPath, "allow-empty", "yes please"), "test-bad-allow-empty");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(result.getInputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("BAD_BOOLEAN") && "--allow-empty".equals(i.location()));
+    }
 }

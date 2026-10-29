@@ -3,7 +3,7 @@
 # Pre-flight checks for the generate-identity-consent-mapping job, run on the
 # Jenkins agent BEFORE any EC2 instance is provisioned.
 #
-# Validates the output bucket (default credentials / dbgap-etl profile) and the
+# Validates the output bucket (the agent's default credentials) and the
 # NHLBI exchange bucket (under the 'nhlbi-exchange' profile the Jenkinsfile's
 # Init stage writes, which assumes the role passed as ROLE_ARN).
 #

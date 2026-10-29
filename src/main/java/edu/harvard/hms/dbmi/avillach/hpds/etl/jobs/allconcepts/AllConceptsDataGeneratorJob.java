@@ -9,6 +9,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExpectations;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationIssue;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsCsvBuilder;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsRow;
@@ -21,7 +22,11 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -82,12 +87,13 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                                 "Mapping CSV file (local path or s3:// URI)",
                                 "s3://bucket/study/mappings/mapping2.csv"),
                         ParamSpec.required("output",
-                                "Output directory for per-consent allConcepts files (local path or s3:// URI)",
-                                "s3://bucket/study/completed/"),
+                                "Root of the per-study folders; files go under {output}/{study_id}/allConcepts/ "
+                                        + "(local path or s3:// URI)",
+                                "s3://bucket/root/"),
                         ParamSpec.optional("skip-analysis",
                                 "Skip data type re-analysis and use mapping types as-is (default: false)",
                                 "false")),
-                List.of("One {output}/{study_id}/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv "
+                List.of("One {output}/{study_id}/allConcepts/c{consent_code}/{study_id}_allConcepts_c{consent_code}.csv "
                         + "per consent group"));
     }
 
@@ -99,13 +105,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                         "study-id must match phs###### (6 digits), got: " + studyId, "--study-id");
             }
         });
-        ctx.get("skip-analysis").ifPresent(v -> {
-            if (!JobContext.isBooleanLiteral(v)) {
-                report.error("BAD_SKIP_ANALYSIS",
-                        "skip-analysis must be " + JobContext.acceptedBooleanLiterals() + ", got: " + v,
-                        "--skip-analysis");
-            }
-        });
+        validateBooleanParam(ctx, report, "skip-analysis");
     }
 
     @Override
@@ -115,6 +115,12 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         String mappingUri = ctx.require("mapping");
         String outputDir = normalizeDir(ctx.require("output"));
         boolean skipAnalysis = ctx.getBoolean("skip-analysis", false);
+
+        // Overwrites and stale-file deletes are only recoverable on a versioned bucket. Pre-flight
+        // checks this too, but a standalone or orchestrated run must not depend on it.
+        if (io.isS3(outputDir)) {
+            io.requireVersioning(outputDir);
+        }
 
         List<Consent> consents = consentRepository.findByStudyId(studyId);
         if (consents.isEmpty()) {
@@ -139,8 +145,10 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         log.info("Study {} has {} consent group(s) and {} participant(s)",
                 studyId, consents.size(), participants.size());
 
-        List<ConceptMapping> mappings = parseMappings(mappingUri);
-        log.info("Loaded {} mapping(s) from {}", mappings.size(), mappingUri);
+        ConceptMapping.Parsed parsed = parseMappings(mappingUri);
+        List<ConceptMapping> mappings = parsed.mappings();
+        log.info("Loaded {} mapping(s) from {} ({} row(s) dropped as unusable)",
+                mappings.size(), mappingUri, parsed.droppedRows());
 
         if (!skipAnalysis) {
             mappings = analyzeDataTypes(mappings, dataDir);
@@ -153,8 +161,9 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             mappingsByFile.computeIfAbsent(m.fileName(), k -> new ArrayList<>()).add(m);
         }
 
+        List<String> missingDataFiles = new ArrayList<>();
         List<FileResult> fileResults = processFilesInParallel(
-                mappingsByFile, dataDir, idBySourceId, consentById);
+                mappingsByFile, dataDir, idBySourceId, consentById, missingDataFiles);
 
         Map<String, AllConceptsCsvBuilder> buildersByConsent = new LinkedHashMap<>();
         for (Consent c : consents) {
@@ -163,11 +172,13 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
 
         long rowsProcessed = 0;
         long rowsSkipped = 0;
+        long malformedRows = 0;
         Set<String> unmappedPatients = new LinkedHashSet<>();
 
         for (FileResult fr : fileResults) {
             rowsProcessed += fr.rowsProcessed;
             rowsSkipped += fr.rowsSkipped;
+            malformedRows += fr.malformedRows;
             unmappedPatients.addAll(fr.unmappedPatients);
             for (Map.Entry<String, List<AllConceptsRow>> e : fr.rowsByConsent.entrySet()) {
                 AllConceptsCsvBuilder builder = buildersByConsent.get(e.getKey());
@@ -195,18 +206,80 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 continue;
             }
 
-            String consentLabel = "c" + consentCode;
-            String outputFile = outputDir + studyId + "/" + consentLabel + "/"
-                    + studyId + "_allConcepts_" + consentLabel + ".csv";
-            byte[] csv = builder.build();
-            io.writeOutput(outputFile, csv);
-            rowsPerConsent.put("c" + consentCode, (long) builder.size());
+            String consentLabel = AllConceptsLayout.consentLabel(consentCode);
+            String outputFile = AllConceptsLayout.consentFile(outputDir, studyId, consentLabel);
+            // Streamed (spooled to a temp file for S3, then a multipart upload when large), so the
+            // serialized CSV is never held in memory and the 2 GiB array / 5 GiB PutObject caps
+            // do not apply.
+            io.writeOutput(outputFile, out -> writeCsv(builder, out));
+            rowsPerConsent.put(consentLabel, (long) builder.size());
             outputFiles.add(outputFile);
-            log.info("Wrote {} rows ({} bytes) to {}", builder.size(), csv.length, outputFile);
+            log.info("Wrote {} rows to {}", builder.size(), outputFile);
         }
 
+        // A missing data file can be why a consent group came up empty; deleting its file then
+        // would turn an incomplete input into silent data loss. Decoded data files are not split by
+        // consent (each participant's consent comes from the SSTR), so a missing file could have fed
+        // any group: skip stale removal for the whole study, and leave cleanup for a full run.
+        boolean staleCleanupSkipped = !missingDataFiles.isEmpty();
+        if (staleCleanupSkipped) {
+            log.warn("Skipping stale-output removal for every consent group of study {}: {} mapped data "
+                    + "file(s) are missing", studyId, missingDataFiles.size());
+        }
+        List<String> staleFilesRemoved = new ArrayList<>();
+        List<String> staleFilesKept = new ArrayList<>();
+        removeStaleOutputs(outputDir, studyId, rowsPerConsent.keySet(), staleCleanupSkipped,
+                staleFilesRemoved, staleFilesKept);
+
         return new Output(studyId, consents.size(), participants.size(), mappings.size(),
-                rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles);
+                rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles,
+                staleFilesRemoved, staleCleanupSkipped, staleFilesKept,
+                parsed.droppedRows(), malformedRows, missingDataFiles);
+    }
+
+    private static void writeCsv(AllConceptsCsvBuilder builder, OutputStream out) throws IOException {
+        // Not closed here: IoResolver owns and closes the target stream.
+        BufferedOutputStream buffered = new BufferedOutputStream(out, 1 << 16);
+        try {
+            builder.writeTo(buffered);
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
+        buffered.flush();
+    }
+
+    /**
+     * Each run's output fully replaces the study's earlier per-consent allConcepts output, whichever
+     * job wrote it: the migration's split-allconcepts writes the same
+     * {@code {study}_allConcepts_c{code}.csv} names on purpose (a second name would make
+     * merge-allconcepts concatenate both and duplicate rows). Written groups are overwritten in
+     * place (the output bucket is versioned, so the previous version stays recoverable). A consent
+     * group that produced rows last time but none now -- emptied by the data, or gone after an
+     * SSTR reload -- would otherwise keep that file and keep being merged, so this removes the
+     * {@code {study}_allConcepts_c{code}.csv} in every other consent folder of the study -- unless
+     * {@code keepAll} (a mapped data file is missing), when every such stale file is kept and listed
+     * in {@code kept}. Files with any other name in those folders are left alone.
+     */
+    private void removeStaleOutputs(String outputDir, String studyId, Set<String> writtenLabels,
+                                    boolean keepAll, List<String> removed, List<String> kept) {
+        for (String folder : io.listDirectoryNames(AllConceptsLayout.studyAllConceptsDir(outputDir, studyId))) {
+            if (!AllConceptsLayout.CONSENT_FOLDER_PATTERN.matcher(folder).matches() || writtenLabels.contains(folder)) {
+                continue;
+            }
+            String stale = AllConceptsLayout.consentFile(outputDir, studyId, folder);
+            if (!io.exists(stale)) {
+                continue;
+            }
+            if (keepAll) {
+                kept.add(stale);
+                log.warn("Kept stale {}: consent group {} produced no rows this run, but a mapped data file "
+                        + "is missing", stale, folder);
+                continue;
+            }
+            io.delete(stale);
+            removed.add(stale);
+            log.warn("Removed stale {}: consent group {} produced no rows this run", stale, folder);
+        }
     }
 
     private AllConceptsRow buildConceptRow(String hpdsId, ConceptMapping mapping, String cellValue) {
@@ -232,7 +305,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             Map<String, List<ConceptMapping>> mappingsByFile,
             String dataDir,
             Map<String, Long> idBySourceId,
-            Map<Long, Consent> consentById) {
+            Map<Long, Consent> consentById,
+            List<String> missingDataFiles) {
 
         List<FileResult> results = new ArrayList<>();
 
@@ -247,6 +321,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 if (!io.exists(fileUri)) {
                     log.warn("Data file {} does not exist; skipping {} mapping(s)",
                             fileUri, fileMappings.size());
+                    missingDataFiles.add(fileUri);
                     continue;
                 }
 
@@ -280,6 +355,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         Set<String> unmappedPatients = new LinkedHashSet<>();
         long rowsProcessed = 0;
         long rowsSkipped = 0;
+        long malformedRows = 0;
 
         InputStream in = io.openInput(fileUri);
         try (Stream<List<String>> rows = delimitedReader.streamRows(in, DelimitedReader.COMMA)) {
@@ -290,6 +366,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                     continue;
                 }
                 if (row.size() != headers.size()) {
+                    malformedRows++;
                     continue;
                 }
 
@@ -330,13 +407,17 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             }
         }
 
+        if (malformedRows > 0) {
+            log.warn("File {}: {} row(s) had a column count different from the header and were skipped",
+                    fileUri, malformedRows);
+        }
         log.info("File {} produced {} row(s), skipped {}", fileUri, rowsProcessed, rowsSkipped);
-        return new FileResult(rowsByConsent, rowsProcessed, rowsSkipped, unmappedPatients);
+        return new FileResult(rowsByConsent, rowsProcessed, rowsSkipped, malformedRows, unmappedPatients);
     }
 
-    private List<ConceptMapping> parseMappings(String mappingUri) {
+    private ConceptMapping.Parsed parseMappings(String mappingUri) {
         InputStream in = io.openInput(mappingUri);
-        return ConceptMapping.parse(in, delimitedReader);
+        return ConceptMapping.parseWithStats(in, delimitedReader);
     }
 
     List<ConceptMapping> analyzeDataTypes(List<ConceptMapping> mappings, String dataDir) {
@@ -421,9 +502,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
 
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
-        if (output.rowsProcessed() == 0) {
-            report.error("EMPTY_OUTPUT", "No concept rows were generated");
-        }
+        // rowsProcessed == 0 never gets here: execute() throws before writing or removing any file.
         if (output.unmappedPatientCount() > 0) {
             report.warning("UNMAPPED_PATIENTS",
                     output.unmappedPatientCount() + " patient(s) in data files could not be resolved "
@@ -431,6 +510,33 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         }
         output.rowsPerConsent().forEach((consent, count) ->
                 report.info("CONSENT_ROW_COUNT", consent + ": " + count + " row(s)"));
+        output.staleFilesRemoved().forEach(file ->
+                report.warning("STALE_OUTPUT_REMOVED",
+                        "removed " + file + ": its consent group produced no rows this run"));
+        // A missing data file does not fail the run, but the consent files just written lack its
+        // concepts and are smaller than they should be, so it has to be looked at.
+        output.missingDataFiles().forEach(file ->
+                report.warning("MISSING_DATA_FILE",
+                        file + " is named in the mapping but does not exist; its concepts were not generated"));
+        if (output.staleCleanupSkipped()) {
+            report.add(ValidationIssue.warning("STALE_CLEANUP_SKIPPED",
+                    "stale-file removal was skipped for the whole study: " + output.missingDataFiles().size()
+                            + " mapped data file(s) are missing, and decoded data files are not split by consent, "
+                            + "so any consent group could have lost rows; kept " + output.staleFilesKept().size()
+                            + " stale file(s) from earlier runs",
+                    Map.of("staleFilesKept", output.staleFilesKept())));
+        }
+        if (output.malformedRows() > 0) {
+            report.warning("MALFORMED_ROWS", output.malformedRows()
+                    + " data row(s) had a column count different from their file's header and were skipped");
+        }
+        // INFO rather than WARNING: a mapping file may deliberately leave a column's root node blank
+        // to exclude it, so dropped rows are not by themselves a sign of lost data.
+        if (output.mappingRowsDropped() > 0) {
+            report.info("DROPPED_MAPPING_ROWS", output.mappingRowsDropped()
+                    + " mapping row(s) were unusable (fewer than 4 columns, a key not 'file:int', "
+                    + "or a blank root node) and were ignored");
+        }
     }
 
     @Override
@@ -443,7 +549,13 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 .metric("rowsSkipped", output.rowsSkipped())
                 .metric("unmappedPatients", output.unmappedPatientCount())
                 .metric("rowsPerConsent", output.rowsPerConsent())
-                .metric("outputFiles", output.outputFiles());
+                .metric("outputFiles", output.outputFiles())
+                .metric("staleFilesRemoved", output.staleFilesRemoved())
+                .metric("staleCleanupSkipped", output.staleCleanupSkipped())
+                .metric("staleFilesKept", output.staleFilesKept())
+                .metric("mappingRowsDropped", output.mappingRowsDropped())
+                .metric("malformedRows", output.malformedRows())
+                .metric("missingDataFiles", output.missingDataFiles());
     }
 
     public record Output(
@@ -455,7 +567,15 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             long rowsSkipped,
             int unmappedPatientCount,
             Map<String, Long> rowsPerConsent,
-            List<String> outputFiles
+            List<String> outputFiles,
+            List<String> staleFilesRemoved,
+            // true when stale removal was skipped for the whole study (a mapped data file is missing)
+            boolean staleCleanupSkipped,
+            // the stale files then left in place
+            List<String> staleFilesKept,
+            long mappingRowsDropped,
+            long malformedRows,
+            List<String> missingDataFiles
     ) {
     }
 
@@ -463,6 +583,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             Map<String, List<AllConceptsRow>> rowsByConsent,
             long rowsProcessed,
             long rowsSkipped,
+            long malformedRows,
             Set<String> unmappedPatients
     ) {}
 

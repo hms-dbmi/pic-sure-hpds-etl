@@ -1,0 +1,7 @@
+#!/bin/bash
+# IMDS stub: a token, and instance id i-0abc1234.
+case "$*" in
+  *api/token*) echo token ;;
+  *instance-id*) echo i-0abc1234 ;;
+  *) exit 22 ;;
+esac
