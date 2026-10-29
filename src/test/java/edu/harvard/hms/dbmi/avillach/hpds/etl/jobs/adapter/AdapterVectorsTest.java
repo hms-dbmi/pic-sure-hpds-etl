@@ -145,6 +145,52 @@ class AdapterVectorsTest {
         assertThat(Files.exists(tmp.resolve("o/split_manifest.json"))).isFalse();
     }
 
+    // ------------------------------------------------------------------------------------------------ v5 stopgap drops
+
+    private static final Map<String, String> V5_DROP = Map.of("foreign-study-rows", "drop", "unmatched-consent-rows", "drop",
+            "max-reject-fraction", "0.1");
+
+    @Test
+    void v5_drop_writes_only_the_partitions_own_rows_and_warns() throws Exception {
+        assertMatchesVector("v5", V5_DROP);
+        Outcome o = run(vectorDir("v5").resolve("inputs"), "allConcepts_manifest.csv", V5_DROP, tmp.resolve("again"));
+        assertThat(o.result().getExitCode()).isEqualTo(edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(o.warnings()).anyMatch(w -> w.startsWith("3 row(s) of phs000000.c1 under another study's tree dropped (first nodes: "
+                + "phs999999 (2), phs123456 (1))"));
+        JsonNode report = AdapterTestSupport.json(tmp.resolve("v5-out/report.json"));
+        assertThat(report.get("status").asText()).isEqualTo("ok");
+        assertThat(report.at("/droppedDetail/foreignStudy").asInt()).isEqualTo(5);
+        assertThat(report.at("/droppedDetail/consentNotInManifest").asInt()).isEqualTo(3);
+        assertThat(report.at("/partitions/0/dropped/foreignStudy").asInt()).isEqualTo(3);
+        assertThat(report.at("/partitions/0/foreignStudyNodes/phs999999").asInt()).isEqualTo(2);
+        assertThat(report.at("/partitions/0/foreignStudyNodes/phs123456").asInt()).isEqualTo(1);
+        assertThat(report.at("/partitions/1/foreignStudyNodes/phs000000").asInt()).isEqualTo(2);
+        assertThat(report.at("/global/consentsNotInManifest/phs000000.c0").asInt()).isEqualTo(2);
+        assertThat(report.at("/global/consentsNotInManifest/phs999999.c0").asInt()).isEqualTo(1);
+        // the dropped rows leave no rejects line either: only the embedded line break of phs000000.c1 is rejected
+        assertThat(Files.readString(tmp.resolve("v5-out/rejects/phs000000.c1.csv"))).startsWith("\"EMBEDDED_LINE_BREAK\",5,").doesNotContain("STUDY_PARTITION_MISMATCH");
+        assertThat(Files.exists(tmp.resolve("v5-out/rejects/phs999999.c1.csv"))).isFalse();
+        assertThat(Files.exists(tmp.resolve("v5-out/rejects/global.csv"))).isFalse();
+    }
+
+    @Test
+    void v5_by_default_rejects_everything_the_drop_options_drop() throws Exception {
+        Outcome o = run(vectorDir("v5").resolve("inputs"), "allConcepts_manifest.csv", Map.of("max-reject-fraction", "1"), tmp.resolve("o"));
+        assertThat(o.exit()).as(o.message()).isZero();
+        JsonNode report = AdapterTestSupport.json(tmp.resolve("o/report.json"));
+        assertThat(report.at("/rejects/byCode/STUDY_PARTITION_MISMATCH").asInt()).isEqualTo(5);
+        assertThat(report.at("/rejects/byCode/CONSENT_NOT_IN_MANIFEST").asInt()).isEqualTo(3);
+        assertThat(report.at("/rows/rejected").asInt()).isEqualTo(9);
+        assertThat(report.at("/rows/dropped").asInt()).isZero();
+        assertThat(report.at("/droppedDetail/foreignStudy").asInt()).isZero();
+        assertThat(AdapterTestSupport.outputRows(tmp.resolve("o")))
+                .isEqualTo(Files.readAllLines(vectorDir("v5").resolve("expected-partitions.csv")).stream().sorted().toList());
+        Outcome strict = run(vectorDir("v5").resolve("inputs"), "allConcepts_manifest.csv", Map.of(), tmp.resolve("strict"));
+        assertThat(strict.exit()).isEqualTo(3);
+        assertThat(strict.message()).contains("REJECT_FRACTION_EXCEEDED").contains("STUDY_PARTITION_MISMATCH=5")
+                .contains("CONSENT_NOT_IN_MANIFEST=3");
+    }
+
     // ------------------------------------------------------------------------------------------------ v3 refusals
 
     @Test
@@ -241,7 +287,7 @@ class AdapterVectorsTest {
 
     @Test
     void the_expected_files_are_pinned_by_their_sha256sums() throws Exception {
-        for (String name : List.of("v1", "v2", "v3", "v4")) {
+        for (String name : List.of("v1", "v2", "v3", "v4", "v5")) {
             Path v = vectorDir(name);
             List<String> sums = Files.readAllLines(v.resolve("SHA256SUMS"));
             assertThat(sums).as(name).hasSize(2);
@@ -258,7 +304,7 @@ class AdapterVectorsTest {
 
     @Test
     void the_vectors_hold_only_the_placeholder_accessions() throws Exception {
-        for (String name : List.of("v1", "v2", "v3", "v4")) {
+        for (String name : List.of("v1", "v2", "v3", "v4", "v5")) {
             try (var files = Files.walk(vectorDir(name))) {
                 for (Path f : (Iterable<Path>) files.filter(Files::isRegularFile)::iterator) {
                     String text = Files.readString(f);

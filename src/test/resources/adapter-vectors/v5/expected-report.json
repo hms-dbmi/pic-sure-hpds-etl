@@ -1,0 +1,38 @@
+{
+  "options": {
+    "foreignStudyRows": "drop",
+    "unmatchedConsentRows": "drop"
+  },
+  "rows": {
+    "input": 13,
+    "globalCopies": 0,
+    "written": 4,
+    "rejected": 1,
+    "dropped": 8,
+    "balanced": true
+  },
+  "rejects": {
+    "total": 1,
+    "byCode": {
+      "EMBEDDED_LINE_BREAK": 1
+    }
+  },
+  "partitions": [
+    {
+      "name": "phs000000.c1",
+      "rows": 2,
+      "patients": 1
+    },
+    {
+      "name": "phs999999.c1",
+      "rows": 2,
+      "patients": 1
+    }
+  ],
+  "warnings": [
+    "3 row(s) of phs000000.c1 under another study's tree dropped (first nodes: phs999999 (2), phs123456 (1)); --foreign-study-rows=drop, they are not loaded",
+    "2 row(s) of phs999999.c1 under another study's tree dropped (first nodes: phs000000 (2)); --foreign-study-rows=drop, they are not loaded",
+    "3 global _consents row(s) naming no partition of the manifest dropped (top consents: phs000000.c0 (2), phs999999.c0 (1)); --unmatched-consent-rows=drop",
+    "1 row(s) rejected, within --max-reject-fraction=0.1"
+  ]
+}

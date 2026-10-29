@@ -72,6 +72,7 @@ final class SplitManifestWriter {
         g.put("copies", e.global.copies);
         g.put("rejected", e.global.rejected);
         g.put("dropped", e.global.droppedDetail());
+        g.put("consentsNotInManifest", e.global.unmatchedConsents);
         g.put("balanced", e.global.balanced());
         m.put("global", g);
         List<Map<String, Object>> partitions = new ArrayList<>();
@@ -92,6 +93,7 @@ final class SplitManifestWriter {
             entry.put("rejected", t.rejected);
             entry.put("rejectedByCode", t.rejectedByCode);
             entry.put("dropped", t.droppedDetail());
+            entry.put("foreignStudyNodes", t.foreignStudyNodes);
             entry.put("balanced", t.balanced());
             partitions.add(entry);
         }
@@ -116,6 +118,8 @@ final class SplitManifestWriter {
         opts.put("maxRejectFraction", meta.options().maxRejectFraction());
         opts.put("allowConsentCodes", meta.options().allowCodes());
         opts.put("multiStudyIds", meta.options().refuseMultiStudy() ? "refuse" : "copy");
+        opts.put("foreignStudyRows", meta.options().dropForeignStudyRows() ? "drop" : "reject");
+        opts.put("unmatchedConsentRows", meta.options().dropUnmatchedConsentRows() ? "drop" : "reject");
         opts.put("zeroTimestamps", "blank");
         m.put("options", opts);
         Map<String, Object> rows = new LinkedHashMap<>();
@@ -173,6 +177,8 @@ final class SplitManifestWriter {
             all.studyNotHeld += t.studyNotHeld;
             all.merged += t.merged;
             all.duplicates += t.duplicates;
+            all.foreignStudy += t.foreignStudy;
+            all.consentNotInManifest += t.consentNotInManifest;
         }
         return all.droppedDetail();
     }

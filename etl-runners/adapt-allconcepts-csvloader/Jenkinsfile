@@ -17,6 +17,10 @@
 //   --max-reject-fraction share of input rows that may be rejected (default 0)
 //   --allow-consent-codes consent codes accepted although they are not positive integers
 //   --multi-study-ids     copy (default) | refuse
+//   --foreign-study-rows  reject (default) | drop: STOPGAP, a data row under another study's tree is dropped with a warning
+//                         instead of rejected (never loaded either way)
+//   --unmatched-consent-rows  reject (default) | drop: STOPGAP, a global _consents row naming no manifest partition
+//                         (for example consent code 0) is dropped with a warning instead of rejected
 //
 // Outputs (under OUTPUT, split_manifest.json last)
 //   <partition>-allConcepts.csv, split_manifest.json, report.json, rejects/<partition>.csv when any
@@ -24,7 +28,7 @@
 //   A failed run leaves OUTPUT empty and its report in the reports.
 //
 // Exit codes (see ExitCode.java)
-//   0 success | 2 validation (output under the legacy bucket or not empty, bad parameter, manifest or
+//   0 success (UNSTABLE when anything was dropped or rejected within the fraction) | 2 validation (output under the legacy bucket or not empty, bad parameter, manifest or
 //   partition name refused) | 3 data (md5 mismatch, manifest moved during the run, ids not patient-level,
 //   too many rejects, an empty partition) | 4 infrastructure (retried once when RETRY_ON_INFRA) |
 //   5 config (a missing input) | 124 monitor timeout (not retried)
@@ -62,6 +66,10 @@ pipeline {
                description: '--allow-consent-codes: comma-separated consent codes accepted although they are not positive integers (for example 0,public).')
         choice(name: 'MULTI_STUDY_IDS', choices: ['copy', 'refuse'],
                description: '--multi-study-ids: copy source ids of patients in several studies to every partition they hold (when patient-level), or refuse such patients.')
+        choice(name: 'FOREIGN_STUDY_ROWS', choices: ['reject', 'drop'],
+               description: '--foreign-study-rows: what to do with a data row whose first node is another study than its partition (the generator selects rows by participant, not by study, so a participant in two studies drags the other study\'s rows in). reject: counted as STUDY_PARTITION_MISMATCH and fails the run unless MAX_REJECT_FRACTION allows it. drop: a STOPGAP, counted as dropped with a warning per partition (UNSTABLE build). Either way the rows are NEVER loaded.')
+        choice(name: 'UNMATCHED_CONSENT_ROWS', choices: ['reject', 'drop'],
+               description: '--unmatched-consent-rows: what to do with a global _consents row naming no partition of the manifest (for example consent code 0 = no consent). reject: counted as CONSENT_NOT_IN_MANIFEST. drop: a STOPGAP, counted as dropped with a warning (UNSTABLE build). Either way the rows are NEVER loaded.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'c5.xlarge',
@@ -90,6 +98,8 @@ pipeline {
         TF_VAR_max_reject_fraction       = "${params.MAX_REJECT_FRACTION.trim()}"
         TF_VAR_allow_consent_codes       = "${params.ALLOW_CONSENT_CODES.trim()}"
         TF_VAR_multi_study_ids           = "${params.MULTI_STUDY_IDS}"
+        TF_VAR_foreign_study_rows        = "${params.FOREIGN_STUDY_ROWS}"
+        TF_VAR_unmatched_consent_rows    = "${params.UNMATCHED_CONSENT_ROWS}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
         TF_VAR_root_volume_size          = "${params.ROOT_VOLUME_GB.trim()}"
 

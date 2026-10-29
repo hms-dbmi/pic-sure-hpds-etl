@@ -581,4 +581,159 @@ class AdaptAllConceptsForCsvLoaderJobTest {
         assertThat(Files.exists(out.resolve("report.json"))).isFalse();
         assertThat(o.error().getSuppressed()).hasSize(1);
     }
+
+    // ------------------------------------------------------------------------------------------------ stopgap drops
+
+    private static final String AGE0B = "µphs000000µdemoµage2µ";
+    private static final String NOTE0 = "µphs000000µdemoµnoteµ";
+
+    /** One partition whose file holds 2 own rows, 3 rows under another study and one with an embedded line break. */
+    void withForeignRows() {
+        file("global", "global.csv", lines(q(1, C, "", "phs000000.c1", 0), q(2, C, "", "phs000000.c0", 0), q(3, C, "", "phs000000.c0", 0),
+                q(3, C, "", "phs999999.c0", 0)));
+        file("phs000000.c1", "c1.csv", lines(q(1, AGE0, "40", "", 0), q(1, AGE9, "41", "", 0), q(1, AGE9, "42", "", 0),
+                q(1, "µphs123456µdemoµageµ", "43", "", 0), q(1, AGE0B, "44", "", 0), q(1, NOTE0, "", "line one\nline two", 0)));
+        publishManifest();
+    }
+
+    /** The records of a rejects file: its lines that start one (a rejected record may itself span lines). */
+    private static List<String> rejectRecords(Path file) throws IOException {
+        return Files.readAllLines(file).stream().filter(l -> l.matches("^\"[A-Z_]+\",[0-9]+,.*")).toList();
+    }
+
+    @Test
+    void by_default_foreign_study_rows_and_unmatched_consents_are_rejected_as_before() throws IOException {
+        withForeignRows();
+
+        Outcome o = run("max-reject-fraction", "1");
+
+        assertThat(o.exit()).as(o.message()).isZero();
+        JsonNode r = AdapterTestSupport.json(out.resolve("report.json"));
+        assertThat(r.at("/rejects/byCode/STUDY_PARTITION_MISMATCH").asInt()).isEqualTo(3);
+        assertThat(r.at("/rejects/byCode/CONSENT_NOT_IN_MANIFEST").asInt()).isEqualTo(3);
+        assertThat(r.at("/rows/dropped").asInt()).isZero();
+        assertThat(r.at("/options/foreignStudyRows").asText()).isEqualTo("reject");
+        assertThat(r.at("/options/unmatchedConsentRows").asText()).isEqualTo("reject");
+        assertThat(rejectRecords(out.resolve("rejects/phs000000.c1.csv"))).hasSize(4);
+        assertThat(rejectRecords(out.resolve("rejects/global.csv"))).hasSize(3);
+    }
+
+    @Test
+    void with_drop_the_foreign_rows_are_not_written_not_rejected_and_the_run_succeeds_with_warnings() throws IOException {
+        withForeignRows();
+
+        Outcome o = run("foreign-study-rows", "drop", "unmatched-consent-rows", "drop", "max-reject-fraction", "0.2");
+
+        assertThat(o.exit()).as(o.message()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS.code());
+        assertThat(AdapterTestSupport.outputRows(out)).containsExactlyInAnyOrder(q("phs000000.c1", 1, C, "", "phs000000.c1", ""),
+                q("phs000000.c1", 1, AGE0, "40", "", ""), q("phs000000.c1", 1, AGE0B, "44", "", ""));
+        JsonNode r = AdapterTestSupport.json(out.resolve("report.json"));
+        assertThat(r.at("/rows/balanced").asBoolean()).isTrue();
+        assertThat(r.at("/rows/input").asInt()).isEqualTo(10);
+        assertThat(r.at("/rows/written").asInt()).isEqualTo(3);
+        assertThat(r.at("/rows/rejected").asInt()).isEqualTo(1);
+        assertThat(r.at("/rows/dropped").asInt()).isEqualTo(6);
+        assertThat(r.at("/droppedDetail/foreignStudy").asInt()).isEqualTo(3);
+        assertThat(r.at("/droppedDetail/consentNotInManifest").asInt()).isEqualTo(3);
+        assertThat(r.at("/partitions/0/dropped/foreignStudy").asInt()).isEqualTo(3);
+        assertThat(r.at("/partitions/0/foreignStudyNodes/phs999999").asInt()).isEqualTo(2);
+        assertThat(r.at("/partitions/0/foreignStudyNodes/phs123456").asInt()).isEqualTo(1);
+        assertThat(r.at("/global/consentsNotInManifest/phs000000.c0").asInt()).isEqualTo(2);
+        assertThat(r.at("/rejects/byCode").toString()).isEqualTo("{\"EMBEDDED_LINE_BREAK\":1}");
+        assertThat(o.warnings()).contains(
+                "3 row(s) of phs000000.c1 under another study's tree dropped (first nodes: phs999999 (2), phs123456 (1)); "
+                        + "--foreign-study-rows=drop, they are not loaded",
+                "3 global _consents row(s) naming no partition of the manifest dropped (top consents: phs000000.c0 (2), "
+                        + "phs999999.c0 (1)); --unmatched-consent-rows=drop");
+        assertThat(rejectRecords(out.resolve("rejects/phs000000.c1.csv"))).hasSize(1).allMatch(l -> l.startsWith("\"EMBEDDED_LINE_BREAK\""));
+        assertThat(Files.exists(out.resolve("rejects/global.csv"))).isFalse();
+        assertThat(AdapterTestSupport.runnerContractProblems(out)).isEmpty();
+        assertThat(o.result().getMetrics()).containsEntry("rowsDroppedForeignStudy", 3L).containsEntry("rowsDroppedConsentNotInManifest", 3L);
+    }
+
+    @Test
+    void foreign_study_drop_alone_leaves_unmatched_consents_rejected() throws IOException {
+        withForeignRows();
+
+        Outcome o = run("foreign-study-rows", "drop", "max-reject-fraction", "0.5");
+        assertThat(o.exit()).as(o.message()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS.code());
+        JsonNode r = AdapterTestSupport.json(out.resolve("report.json"));
+        assertThat(r.at("/rejects/byCode").toString()).isEqualTo("{\"CONSENT_NOT_IN_MANIFEST\":3,\"EMBEDDED_LINE_BREAK\":1}");
+        assertThat(r.at("/droppedDetail/foreignStudy").asInt()).isEqualTo(3);
+        assertThat(r.at("/droppedDetail/consentNotInManifest").asInt()).isZero();
+    }
+
+    @Test
+    void unmatched_consent_drop_alone_leaves_the_foreign_rows_rejected() throws IOException {
+        withForeignRows();
+
+        Outcome o = run("unmatched-consent-rows", "drop", "max-reject-fraction", "0.5");
+        assertThat(o.exit()).as(o.message()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS.code());
+        JsonNode r = AdapterTestSupport.json(out.resolve("report.json"));
+        assertThat(r.at("/rejects/byCode").toString()).isEqualTo("{\"EMBEDDED_LINE_BREAK\":1,\"STUDY_PARTITION_MISMATCH\":3}");
+        assertThat(r.at("/droppedDetail/consentNotInManifest").asInt()).isEqualTo(3);
+        assertThat(r.at("/droppedDetail/foreignStudy").asInt()).isZero();
+        assertThat(AdapterTestSupport.outputRows(out)).hasSize(3);
+    }
+
+    @Test
+    void the_reject_fraction_does_not_count_dropped_rows() throws IOException {
+        withForeignRows();
+        // rejected by default: 7 of 10 rows; with both dropped only the one embedded line break remains, 1 of 10
+        Outcome refused = run("max-reject-fraction", "0.5");
+        assertThat(refused.exit()).isEqualTo(3);
+        assertThat(refused.message()).contains("REJECT_FRACTION_EXCEEDED: 7 of 10");
+
+        Outcome tight = run("foreign-study-rows", "drop", "unmatched-consent-rows", "drop", "max-reject-fraction", "0.05");
+        assertThat(tight.exit()).isEqualTo(3);
+        assertThat(tight.message()).contains("REJECT_FRACTION_EXCEEDED: 1 of 10").contains("EMBEDDED_LINE_BREAK=1");
+        assertThat(outputIsEmpty()).isTrue();
+
+        Outcome ok = run("foreign-study-rows", "drop", "unmatched-consent-rows", "drop", "max-reject-fraction", "0.1");
+        assertThat(ok.exit()).as(ok.message()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS.code());
+    }
+
+    @Test
+    void an_embedded_line_break_stays_a_reject_under_either_option_even_in_a_foreign_row() throws IOException {
+        file("global", "global.csv", lines(q(1, C, "", "phs000000.c1", 0)));
+        file("phs000000.c1", "c1.csv", lines(q(1, AGE0, "40", "", 0), q(1, "µphs999999µdemoµnoteµ", "", "a\nb", 0)));
+        publishManifest();
+
+        Outcome o = run("foreign-study-rows", "drop", "unmatched-consent-rows", "drop", "max-reject-fraction", "1");
+
+        assertThat(o.exit()).as(o.message()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS.code()); // the rejected row is itself a warning
+        JsonNode r = AdapterTestSupport.json(out.resolve("report.json"));
+        assertThat(r.at("/rejects/byCode").toString()).isEqualTo("{\"EMBEDDED_LINE_BREAK\":1}");
+        assertThat(r.at("/rows/dropped").asInt()).isZero();
+    }
+
+    @Test
+    void the_drop_options_accept_only_reject_or_drop() {
+        simple();
+        assertThat(run("foreign-study-rows", "ignore").issueCodes()).contains("BAD_FOREIGN_STUDY_ROWS");
+        assertThat(run("unmatched-consent-rows", "true").issueCodes()).contains("BAD_UNMATCHED_CONSENT_ROWS");
+        assertThat(src.opened).isEmpty();
+        assertThat(run("foreign-study-rows", "reject", "unmatched-consent-rows", "reject").exit()).isZero();
+    }
+
+    @Test
+    void many_distinct_foreign_nodes_are_capped_in_the_report_but_all_are_counted() throws IOException {
+        file("global", "global.csv", lines(q(1, C, "", "phs000000.c1", 0)));
+        List<String> data = new ArrayList<>();
+        data.add(q(1, AGE0, "40", "", 0));
+        for (int i = 0; i < Tally.MAX_DISTINCT + 5; i++) {
+            data.add(q(1, "µs" + i + "µdemoµageµ", "1", "", 0));
+        }
+        file("phs000000.c1", "c1.csv", lines(data.toArray(String[]::new)));
+        publishManifest();
+
+        Outcome o = run("foreign-study-rows", "drop");
+
+        assertThat(o.exit()).as(o.message()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS.code());
+        JsonNode r = AdapterTestSupport.json(out.resolve("report.json"));
+        assertThat(r.at("/droppedDetail/foreignStudy").asInt()).isEqualTo(Tally.MAX_DISTINCT + 5);
+        assertThat(r.at("/partitions/0/foreignStudyNodes").size()).isEqualTo(Tally.MAX_DISTINCT + 1);
+        assertThat(r.at("/partitions/0/foreignStudyNodes/(other)").asInt()).isEqualTo(5);
+        assertThat(r.at("/rows/balanced").asBoolean()).isTrue();
+    }
 }

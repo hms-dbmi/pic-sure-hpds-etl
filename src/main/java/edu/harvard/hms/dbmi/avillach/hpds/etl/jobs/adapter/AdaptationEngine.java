@@ -46,6 +46,11 @@ import java.util.TreeMap;
  *       de-duplicated (the generator writes them once), which keeps memory flat;</li>
  *   <li>any other path: rejected {@code UNKNOWN_GLOBAL_PATH}; a patient with no consent in scope: dropped, counted.</li>
  * </ul>
+ *
+ * <p><b>Stopgap drops</b> (both default to reject): {@code --foreign-study-rows=drop} counts a partition row under another
+ * study's tree as dropped instead of rejected, and {@code --unmatched-consent-rows=drop} does the same for a global
+ * {@code _consents} row naming no manifest partition. Neither ever writes the row; both only change how it is accounted
+ * for, so they exist to let a run publish while the generator (which selects rows by participant, not by study) is fixed.
  */
 final class AdaptationEngine {
 
@@ -243,6 +248,8 @@ final class AdaptationEngine {
                     deliver(patient, check.outputLine(), new int[]{partition});
                 } else if (partition != null) {
                     global.excludedStudy++;
+                } else if (options.dropUnmatchedConsentRows()) {
+                    global.dropUnmatchedConsent(check.tval());
                 } else {
                     reject(GLOBAL, global, rec, CONSENT_NOT_IN_MANIFEST, "the consent '" + abbreviate(check.tval())
                             + "' is not a partition of the manifest");
@@ -391,6 +398,10 @@ final class AdaptationEngine {
             return;
         }
         if (!check.segments()[0].equals(p.study())) {
+            if (options.dropForeignStudyRows()) {
+                t.dropForeign(check.segments()[0]); // never written: it would show another study's data under this one
+                return;
+            }
             reject(p.name(), t, rec, STUDY_PARTITION_MISMATCH, "the first node '" + abbreviate(check.segments()[0])
                     + "' is not the study " + p.study());
             return;
@@ -508,6 +519,14 @@ final class AdaptationEngine {
         long n = global.dropped();
         for (Tally t : parts) {
             n += t.dropped();
+        }
+        return n;
+    }
+
+    long totalForeignStudy() {
+        long n = 0;
+        for (Tally t : parts) {
+            n += t.foreignStudy;
         }
         return n;
     }

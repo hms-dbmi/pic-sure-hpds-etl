@@ -125,6 +125,28 @@ variable "multi_study_ids" {
   }
 }
 
+variable "foreign_study_rows" {
+  type        = string
+  default     = "reject"
+  description = "--foreign-study-rows: reject | drop. Stopgap: drop counts a data row under another study's tree as dropped (never loaded) instead of rejected."
+
+  validation {
+    condition     = contains(["reject", "drop"], var.foreign_study_rows)
+    error_message = "foreign_study_rows must be 'reject' or 'drop'."
+  }
+}
+
+variable "unmatched_consent_rows" {
+  type        = string
+  default     = "reject"
+  description = "--unmatched-consent-rows: reject | drop. Stopgap: drop counts a global _consents row naming no manifest partition as dropped instead of rejected."
+
+  validation {
+    condition     = contains(["reject", "drop"], var.unmatched_consent_rows)
+    error_message = "unmatched_consent_rows must be 'reject' or 'drop'."
+  }
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"

@@ -37,6 +37,8 @@ either orchestrator: it is started by hand from its own Jenkins job.
 | `--max-reject-fraction=` | `0` | largest share of all input rows that may be rejected |
 | `--allow-consent-codes=` | none | consent codes accepted although they are not positive integers (`0`, `public`) |
 | `--multi-study-ids=` | `copy` | `copy`: ids of patients in several studies go to every partition they hold when they are patient-level; `refuse`: any such patient stops the run |
+| `--foreign-study-rows=` | `reject` | `reject`: a data row whose first node is another study than its partition's is rejected (`STUDY_PARTITION_MISMATCH`); `drop`: **stopgap**, see [Stopgap drops](#stopgap-drops-for-a-generator-bug) |
+| `--unmatched-consent-rows=` | `reject` | `reject`: a global `_consents` row naming no partition of the manifest is rejected (`CONSENT_NOT_IN_MANIFEST`); `drop`: **stopgap**, see below |
 | `--zero-timestamps=` | `blank` | the only accepted value; it is a parameter so the choice shows in the logs |
 | `--work-dir=` | system temp | where the output is built before upload; needs room for the whole output |
 
@@ -116,8 +118,42 @@ fails it (`MULTI_STUDY_PATIENTS`). *k* counts the studies of the whole manifest,
 still multi-study and its id rows are still merged. An id row of a patient in a single study is copied as read and **not**
 de-duplicated (that would need a memory entry per row; the generator writes each once).
 
-A data row in a partition file is accepted only if its first path node equals the partition's study (else `STUDY_PARTITION_MISMATCH`)
-and its patient has a `_consents` row for exactly that partition (else `DATA_ROW_WITHOUT_CONSENT`).
+A data row in a partition file is accepted only if its first path node equals the partition's study (else `STUDY_PARTITION_MISMATCH`,
+or dropped with `--foreign-study-rows=drop`) and its patient has a `_consents` row for exactly that partition (else
+`DATA_ROW_WITHOUT_CONSENT`).
+
+### Reject or drop
+
+A row ends as written, rejected or dropped. Rejected rows are listed in `rejects/` and count against `--max-reject-fraction`; dropped
+rows are only counted (in `rows.dropped` and `droppedDetail`) and, for the two stopgap categories, named in a warning.
+
+| situation | default | with the option |
+|---|---|---|
+| data row of a partition file under another study's tree (`STUDY_PARTITION_MISMATCH`) | rejected | `--foreign-study-rows=drop`: dropped (`droppedDetail.foreignStudy`, per partition `dropped.foreignStudy`), not in `rejects/`, not in the reject fraction |
+| global `_consents` row whose value is not a manifest partition (`CONSENT_NOT_IN_MANIFEST`) | rejected | `--unmatched-consent-rows=drop`: dropped (`droppedDetail.consentNotInManifest`), same |
+| `_studies_consents` row of a study with no partition (`CONSENT_NOT_IN_MANIFEST`) | rejected | rejected (no option) |
+| every other reject code (`EMBEDDED_LINE_BREAK`, `MALFORMED_RECORD`, `NON_CANONICAL_PATH`, `DATA_ROW_WITHOUT_CONSENT`, ...) | rejected | rejected, also in a row that is under another study's tree (the row check comes first) |
+| header, blank line, global row of a patient with no consent in scope, row of a study left out by `--studies`, merged id row | dropped | dropped |
+
+## Stopgap drops for a generator bug
+
+`--foreign-study-rows=drop` and `--unmatched-consent-rows=drop` exist so a run can publish while a bug upstream of this job is fixed;
+they are not a design. Delete them with the bug.
+
+- **Foreign-study rows.** The per-study generator selects a consent group's rows by participant, not by study. A participant in two
+  studies therefore brings the rows of the other study into this study's file: in the real run that found it, the files of one study
+  (`phs002611.c1` and `.c2`) held, next to their own rows, about fifteen thousand rows per shared participant under the concept tree of
+  Framingham (`\phs000007\...`). Loading them would show that study's data to users who are authorised for `phs002611` only, so they
+  are never written to a partition, with either value. `reject` (the default) refuses the run unless the reject fraction allows them;
+  `drop` counts them as dropped and warns once per partition:
+  `N row(s) of <partition> under another study's tree dropped (first nodes: phs999999 (12), phs123456 (3), ... top 5)`. The report keeps
+  `partitions[].foreignStudyNodes`, the dropped rows per first node (at most 1000 distinct nodes, the rest under `(other)`).
+  The rows of that study that belong to it still come from its own partitions.
+- **Unmatched consents.** A global `_consents` row whose value is a consent code with no partition (for example consent code 0, "no
+  consent", which has none) is rejected by default; with `drop` it is dropped and a warning lists the top five values with their
+  row counts, and `global.consentsNotInManifest` in the report the rest.
+- The status is `SUCCESS_WITH_WARNINGS` (exit 0, `validate.sh` exit 10, build UNSTABLE) whenever a row was dropped this way. Check the
+  numbers in the warning before loading: a foreign node that is not the study you expect is a different problem.
 
 ## Row rules and reject codes
 
@@ -149,7 +185,7 @@ Accounting: every record read ends as written, rejected or dropped, and a global
 
 | exit | cases |
 |---|---|
-| 0 | done; notes such as dropped headers or rejects within the allowed fraction are warnings in the report (`SUCCESS_WITH_WARNINGS`, still exit 0, which `validate.sh` turns into an UNSTABLE build) |
+| 0 | done; notes such as dropped headers, rows dropped by a stopgap option or rejects within the allowed fraction are warnings in the report (`SUCCESS_WITH_WARNINGS`, still exit 0, which `validate.sh` turns into an UNSTABLE build) |
 | 2 | the refusals listed under Inputs (including a row of an `s3://` manifest that does not name an `s3://` object, `MANIFEST_BAD_URI`) |
 | 3 | `MD5_MISMATCH`; `VERSION_NOT_FOUND` (a version the manifest pins no longer exists); `PUBLISH_CLEANUP_FAILED`; `MANIFEST_CHANGED`; `ID_ROWS_NOT_PATIENT_LEVEL`; `MULTI_STUDY_PATIENTS`; `INVALID_UTF8`; `REJECT_FRACTION_EXCEEDED` (more rejects than `--max-reject-fraction` of the input rows); `EMPTY_PARTITION` (a partition ends with 0 rows); `ROW_ACCOUNTING_UNBALANCED` |
 | 4 | S3 or disk failure, including a read that breaks part-way (`READ_FAILED`, naming the object) and an upload that fails once its cleanup worked (Jenkins retries once) |

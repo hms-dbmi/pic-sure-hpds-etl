@@ -9,6 +9,8 @@
 #   TF_VAR_max_reject_fraction  optional  default 0
 #   TF_VAR_allow_consent_codes  optional  comma-separated consent codes
 #   TF_VAR_multi_study_ids      optional  copy (default) | refuse
+#   TF_VAR_foreign_study_rows   optional  reject (default) | drop (stopgap: rows under another study's tree)
+#   TF_VAR_unmatched_consent_rows optional reject (default) | drop (stopgap: _consents naming no partition)
 #   TF_VAR_root_volume_size     optional  GiB, must hold the whole output
 #
 # Run locally:

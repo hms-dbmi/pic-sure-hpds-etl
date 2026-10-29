@@ -53,6 +53,11 @@ import java.util.Optional;
  * scratch directory, then uploaded, and {@code split_manifest.json} goes last, so a prefix holding that file is
  * complete. A failed run leaves {@code --output} empty and its report (and rejects) in the reports directory.
  *
+ * <p>Two stopgap options turn a reject code into a counted, warned drop (exit 0, status SUCCESS_WITH_WARNINGS) so a run can
+ * publish while the data bug behind it is fixed: {@code --foreign-study-rows=drop} for {@code STUDY_PARTITION_MISMATCH} and
+ * {@code --unmatched-consent-rows=drop} for {@code CONSENT_NOT_IN_MANIFEST} of a {@code _consents} row. The rows are never
+ * written, with either value; every other reject code is unaffected.
+ *
  * <p>Exit codes: 2 a guard or the manifest refuses (output under the legacy bucket or not empty, bad parameters,
  * a partition name the runner would refuse, a consent code that is not a positive integer and not allowed,
  * a version id missing); 3 the data does not hold up (MD5 mismatch, the manifest moved during the run, ids that
@@ -101,6 +106,13 @@ public class AdaptAllConceptsForCsvLoaderJob extends AbstractJob<AdaptAllConcept
                                 + "integers (default none)", "0,public"),
                         ParamSpec.optional("multi-study-ids", "copy (default): ids of patients in several studies go to every partition "
                                 + "they hold when they are patient-level; refuse: any such patient stops the run", "copy"),
+                        ParamSpec.optional("foreign-study-rows", "reject (default): a data row under another study's tree is rejected "
+                                + "(STUDY_PARTITION_MISMATCH); drop: it is not written, not counted as rejected, and each partition "
+                                + "gets a warning with the foreign study nodes. A stopgap for a generator that selects rows by "
+                                + "participant, not by study; drop NEVER loads the rows", "reject"),
+                        ParamSpec.optional("unmatched-consent-rows", "reject (default): a global _consents row naming no manifest "
+                                + "partition is rejected (CONSENT_NOT_IN_MANIFEST); drop: it is not written, not counted as rejected, "
+                                + "and a warning lists the consents. A stopgap, for example for consent code 0", "reject"),
                         ParamSpec.optional("zero-timestamps", "blank (the only value): a timestamp of 0 is written empty", "blank"),
                         ParamSpec.optional("work-dir", "Local directory for scratch files (default: the system temp dir); needs room "
                                 + "for the whole output", "/mnt/scratch")),
@@ -136,9 +148,11 @@ public class AdaptAllConceptsForCsvLoaderJob extends AbstractJob<AdaptAllConcept
         String manifestUri = ctx.require("manifest");
         String output = ctx.require("output");
         String outputDir = output.endsWith("/") ? output : output + "/";
-        log.info("zero-timestamps=blank multi-study-ids={} max-reject-fraction={} studies={} allow-consent-codes={}",
+        log.info("zero-timestamps=blank multi-study-ids={} max-reject-fraction={} studies={} allow-consent-codes={} "
+                        + "foreign-study-rows={} unmatched-consent-rows={}",
                 options.refuseMultiStudy() ? "refuse" : "copy", options.maxRejectFraction(),
-                options.studies().isEmpty() ? "all" : options.studies(), options.allowCodes());
+                options.studies().isEmpty() ? "all" : options.studies(), options.allowCodes(),
+                options.dropForeignStudyRows() ? "drop" : "reject", options.dropUnmatchedConsentRows() ? "drop" : "reject");
 
         // --- the manifest, pinned to the version read now ---------------------------------------------------------
         String manifestVersion = source.currentVersionId(manifestUri)
@@ -269,6 +283,17 @@ public class AdaptAllConceptsForCsvLoaderJob extends AbstractJob<AdaptAllConcept
         }
         if (e.global.excludedStudy > 0) {
             w.add(e.global.excludedStudy + " global row(s) of studies left out by --studies dropped");
+        }
+        for (PartitionSpec p : plan.partitions) {
+            Tally t = e.parts[p.index()];
+            if (t.foreignStudy > 0) {
+                w.add(t.foreignStudy + " row(s) of " + p.name() + " under another study's tree dropped (first nodes: "
+                        + Tally.top(t.foreignStudyNodes, 5) + "); --foreign-study-rows=drop, they are not loaded");
+            }
+        }
+        if (e.global.consentNotInManifest > 0) {
+            w.add(e.global.consentNotInManifest + " global _consents row(s) naming no partition of the manifest dropped (top consents: "
+                    + Tally.top(e.global.unmatchedConsents, 5) + "); --unmatched-consent-rows=drop");
         }
         long rejected = e.totalRejected();
         if (rejected > 0) {
@@ -407,6 +432,8 @@ public class AdaptAllConceptsForCsvLoaderJob extends AbstractJob<AdaptAllConcept
         m.put("rowsWritten", e.totalWritten());
         m.put("rowsRejected", e.totalRejected());
         m.put("rowsDropped", e.totalDropped());
+        m.put("rowsDroppedForeignStudy", e.totalForeignStudy());
+        m.put("rowsDroppedConsentNotInManifest", e.global.consentNotInManifest);
         m.put("balanced", e.balanced());
         m.put("partitions", e.plan().partitions.size());
         m.put("multiStudyPatients", e.index.multiStudyPatients());

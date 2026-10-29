@@ -64,6 +64,12 @@ check "balanced: input ($INPUT) + globalCopies ($COPIES) = written ($WRITTEN) + 
 check "the job reports balanced=true" jq -e '.metrics.balanced == true' "$REPORT"
 
 if [[ -f "$OWN" ]]; then
+  # the stopgap drops (--foreign-study-rows=drop, --unmatched-consent-rows=drop): never loaded, counted and warned about
+  FOREIGN=$(jq -r '.droppedDetail.foreignStudy // 0' "$OWN")
+  NOCONSENT=$(jq -r '.droppedDetail.consentNotInManifest // 0' "$OWN")
+  if (( FOREIGN > 0 || NOCONSENT > 0 )); then
+    warn "dropped by option: $FOREIGN row(s) under another study's tree, $NOCONSENT _consents row(s) naming no partition (see the warnings in the report)"
+  fi
   check "the run's own report says ok" jq -e '.status == "ok"' "$OWN"
   check "its rows agree with the JobResult" jq -e --argjson w "$WRITTEN" --argjson i "$INPUT" '.rows.written == $w and .rows.input == $i' "$OWN"
   check "its partitions all have rows > 0" jq -e '[.partitions[] | select(.rows <= 0)] | length == 0' "$OWN"

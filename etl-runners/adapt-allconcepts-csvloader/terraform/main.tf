@@ -35,11 +35,13 @@ module "etl_runner" {
 
   job_params = merge(
     {
-      manifest            = var.manifest_uri
-      output              = var.output_uri
-      max_reject_fraction = var.max_reject_fraction
-      multi_study_ids     = var.multi_study_ids
-      zero_timestamps     = "blank"
+      manifest               = var.manifest_uri
+      output                 = var.output_uri
+      max_reject_fraction    = var.max_reject_fraction
+      multi_study_ids        = var.multi_study_ids
+      foreign_study_rows     = var.foreign_study_rows
+      unmatched_consent_rows = var.unmatched_consent_rows
+      zero_timestamps        = "blank"
     },
     var.studies != "" ? { studies = var.studies } : {},
     var.allow_consent_codes != "" ? { allow_consent_codes = var.allow_consent_codes } : {}

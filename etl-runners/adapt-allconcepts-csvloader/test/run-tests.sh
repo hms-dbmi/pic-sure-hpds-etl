@@ -384,6 +384,16 @@ test_validate_passes_a_balanced_report_and_the_jobs_own_report() {
     expect_out "balanced: input (30) + globalCopies (2)"
 }
 
+test_validate_accepts_the_stopgap_drop_keys_of_the_jobs_own_report_and_warns() {
+    report_for r4 30 2 30 0 2 true
+    jq '.droppedDetail.foreignStudy = 5 | .droppedDetail.consentNotInManifest = 3' "$OUT/report.json" \
+        >"$T/reports/adapt-allconcepts-csvloader-r4-report.json"
+    validate r4
+    expect_rc 10
+    expect_out "dropped by option: 5 row(s) under another study's tree, 3 _consents row(s)"
+    expect_out "[ok]   the run's own report says ok"
+}
+
 test_validate_fails_an_unbalanced_report() {
     report_for r2 30 2 30 0 5 true
     validate r2
@@ -401,12 +411,32 @@ test_validate_fails_when_no_report_was_written() {
 
 test_tfvars_pin_nothing_that_jenkins_sets_as_a_tf_var() {
     local v
-    for v in instance_type root_volume_size manifest_uri output_uri studies max_reject_fraction allow_consent_codes multi_study_ids \
+    for v in instance_type root_volume_size manifest_uri output_uri studies max_reject_fraction allow_consent_codes multi_study_ids foreign_study_rows unmatched_consent_rows \
         run_id name_suffix image_tar; do
         if grep -hE "^[[:space:]]*${v}[[:space:]]*=" "$RUNNER"/terraform/*.tfvars; then
             fail "$v is set in a .tfvars; a -var-file value would outrank the TF_VAR_$v Jenkins sets"
         fi
     done
+}
+
+test_the_two_stopgap_choices_reach_the_job_through_jenkins_and_terraform() {
+    local v p
+    for v in "FOREIGN_STUDY_ROWS foreign_study_rows" "UNMATCHED_CONSENT_ROWS unmatched_consent_rows"; do
+        set -- $v
+        p=$1
+        grep -qE "choice\(name: '$p', choices: \['reject', 'drop'\]" "$RUNNER/Jenkinsfile" || fail "Jenkinsfile lacks the $p choice (reject, drop)"
+        grep -qE "TF_VAR_$2 +=.*params\.$p" "$RUNNER/Jenkinsfile" || fail "Jenkinsfile does not set TF_VAR_$2 from $p"
+        grep -q "variable \"$2\"" "$RUNNER/terraform/variables.tf" || fail "variables.tf lacks $2"
+        grep -qE "^[[:space:]]*$2 +=.*var\.$2" "$RUNNER/terraform/main.tf" || fail "main.tf passes no job param $2"
+    done
+}
+
+test_the_job_refuses_a_bad_stopgap_value_with_exit_2() {
+    RC=0
+    OUT_TEXT=$(ETL_REPORTS_DIR="$T/r" java -jar "$JAR" --job=adapt-allconcepts-csvloader --run-id=bad --foreign-study-rows=ignore \
+        --manifest="$VECTOR/inputs/allConcepts_manifest.csv" --output="$T/o" 2>&1) || RC=$?
+    expect_rc 2
+    expect_eq "$(jq -r '[.inputValidation.issues[].code] | join(",")' "$T/r/adapt-allconcepts-csvloader-bad.json")" BAD_FOREIGN_STUDY_ROWS
 }
 
 # ---------------------------------------------------------------------------- run
