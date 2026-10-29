@@ -70,14 +70,21 @@ else
     check "manifest exists: $MANIFEST" aws s3api head-object --bucket "$BUCKET" --key "$KEY" --region "$REGION"
 
     # One-time probe of the two version-level permissions the job needs on the manifest's bucket.
+    # With --max-items and --output text the CLI prints the pagination token on a second line ("None" when there
+    # is none), so only the first line is the version id (seen on geno 2026-10-29: "<id>\nNone").
     VERSION_ID=$(aws s3api list-object-versions --bucket "$BUCKET" --prefix "$KEY" --max-items 1 \
-        --query 'Versions[0].VersionId' --output text --region "$REGION" 2>/dev/null || echo "")
+        --query 'Versions[0].VersionId' --output text --region "$REGION" 2>/dev/null | head -n 1 || echo "")
+    VERSION_ID="$(trim "$VERSION_ID")"
     check "role can ListBucketVersions on '$BUCKET'" test -n "$VERSION_ID" -a "$VERSION_ID" != "None"
+    PROBE_ERR="$(mktemp)"
     probe_get_version() {
         aws s3api get-object --bucket "$BUCKET" --key "$KEY" --version-id "$VERSION_ID" --range bytes=0-0 \
-            --region "$REGION" /dev/null
+            --region "$REGION" /dev/null 2>"$PROBE_ERR"
     }
     check "role can GetObjectVersion on '$BUCKET'" probe_get_version
+    # check() hides the command's output; show the AWS error so a FAIL names its cause.
+    if [ -s "$PROBE_ERR" ]; then sed 's/^/         aws: /' "$PROBE_ERR" | head -n 3; fi
+    rm -f "$PROBE_ERR"
 fi
 
 # --- the runner's disk ------------------------------------------------------

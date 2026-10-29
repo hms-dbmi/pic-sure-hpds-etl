@@ -61,8 +61,14 @@ case "$group $op" in
     "s3api list-object-versions")
         [ -z "${STUB_NO_LIST_VERSIONS:-}" ] || denied ListObjectVersions
         echo "v-1"
+        # the real CLI prints the pagination token on a second line with --max-items and --output text
+        [ -z "$maxkeys" ] || echo "None"
         ;;
     "s3api get-object")
+        if [[ "$version" == *$'\n'* || "$version" == *" "* ]]; then
+            echo "An error occurred (InvalidArgument) when calling the GetObject operation: Invalid version id specified" >&2
+            exit 254
+        fi
         [ -z "$version" ] || [ -z "${STUB_NO_GET_VERSION:-}" ] || denied GetObject
         echo '{}'
         ;;

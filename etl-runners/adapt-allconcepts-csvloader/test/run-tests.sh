@@ -332,6 +332,22 @@ test_preflight_refuses_a_role_that_cannot_read_object_versions() {
     expect_out "[FAIL] role can GetObjectVersion"
 }
 
+test_preflight_uses_only_the_first_line_of_the_version_listing() {
+    # geno 2026-10-29: `--max-items 1 --output text` printed "<id>\nNone" and the probe sent both lines as the id
+    given_manifest
+    preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
+    expect_rc 0
+    expect_out "[ok]   role can GetObjectVersion"
+    ! grep -q 'Invalid version id' <<<"$OUT_TEXT" || fail "the probe sent the pagination line as part of the version id"
+}
+
+test_preflight_shows_the_aws_error_when_the_version_read_fails() {
+    given_manifest
+    STUB_NO_GET_VERSION=1 preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
+    expect_rc 1
+    expect_out "aws: "
+}
+
 test_preflight_refuses_an_unversioned_bucket_a_missing_manifest_and_non_s3_locations() {
     given_manifest
     STUB_VERSIONING=Suspended preflight s3://bkt/data/allConcepts_manifest.csv s3://bkt/data/out/
