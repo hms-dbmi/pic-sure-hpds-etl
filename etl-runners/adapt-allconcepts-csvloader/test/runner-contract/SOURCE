@@ -1,7 +1,7 @@
 Vendored, unmodified, from the in-boundary runner hpds-pheno-load. These are the runner's own gates over a
 split output (the adapter's contract); do not edit them here, re-copy them if the runner changes.
 
-repo:   avillach-jenkins-bdc-etl (SRCE GitLab; local forge thomas/avillach-jenkins-bdc-etl), branch integration
+repo:   avillach-jenkins-bdc-etl (SRCE GitLab), branch integration
 commit: d052492 (all four files below as of that commit)
 
 file here                         path in the repo (under pipelines/hpds-pheno-load/)   blob sha at d052492
