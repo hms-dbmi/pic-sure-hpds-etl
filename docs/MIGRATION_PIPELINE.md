@@ -242,7 +242,8 @@ The MULTI sub-job writes the same rows the SSTR job would:
 - from the Sample.MULTI, a `DBGap` sample per `dbGaP_Sample_ID` and a `submitted` sample per
   `SAMPLE_ID`, for loaded subjects only. No Sample.MULTI, or an unreadable one, loads no samples.
 
-Like the SSTR job it purges the study's `consents` first, in the same transaction as the load.
+Like the SSTR job it purges the study's `consents` and `samples` first, in the same transaction
+as the load, and writes the samples under the study's id.
 It is migration-only (`JobType.MIGRATION`); the permanent pipeline never reads MULTI files.
 
 Studies are processed independently. A data failure in one study does not stop the rest. A

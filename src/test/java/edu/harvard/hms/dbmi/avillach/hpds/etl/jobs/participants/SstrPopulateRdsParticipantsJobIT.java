@@ -122,13 +122,24 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
         assertThat(second.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(second.getMetrics())
                 .containsEntry("participantsInserted", 0L)
-                // a reload sees the same samples but inserts none (ON CONFLICT DO NOTHING)
+                // a reload purges the study's samples and writes them again
                 .containsEntry("samplesSeen", 1L)
-                .containsEntry("samplesInserted", 0L)
-                .containsEntry("submittedSamplesInserted", 0L);
+                .containsEntry("samplesInserted", 1L)
+                .containsEntry("submittedSamplesInserted", 1L);
         assertThat(participants.count()).isEqualTo(1);
         assertThat(consentCountForStudy()).isEqualTo(1);
         assertThat(sampleCount()).isEqualTo(2);
+    }
+
+    @Test
+    void purges_stale_sample_rows_for_the_study_before_repopulating() {
+        run(executor, job, JobTestSupport.tempFile("sstr-old.tsv", HEADER
+                + "SUBJ1\tSAMP_OLD\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"), "it-old");
+        run(executor, job, JobTestSupport.tempFile("sstr-new.tsv", HEADER
+                + "SUBJ1\tSAMP_NEW\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s2\n"), "it-new");
+
+        assertThat(jdbc.queryForList("SELECT source_sample_id FROM samples", String.class))
+                .containsExactlyInAnyOrder("SAMP_NEW", "phs001412.v1.p1.s2");
     }
 
     @Test

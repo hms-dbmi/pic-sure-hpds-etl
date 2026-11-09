@@ -104,7 +104,12 @@ Every HPDS identity is an integer `hpds_id` drawn from one shared sequence, `hpd
 |----------------|------------------------------------------------------|---------------------------------------------------|
 | `participants` | origin ids (`source_id`, `source`)                   | `(source_id, source)`                             |
 | `consents`     | `study_id` / `consent_code` / `consent_abbreviation` | `(hpds_id, study_id)`                             |
-| `samples`      | `source_sample_id` / `sample_source`                 | `(hpds_id, source_sample_id, sample_source)`      |
+| `samples`      | `study_id` / `source_sample_id` / `sample_source`    | `(hpds_id, study_id, source_sample_id, sample_source)` |
+
+A participant in several studies (one dbGaP subject) has one `hpds_id`, so `samples` records the
+study whose load wrote each sample, and genomic jobs read a study's samples by `study_id`, never
+through the participant's consents (that would hand a study every other study's samples for its
+shared participants).
 
 ## Project Layout
 

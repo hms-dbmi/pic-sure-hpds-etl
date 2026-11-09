@@ -11,21 +11,28 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * Bulk access to the {@code samples} table. A participant may have many samples, so the
- * natural key is the full triple; the upsert is idempotent on re-run.
+ * Bulk access to the {@code samples} table. A participant may have many samples, and one
+ * participant (one dbGaP subject) may be in several studies, so every row is attributed to the
+ * study whose load wrote it and the natural key is {@code (hpds_id, study_id, source_sample_id,
+ * sample_source)}; the upsert is idempotent on re-run.
  */
 @Repository
 public class SampleRepository {
 
-    private static final String INSERT_INTO = "INSERT INTO samples (hpds_id, source_sample_id, sample_source)";
-    private static final String ON_CONFLICT = "ON CONFLICT (hpds_id, source_sample_id, sample_source) DO NOTHING";
+    private static final String INSERT_INTO =
+            "INSERT INTO samples (hpds_id, study_id, source_sample_id, sample_source)";
+    private static final String ON_CONFLICT =
+            "ON CONFLICT (hpds_id, study_id, source_sample_id, sample_source) DO NOTHING";
+
+    private static final String DELETE_BY_STUDY = "DELETE FROM samples WHERE study_id = :studyId";
 
     /**
-     * The conflict key's order; pass it to {@code BatchOps.upsertInChunks}. The key has no
-     * study_id, so two studies' loads sharing a participant can write the same rows; written in
-     * one shared order they wait on each other's uncommitted rows rather than deadlock.
+     * The conflict key's order; pass it to {@code BatchOps.upsertInChunks}. The key includes
+     * study_id, so loads of different studies never touch the same row; the order matters when
+     * two loads of the same study overlap, which then wait on each other rather than deadlock.
      */
     public static final Comparator<Sample> KEY_ORDER = Comparator.comparingLong(Sample::hpdsId)
+            .thenComparing(Sample::studyId)
             .thenComparing(Sample::sourceSampleId)
             .thenComparing(Sample::sampleSource);
 
@@ -40,25 +47,39 @@ public class SampleRepository {
             return 0;
         }
         try {
-            return MultiRowInsert.execute(jdbc.getJdbcTemplate(), INSERT_INTO, ON_CONFLICT, 3, samples,
-                    s -> new Object[]{s.hpdsId(), s.sourceSampleId(), s.sampleSource()});
+            return MultiRowInsert.execute(jdbc.getJdbcTemplate(), INSERT_INTO, ON_CONFLICT, 4, samples,
+                    s -> new Object[]{s.hpdsId(), s.studyId(), s.sourceSampleId(), s.sampleSource()});
         } catch (DataAccessException e) {
             throw new InfrastructureException("Batch upsert into samples failed", e);
         }
     }
 
+    /** Deletes every sample row a study's loads wrote, e.g. to re-populate it from a fresh file. */
+    public int deleteByStudyId(String studyId) {
+        try {
+            return jdbc.update(DELETE_BY_STUDY, new MapSqlParameterSource().addValue("studyId", studyId));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Delete from samples failed", e);
+        }
+    }
+
+    /**
+     * The samples a study's own loads wrote. Never the samples another study loaded for a shared
+     * participant: those belong to that study's genomic data, not this one's. Rows from before
+     * samples were attributed to studies (a NULL study_id) match no study.
+     */
     public List<Sample> findByStudyId(String studyId) {
         try {
             return jdbc.query(
                     """
-                    SELECT DISTINCT s.hpds_id, s.source_sample_id, s.sample_source
-                    FROM samples s
-                    JOIN consents c ON s.hpds_id = c.hpds_id
-                    WHERE c.study_id = :studyId
+                    SELECT hpds_id, study_id, source_sample_id, sample_source
+                    FROM samples
+                    WHERE study_id = :studyId
                     """,
                     new MapSqlParameterSource().addValue("studyId", studyId),
                     (rs, n) -> new Sample(
                             rs.getLong("hpds_id"),
+                            rs.getString("study_id"),
                             rs.getString("source_sample_id"),
                             rs.getString("sample_source")));
         } catch (DataAccessException e) {

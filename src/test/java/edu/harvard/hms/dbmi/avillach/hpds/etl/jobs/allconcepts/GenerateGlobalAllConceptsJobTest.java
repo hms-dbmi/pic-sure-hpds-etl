@@ -88,7 +88,7 @@ class GenerateGlobalAllConceptsJobTest {
                 new Participant(id2, "SUBJ2", "DBGap")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(id1, "SAMP1", "DBGap")));
+                new Sample(id1, studyId, "SAMP1", "DBGap")));
 
         String outputPath = tempDir.resolve("output/").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-success");

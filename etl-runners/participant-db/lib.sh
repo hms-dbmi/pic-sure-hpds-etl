@@ -454,17 +454,39 @@ SQL
             "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$DB_SCHEMA'" | tr -d '[:space:]')
         [[ "$has_schema" == 1 ]] || pdb_die "the restored dump has no '$DB_SCHEMA' schema (was it taken with --schema $DB_SCHEMA?)"
     fi
-    # A dump taken before ix_consents_study_id was added to schema.sql lacks it, and every study
-    # load's consents purge would then scan the whole table.
-    PDB_PSQL_DB="$DB_NAME" pdb_psql -c "SET ROLE \"$DB_USERNAME\";
-        CREATE INDEX IF NOT EXISTS ix_consents_study_id ON \"$DB_SCHEMA\".consents (study_id)" \
-        || pdb_die "could not create ix_consents_study_id"
+    pdb_upgrade_schema
     # Unqualified names resolve to the schema for the app role (the JAR also sets DB_SCHEMA).
     pdb_psql -c "ALTER ROLE \"$DB_USERNAME\" SET search_path TO \"$DB_SCHEMA\"" || pdb_die "could not set search_path"
     pdb_log "Row counts: $(PDB_PSQL_DB="$DB_NAME" pdb_psql -tA -F ' ' -c \
         "SELECT 'participants=' || (SELECT count(*) FROM \"$DB_SCHEMA\".participants),
                 'consents='     || (SELECT count(*) FROM \"$DB_SCHEMA\".consents),
                 'samples='      || (SELECT count(*) FROM \"$DB_SCHEMA\".samples)")"
+}
+
+# Brings a database restored from an older dump, or kept running from before a schema change, up
+# to schema.sql. Every step is idempotent, so it runs on every start, kept or replaced.
+pdb_upgrade_schema() {
+    PDB_PSQL_DB="$DB_NAME" pdb_psql <<SQL || pdb_die "could not upgrade the $DB_SCHEMA schema to schema.sql"
+SET ROLE "$DB_USERNAME";
+SET search_path TO "$DB_SCHEMA";
+-- A dump taken before ix_consents_study_id was added lacks it, and every study load's consents
+-- purge would then scan the whole table.
+CREATE INDEX IF NOT EXISTS ix_consents_study_id ON consents (study_id);
+-- Samples are attributed to the study whose load wrote them. Rows written before that keep a NULL
+-- study_id: which study loaded them was never recorded, so they match no study until it is loaded
+-- again (and a reload never touches them).
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS study_id TEXT;
+ALTER TABLE samples DROP CONSTRAINT IF EXISTS uq_samples;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_samples_study ON samples (hpds_id, study_id, source_sample_id, sample_source);
+CREATE INDEX IF NOT EXISTS ix_samples_study_id ON samples (study_id);
+SQL
+    local unattributed
+    unattributed=$(PDB_PSQL_DB="$DB_NAME" pdb_psql -tAc \
+        "SELECT count(*) FROM \"$DB_SCHEMA\".samples WHERE study_id IS NULL" </dev/null | tr -d '[:space:]') \
+        || pdb_die "could not count the samples with no study"
+    if [[ "$unattributed" != 0 ]]; then
+        pdb_log "WARNING: $unattributed sample row(s) predate per-study samples and belong to no study; genomic jobs ignore them. Load each study again (no RESUME_FROM_RUN_ID) to rewrite its samples; the rows can then be dropped with DELETE FROM $DB_SCHEMA.samples WHERE study_id IS NULL."
+    fi
 }
 
 # --------------------------------------------------------------------------- credentials

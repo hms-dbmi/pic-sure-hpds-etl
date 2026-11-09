@@ -89,8 +89,8 @@ class CreateVCFIndexesJobTest {
                 new Consent(id2, studyId, "2", "HMB")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(id1, "NWD100001", "TOPMed"),
-                new Sample(id2, "NWD100002", "TOPMed")));
+                new Sample(id1, studyId, "NWD100001", "TOPMed"),
+                new Sample(id2, studyId, "NWD100002", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-happy");
@@ -133,7 +133,7 @@ class CreateVCFIndexesJobTest {
         when(consentRepository.findByStudyId(genomicId)).thenReturn(List.of(
                 new Consent(id1, genomicId, "1", "GRU")));
         when(sampleRepository.findByStudyId(genomicId)).thenReturn(List.of(
-                new Sample(id1, "NWD200001", "TOPMed")));
+                new Sample(id1, genomicId, "NWD200001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-skip-pheno");
@@ -155,7 +155,7 @@ class CreateVCFIndexesJobTest {
         when(consentRepository.findByStudyId(unprocessedId)).thenReturn(List.of(
                 new Consent(id1, unprocessedId, "1", "GRU")));
         when(sampleRepository.findByStudyId(unprocessedId)).thenReturn(List.of(
-                new Sample(id1, "NWD700001", "TOPMed")));
+                new Sample(id1, unprocessedId, "NWD700001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-skip-processed");
@@ -174,7 +174,7 @@ class CreateVCFIndexesJobTest {
         when(consentRepository.findByStudyId(processedId)).thenReturn(List.of(
                 new Consent(id1, processedId, "1", "GRU")));
         when(sampleRepository.findByStudyId(processedId)).thenReturn(List.of(
-                new Sample(id1, "NWD700002", "TOPMed")));
+                new Sample(id1, processedId, "NWD700002", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job,
@@ -199,8 +199,8 @@ class CreateVCFIndexesJobTest {
                 new Consent(id2, studyId, "1", "GRU")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(id1, "NWD300001", "TOPMed"),
-                new Sample(id2, "NWD300002", "TOPMed")));
+                new Sample(id1, studyId, "NWD300001", "TOPMed"),
+                new Sample(id2, studyId, "NWD300002", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-c0");
@@ -228,8 +228,8 @@ class CreateVCFIndexesJobTest {
                 new Consent(id2, studyId, "1", "GRU")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(id1, "NWD400001", "TOPMed"),
-                new Sample(id2, "OTHER123", "Other")));
+                new Sample(id1, studyId, "NWD400001", "TOPMed"),
+                new Sample(id2, studyId, "OTHER123", "Other")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-non-nwd");
@@ -274,7 +274,7 @@ class CreateVCFIndexesJobTest {
         when(consentRepository.findByStudyId(studyNoConsents)).thenReturn(List.of());
 
         when(sampleRepository.findByStudyId(studyWithConsents)).thenReturn(List.of(
-                new Sample(id1, "NWD500001", "TOPMed")));
+                new Sample(id1, studyWithConsents, "NWD500001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-no-consents");
@@ -325,7 +325,7 @@ class CreateVCFIndexesJobTest {
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(id1, "NWD600001", "TOPMed")));
+                new Sample(id1, studyId, "NWD600001", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-chroms");
@@ -380,9 +380,9 @@ class CreateVCFIndexesJobTest {
                 new Consent(id3, studyId, "1", "GRU")));
 
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(id1, "NWD800001", "TOPMed"),
-                new Sample(id2, "NWD800002", "TOPMed"),
-                new Sample(id3, "NWD800003", "TOPMed")));
+                new Sample(id1, studyId, "NWD800001", "TOPMed"),
+                new Sample(id2, studyId, "NWD800002", "TOPMed"),
+                new Sample(id3, studyId, "NWD800003", "TOPMed")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-id-counts");
@@ -417,6 +417,44 @@ class CreateVCFIndexesJobTest {
     }
 
     @Test
+    void an_nwd_id_loaded_under_both_sample_sources_is_indexed_once() {
+        long id1 = 1L;
+        long id2 = 2L;
+        String studyId = "phs000223";
+
+        when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU"),
+                new Consent(id2, studyId, "1", "GRU")));
+
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Sample(id1, studyId, "NWD900001", "DBGap"),
+                new Sample(id1, studyId, "NWD900001", "submitted"),
+                new Sample(id2, studyId, "NWD900002", "submitted")));
+
+        String outputPath = tempDir.resolve("output").toString() + "/";
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-nwd-dedupe");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("totalSamples", 2L);
+
+        ArgumentCaptor<byte[]> contentCaptor = ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
+        verify(ioResolver, org.mockito.Mockito.atLeast(1)).writeOutput(uriCaptor.capture(), contentCaptor.capture());
+
+        int vcfIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000223.c1_vcfIndex.tsv");
+        String[] fields = new String(contentCaptor.getAllValues().get(vcfIdx), StandardCharsets.UTF_8)
+                .split("\n")[2].split("\t", -1);
+        assertThat(fields[4]).isEqualTo("NWD900001,NWD900002");
+        assertThat(fields[5]).isEqualTo("1,2");
+
+        int csvIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000223.c1_SampleIds.csv");
+        assertThat(new String(contentCaptor.getAllValues().get(csvIdx), StandardCharsets.UTF_8))
+                .isEqualTo("1,TST,NWD900001\n2,TST,NWD900002\n");
+    }
+
+    @Test
     void rejects_a_misspelt_include_processed_flag_instead_of_reading_it_as_false() {
         when(managedInputsService.read()).thenReturn(List.of(processedGenomicStudy("TST", "phs000555")));
 
@@ -442,13 +480,13 @@ class CreateVCFIndexesJobTest {
                 new Consent(2L, studyId, "1", "GRU"),
                 new Consent(5L, studyId, "2", "HMB")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(1L, "NWD000001", "submitted"),
-                new Sample(2L, badId, "submitted"),
-                new Sample(5L, "NWD000005", "submitted")));
+                new Sample(1L, studyId, "NWD000001", "submitted"),
+                new Sample(2L, studyId, badId, "submitted"),
+                new Sample(5L, studyId, "NWD000005", "submitted")));
         when(consentRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
                 new Consent(3L, goodStudyId, "1", "GRU")));
         when(sampleRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
-                new Sample(3L, "NWD000004", "submitted")));
+                new Sample(3L, goodStudyId, "NWD000004", "submitted")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         // Every group was published by an earlier run.
@@ -507,12 +545,12 @@ class CreateVCFIndexesJobTest {
                 new Consent(1L, studyId, "1", "GRU"),
                 new Consent(2L, studyId, "2", "HMB")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(1L, "NWD000001", "submitted"),
-                new Sample(2L, "NWD000002", "submitted")));
+                new Sample(1L, studyId, "NWD000001", "submitted"),
+                new Sample(2L, studyId, "NWD000002", "submitted")));
         when(consentRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
                 new Consent(3L, goodStudyId, "1", "GRU")));
         when(sampleRepository.findByStudyId(goodStudyId)).thenReturn(List.of(
-                new Sample(3L, "NWD000003", "submitted")));
+                new Sample(3L, goodStudyId, "NWD000003", "submitted")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-separator-in-abv");
@@ -549,7 +587,7 @@ class CreateVCFIndexesJobTest {
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TS,T", studyId)));
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(new Consent(1L, studyId, "1", "GRU")));
         when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(
-                new Sample(1L, "NWD000001,NWD000009", "submitted")));
+                new Sample(1L, studyId, "NWD000001,NWD000009", "submitted")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         // Only the index was published before (e.g. an earlier run died between the two writes).
@@ -580,9 +618,9 @@ class CreateVCFIndexesJobTest {
                 genomicStudy("TS,T", badStudy), genomicStudy("GOOD", goodStudy)));
         when(consentRepository.findByStudyId(badStudy)).thenReturn(List.of(new Consent(1L, badStudy, "1", "GRU")));
         // No NWD samples, so this study would never write a _SampleIds.csv.
-        when(sampleRepository.findByStudyId(badStudy)).thenReturn(List.of(new Sample(1L, "SAMP1", "submitted")));
+        when(sampleRepository.findByStudyId(badStudy)).thenReturn(List.of(new Sample(1L, badStudy, "SAMP1", "submitted")));
         when(consentRepository.findByStudyId(goodStudy)).thenReturn(List.of(new Consent(2L, goodStudy, "1", "GRU")));
-        when(sampleRepository.findByStudyId(goodStudy)).thenReturn(List.of(new Sample(2L, "NWD000002", "submitted")));
+        when(sampleRepository.findByStudyId(goodStudy)).thenReturn(List.of(new Sample(2L, goodStudy, "NWD000002", "submitted")));
 
         String outputPath = tempDir.resolve("output").toString() + "/";
         JobResult result = executor.run(job, Map.of("output", outputPath), "test-bad-abv-nothing-to-index");
@@ -601,7 +639,7 @@ class CreateVCFIndexesJobTest {
         String outputPath = "s3://unversioned/vcf/";
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TS,T", studyId)));
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(new Consent(1L, studyId, "1", "GRU")));
-        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(new Sample(1L, "NWD000001", "submitted")));
+        when(sampleRepository.findByStudyId(studyId)).thenReturn(List.of(new Sample(1L, studyId, "NWD000001", "submitted")));
         when(ioResolver.isS3(outputPath)).thenReturn(true);
         when(ioResolver.exists(startsWith(outputPath))).thenReturn(true);
         org.mockito.Mockito.doThrow(new edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.ConfigException(

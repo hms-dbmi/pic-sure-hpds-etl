@@ -82,6 +82,12 @@ final class InMemoryParticipantStore {
             consentRows.addAll(rows);
             return rows.size();
         }));
+        when(samples.deleteByStudyId(anyString())).thenAnswer(locked(inv -> {
+            String studyId = inv.getArgument(0);
+            int before = sampleRows.size();
+            sampleRows.removeIf(s -> s.studyId().equals(studyId));
+            return before - sampleRows.size();
+        }));
         when(samples.batchUpsert(anyList())).thenAnswer(locked(inv -> {
             List<Sample> rows = inv.getArgument(0);
             sampleRows.addAll(rows);

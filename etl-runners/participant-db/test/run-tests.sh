@@ -138,6 +138,32 @@ start_keeps_a_clean_running_db_and_refreshes_its_host() {
     check [ "$(role_password)" == abc123 ]
 }
 
+start_upgrades_the_schema_of_a_kept_db() {
+    given_running_db; given_live_state clean
+    run_start
+    expect_rc 0
+    expect_out "Plan: keep"
+    check grep -q "ADD COLUMN IF NOT EXISTS study_id" "$STUB_STATE/psql.log"
+    check grep -q "uq_samples_study" "$STUB_STATE/psql.log"
+    refute grep -q "belong to no study" <<<"$OUT"
+}
+
+start_warns_about_samples_that_belong_to_no_study() {
+    given_running_db; given_live_state clean
+    echo 7 > "$STUB_STATE/unattributed_samples"
+    run_start
+    expect_rc 0
+    expect_out "7 sample row(s) predate per-study samples and belong to no study"
+}
+
+start_fails_when_the_schema_upgrade_fails() {
+    given_running_db; given_live_state clean
+    echo 3 > "$STUB_STATE/psql_rc"
+    run_start
+    expect_rc 1
+    expect_out "could not upgrade the etl schema"
+}
+
 start_reissues_a_password_when_the_saved_one_is_stale() {
     given_running_db; given_live_state clean
     echo other > "$STUB_STATE/app_password"
@@ -171,6 +197,7 @@ start_creates_a_fresh_schema_when_there_is_no_backup_at_all() {
     expect_rc 0
     expect_out "fresh schema"
     check grep -q "CREATE TABLE" "$STUB_STATE/psql.log"
+    check grep -q "ADD COLUMN IF NOT EXISTS study_id" "$STUB_STATE/psql.log"
     refute grep -q "aws s3 cp s3://.*participant_db.tar -" "$STUB_STATE/aws.log"
 }
 

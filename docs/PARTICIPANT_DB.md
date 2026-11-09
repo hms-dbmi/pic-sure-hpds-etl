@@ -180,6 +180,15 @@ live database *dirty* ("run … in progress"), whether it kept or replaced it; t
 *clean*, keeps one restored from `participant_db_not_promoted.tar` because of `continue` *dirty*,
 and leaves a kept database's state as it was.
 
+Every start, whether it kept or replaced the database, then brings the schema up to `schema.sql`
+(idempotent steps in `pdb_upgrade_schema`): it adds `ix_consents_study_id` and the `samples.study_id`
+column with its keys, if missing. A sample row written before `study_id` existed keeps it NULL,
+since which study loaded it was never recorded; it matches no study, so genomic jobs ignore it.
+When there are any, the start logs `WARNING: <n> sample row(s) predate per-study samples`. Load each
+affected study again (not with `RESUME_FROM_RUN_ID`, which copies a study instead of loading it) to
+rewrite its samples; the leftover rows can then be dropped with
+`DELETE FROM etl.samples WHERE study_id IS NULL`.
+
 `live_state.json` missing means "no recorded state" (a kept database is then recorded clean). Any
 other S3 error reading it, or a record with no known state, stops the start: guessing could erase a
 *dirty* or *replacing* marker.

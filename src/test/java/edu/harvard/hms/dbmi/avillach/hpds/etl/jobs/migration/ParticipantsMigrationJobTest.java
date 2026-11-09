@@ -542,9 +542,9 @@ class ParticipantsMigrationJobTest {
         assertThat(store.consentsFor(STUDY)).containsExactly(
                 new Consent(p1, STUDY, "1", "HMB-IRB-MDS"),
                 new Consent(p2, STUDY, "2", "DS-CVD-IRB-NPU-MDS"));
-        assertThat(store.samplesFrom("DBGap")).containsExactly(new Sample(p1, "5001", "DBGap"), new Sample(p2, "5002", "DBGap"));
+        assertThat(store.samplesFrom("DBGap")).containsExactly(new Sample(p1, STUDY, "5001", "DBGap"), new Sample(p2, STUDY, "5002", "DBGap"));
         assertThat(store.samplesFrom("submitted")).containsExactly(
-                new Sample(p1, "NWD1", "submitted"), new Sample(p2, "NWD2", "submitted"));
+                new Sample(p1, STUDY, "NWD1", "submitted"), new Sample(p2, STUDY, "NWD2", "submitted"));
         assertThat(store.participantIds).doesNotContainKey("DBGap|1003");
 
         // Patient mapping ids resolve by dbGaP id (1001) or by the study's own SUBJECT_ID (S2).

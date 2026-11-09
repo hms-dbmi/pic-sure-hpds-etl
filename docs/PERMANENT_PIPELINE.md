@@ -283,7 +283,7 @@ A dbGaP SSTR subject/sample mapping file (tab-delimited) with columns:
 Read SSTR file (from S3 or local)
         │
         ▼
-Purge existing consents for this study_id
+Purge existing consents and samples for this study_id
         │
         ▼
 Resolve or create participants           one per distinct dbgap_subject_id
@@ -294,8 +294,9 @@ Upsert consents                          one per participant
   (ON CONFLICT DO UPDATE)                keyed by consent group from the file
         │
         ▼
-Upsert samples                           one per non-blank dbgap_sample_id
-  (ON CONFLICT DO NOTHING)
+Upsert samples                           one per non-blank dbgap_sample_id, and one per
+  (ON CONFLICT DO NOTHING)               non-blank SAMPLE_ID (source "submitted"); all
+                                         attributed to this study_id
         │
         ▼
 All within one transaction per study
@@ -306,8 +307,8 @@ All within one transaction per study
 Populated participant database tables: `participants`, `consents`, `samples`. A JSON report
 with row/insert counts: `rowsRead`, `distinctParticipants`, `participantsInserted`,
 `consentsWritten`, `samplesSeen` (input rows with a non-blank `dbgap_sample_id`),
-`samplesInserted` (fewer than `samplesSeen` on a reload: samples are inserted with
-`ON CONFLICT DO NOTHING`), `submittedSamplesInserted`, `countsByConsentGroup`.
+`samplesInserted` (fewer than `samplesSeen` when the file repeats a sample: samples are
+inserted with `ON CONFLICT DO NOTHING`), `submittedSamplesInserted`, `countsByConsentGroup`.
 
 ---
 
@@ -376,10 +377,10 @@ Read managed inputs ─▶ filter to genomic studies (data type contains "G")
         │
         ▼
 For each genomic study:
-  Query consents + samples
-        │
+  Query consents + samples             samples by study_id: only those this study loaded,
+        │                              never another study's for a shared participant
         ▼
-  For each consent group with NWD-prefixed samples:
+  For each consent group with NWD-prefixed samples (each NWD id once per participant):
     ├─ Generate vcfIndex.tsv        one row per chromosome (1-22, X)
     │                               with sample/patient ID lists
     │

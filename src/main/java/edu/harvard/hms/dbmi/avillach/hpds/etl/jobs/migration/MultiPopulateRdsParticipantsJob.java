@@ -55,9 +55,10 @@ import java.util.regex.Pattern;
  *       samples with a warning rather than failing the study.</li>
  * </ul>
  *
- * <p>Like the SSTR job, a run first purges the study's {@code consents} rows, and purge + load
- * are one transaction. Every problem found in the files is reported as an output-validation
- * issue carrying {@code file}, {@code count}, and {@code examples}.
+ * <p>Like the SSTR job, a run first purges the study's {@code consents} and {@code samples} rows,
+ * writes samples under the study's id, and purge + load are one transaction. Every problem found
+ * in the files is reported as an output-validation issue carrying {@code file}, {@code count},
+ * and {@code examples}.
  *
  * <p>Invoked by {@link ParticipantsMigrationJob}; never part of the permanent pipeline. Enabled by
  * {@code etl.jobs.multi-populate-rds-participants.enabled=true}.
@@ -236,6 +237,7 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
     private Output load(String studyId, int batchSize, SubjectTable subjects, Map<String, String> abbreviationByCode,
                         SampleTable sampleTable, List<ValidationIssue> issues) {
         consents.deleteByStudyId(studyId);
+        samples.deleteByStudyId(studyId);
 
         String source = SstrPopulateRdsParticipantsJob.SOURCE;
         ParticipantRepository.Resolution resolution =
@@ -265,10 +267,10 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
                     continue;
                 }
                 if (row.dbgapSampleId() != null) {
-                    dbgapSamples.add(new Sample(hpdsId, row.dbgapSampleId(), source));
+                    dbgapSamples.add(new Sample(hpdsId, studyId, row.dbgapSampleId(), source));
                 }
                 if (row.submittedSampleId() != null) {
-                    submittedSamples.add(new Sample(hpdsId, row.submittedSampleId(),
+                    submittedSamples.add(new Sample(hpdsId, studyId, row.submittedSampleId(),
                             SstrPopulateRdsParticipantsJob.SOURCE_SUBMITTED));
                 }
             }

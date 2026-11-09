@@ -147,6 +147,7 @@ if [[ "$PLAN_ACTION" == keep ]]; then
     fi
     unset DB_PASSWORD
     pdb_credentials_work || pdb_die "the published credentials do not log in to $CONTAINER"
+    pdb_upgrade_schema
     if [[ -n "$RUN_ID" ]]; then
         pdb_write_live_state dirty "$RUN_REASON; kept a running database that was $LIVE"
     elif [[ "$LIVE" == unknown ]]; then

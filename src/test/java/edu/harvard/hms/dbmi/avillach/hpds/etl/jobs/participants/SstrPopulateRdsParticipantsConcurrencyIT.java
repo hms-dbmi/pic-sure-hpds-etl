@@ -130,6 +130,15 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
         assertThat(jdbc.queryForObject(
                 "SELECT COUNT(*) FROM consents WHERE hpds_id = ? AND study_id = ?", Long.class,
                 sharedId, STUDY_B)).isEqualTo(1);
+
+        // Each study's sample for the shared subject stays under that study, so neither study's
+        // genomic artifacts list the other's sample.
+        assertThat(jdbc.queryForList(
+                "SELECT source_sample_id FROM samples WHERE hpds_id = ? AND study_id = ?", String.class,
+                sharedId, STUDY_A)).containsExactly("SAMP_A1");
+        assertThat(jdbc.queryForList(
+                "SELECT source_sample_id FROM samples WHERE hpds_id = ? AND study_id = ?", String.class,
+                sharedId, STUDY_B)).containsExactly("SAMP_B1");
     }
 
     /** The referential invariant, which holds however the race lands. */

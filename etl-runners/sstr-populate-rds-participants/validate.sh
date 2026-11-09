@@ -92,9 +92,9 @@ if [[ "$NEW" == "0" && "$SUBJECTS" != "0" ]]; then
 fi
 
 # One sample row per input row that has a non-blank dbgap_sample_id, deduplicated by the
-# (hpds_id, sample id, source) constraint -- so at most rowsRead. Samples are inserted with
-# ON CONFLICT DO NOTHING, so samplesInserted is legitimately 0 on a reload; only an input with
-# no sample ids at all, or new participants arriving with no new samples, is suspicious.
+# (hpds_id, study, sample id, source) key -- so at most rowsRead. The study's samples are purged
+# and written again on every load, so only an input with no sample ids at all, or new
+# participants arriving with no new samples, is suspicious.
 check "no more samples than rows"                        test "$SAMPLES" -le "$ROWS"
 if [[ -n "$SAMPLES_SEEN" ]]; then
   check "no more samples inserted than seen ($SAMPLES <= $SAMPLES_SEEN)" test "$SAMPLES" -le "$SAMPLES_SEEN"

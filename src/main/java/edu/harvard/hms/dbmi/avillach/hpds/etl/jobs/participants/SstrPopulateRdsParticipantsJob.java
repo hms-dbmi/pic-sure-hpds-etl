@@ -42,9 +42,11 @@ import java.util.stream.Stream;
  * {@code --study-id}; consent/abbreviation come from that subject's first row), and one
  * {@code samples} row per input row that has a non-blank {@code dbgap_sample_id}.
  *
- * <p>Every run first purges existing {@code consents} rows for {@code --study-id} so the
- * study's consent groups are fully repopulated from the given file, not merged with stale
- * data. Purge + load happen in one transaction: a bad row rolls the whole run back.
+ * <p>Every run first purges existing {@code consents} and {@code samples} rows for
+ * {@code --study-id} so the study's consent groups and samples are fully repopulated from the
+ * given file, not merged with stale data. Samples are written under {@code --study-id}, so a
+ * participant shared with another study never picks up that study's samples. Purge + load happen
+ * in one transaction: a bad row rolls the whole run back.
  *
  * <p>Enabled by {@code etl.jobs.sstr-populate-rds-participants.enabled=true}; without it the bean
  * is never created and {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry} does not
@@ -188,6 +190,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         }
 
         consents.deleteByStudyId(studyId);
+        samples.deleteByStudyId(studyId);
 
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
         Map<String, Long> idBySubject = resolution.idsBySourceId();
@@ -204,13 +207,13 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 ConsentRepository.KEY_ORDER);
 
         List<Sample> sampleRows = samplePairs.stream()
-                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), studyId, pair[1], SOURCE))
                 .toList();
         long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize,
                 SampleRepository.KEY_ORDER);
 
         List<Sample> submittedSampleRows = submittedSamplePairs.stream()
-                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), studyId, pair[1], SOURCE_SUBMITTED))
                 .toList();
         long submittedSamplesInserted =
                 BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize,
@@ -263,7 +266,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                           long participantsInserted,
                           long consentsWritten,
                           // input rows with a non-blank dbgap_sample_id; samplesInserted is fewer
-                          // on a reload, since samples are inserted with ON CONFLICT DO NOTHING
+                          // when the file repeats a sample (ON CONFLICT DO NOTHING)
                           long samplesSeen,
                           long samplesInserted,
                           long submittedSamplesInserted,
