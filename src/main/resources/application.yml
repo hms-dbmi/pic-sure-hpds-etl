@@ -61,9 +61,9 @@ etl:
     generate-allconcepts-manifest:
       enabled: ${ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED:true}
 
-    # PERMANENT QA, last stage of both pipelines: participants per consent group in the participant DB
-    # (and this run's load reports) vs dbGaP's subject counts per study version. Read-only; needs
-    # HTTPS egress to www.ncbi.nlm.nih.gov.
+    # PERMANENT QA, run standalone (in neither pipeline): participants per consent group in the
+    # participant DB (and a run's load reports) vs dbGaP's subject counts per study version.
+    # Read-only; needs HTTPS egress to www.ncbi.nlm.nih.gov.
     qa-consent-counts:
       enabled: ${ETL_JOB_QA_CONSENT_COUNTS_ENABLED:true}
 

@@ -9,9 +9,9 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.Set;
 
 /**
  * Reads study summaries from the dbGaP SSTR API,
@@ -43,6 +44,9 @@ import java.time.format.DateTimeParseException;
  * header -- seconds or an HTTP-date -- is honoured instead, up to {@link #MAX_RETRY_AFTER}. The
  * wait and the clock are injected, so tests never sleep.
  *
+ * <p>Requests are spaced {@code requestSpacing} apart (2 s by default), wider while dbGaP answers
+ * overloaded: see {@link RequestPacer}.
+ *
  * <p>Thread-safe: one instance serves every study of a run.
  */
 public final class DbgapStudyClient implements DbgapStudySource {
@@ -63,20 +67,28 @@ public final class DbgapStudyClient implements DbgapStudySource {
      * @param initialBackoff the wait after the first failed attempt
      * @param maxBackoff     the longest exponential wait
      * @param requestTimeout how long one request may take, connecting included
+     * @param requestSpacing the least gap between requests (see {@link RequestPacer}); zero: none
      */
     public record Config(String baseUrl, int maxAttempts, Duration initialBackoff, Duration maxBackoff,
-                         Duration requestTimeout) {
+                         Duration requestTimeout, Duration requestSpacing) {
 
         public Config {
             baseUrl = baseUrl.replaceAll("/+$", "");
             if (maxAttempts < 1) {
                 throw new IllegalArgumentException("maxAttempts must be at least 1, got " + maxAttempts);
             }
+            requestSpacing = requestSpacing == null ? Duration.ZERO : requestSpacing;
+        }
+
+        /** Without request spacing. */
+        public Config(String baseUrl, int maxAttempts, Duration initialBackoff, Duration maxBackoff,
+                      Duration requestTimeout) {
+            this(baseUrl, maxAttempts, initialBackoff, maxBackoff, requestTimeout, Duration.ZERO);
         }
 
         public static Config defaults() {
             return new Config(DEFAULT_BASE_URL, 3, Duration.ofSeconds(60), Duration.ofSeconds(120),
-                    Duration.ofSeconds(60));
+                    Duration.ofSeconds(60), Duration.ofSeconds(2));
         }
     }
 
@@ -91,6 +103,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
     private final Config config;
     private final Sleeper sleeper;
     private final Clock clock;
+    private final RequestPacer pacer;
 
     public DbgapStudyClient(Config config, ObjectMapper mapper) {
         this(HttpClient.newBuilder()
@@ -106,6 +119,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
         this.mapper = mapper;
         this.sleeper = sleeper;
         this.clock = clock;
+        this.pacer = new RequestPacer(config.requestSpacing(), clock, sleeper);
     }
 
     /** The summary URL for a study version, e.g. {@code .../study/phs001412.v4/summary}. */
@@ -180,13 +194,20 @@ public final class DbgapStudyClient implements DbgapStudySource {
                 .header("Accept", "application/json")
                 .GET()
                 .build();
+        pacer.awaitTurn();
+        Attempt result = send(request);
+        pacer.finished(result.overloaded());
+        return result;
+    }
+
+    private Attempt send(HttpRequest request) throws InterruptedException {
         HttpResponse<String> response;
         try {
             response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         } catch (HttpConnectTimeoutException e) {
             return Attempt.unreachable("could not connect within " + config.requestTimeout().toSeconds() + " s");
         } catch (HttpTimeoutException e) {
-            return Attempt.retry("timed out after " + config.requestTimeout().toSeconds() + " s", null);
+            return Attempt.retry("timed out after " + config.requestTimeout().toSeconds() + " s", null).asOverload();
         } catch (IOException e) {
             // Connection refused or reset, DNS failure, TLS handshake failure, ...: dbGaP not reached.
             return Attempt.unreachable("request failed: " + e.getClass().getSimpleName()
@@ -218,11 +239,15 @@ public final class DbgapStudyClient implements DbgapStudySource {
             return Attempt.found(DbgapStudySummary.from(study));
         }
         if (retryable(status)) {
-            return Attempt.retry("HTTP " + status + (body.isBlank() ? "" : ": " + excerpt(body)),
+            Attempt retry = Attempt.retry("HTTP " + status + (body.isBlank() ? "" : ": " + excerpt(body)),
                     retryAfter(response.headers().firstValue("Retry-After").orElse(null)));
+            return OVERLOAD_STATUSES.contains(status) ? retry.asOverload() : retry;
         }
         return Attempt.fatal("HTTP " + status + (body.isBlank() ? "" : ": " + excerpt(body)));
     }
+
+    /** Statuses that mean dbGaP (or its gateway) is too busy: they widen the request spacing. */
+    private static final Set<Integer> OVERLOAD_STATUSES = Set.of(429, 502, 503, 504);
 
     private static boolean retryable(int status) {
         return status == 429 || status == 408 || status >= 500;
@@ -269,26 +294,31 @@ public final class DbgapStudyClient implements DbgapStudySource {
     private enum Kind { FOUND, NOT_FOUND, RETRY, FATAL }
 
     private record Attempt(Kind kind, DbgapStudySummary summary, String message, Duration retryAfter,
-                           boolean unreachable) {
+                           boolean unreachable, boolean overloaded) {
         static Attempt found(DbgapStudySummary summary) {
-            return new Attempt(Kind.FOUND, summary, null, null, false);
+            return new Attempt(Kind.FOUND, summary, null, null, false, false);
         }
 
         static Attempt notFound(String message) {
-            return new Attempt(Kind.NOT_FOUND, null, message, null, false);
+            return new Attempt(Kind.NOT_FOUND, null, message, null, false, false);
         }
 
         static Attempt retry(String message, Duration retryAfter) {
-            return new Attempt(Kind.RETRY, null, message, retryAfter, false);
+            return new Attempt(Kind.RETRY, null, message, retryAfter, false, false);
         }
 
         /** Retried like any other failure, but dbGaP was not reached at all. */
         static Attempt unreachable(String message) {
-            return new Attempt(Kind.RETRY, null, message, null, true);
+            return new Attempt(Kind.RETRY, null, message, null, true, false);
         }
 
         static Attempt fatal(String message) {
-            return new Attempt(Kind.FATAL, null, message, null, false);
+            return new Attempt(Kind.FATAL, null, message, null, false, false);
+        }
+
+        /** The same failure, read as dbGaP being too busy (see {@link RequestPacer}). */
+        Attempt asOverload() {
+            return new Attempt(kind, summary, message, retryAfter, unreachable, true);
         }
     }
 }

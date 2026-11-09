@@ -43,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -53,16 +54,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * PERMANENT QA. For every ready study in the managed inputs, counts the distinct participants per
- * consent group in the participant DB and compares them with dbGaP's subject counts for that study
- * version, read from the SSTR API ({@code {dbgap-base-url}/{phs}.{v}/summary}). When given this
- * run's load counts ({@code --load-counts}), it also checks that the DB holds what the loads
- * reported. The DB is authoritative: a load report that disagrees with it is a discrepancy too.
+ * PERMANENT QA, run standalone (not part of either pipeline). For each study to check -- every
+ * ready study in the managed inputs, or the study versions listed in {@code --studies} -- counts
+ * the distinct participants per consent group in the participant DB and compares them with dbGaP's
+ * subject counts for that study version, read from the SSTR API
+ * ({@code {dbgap-base-url}/{phs}.{v}/summary}, one request per study). When given a run's load
+ * counts ({@code --load-counts}), it also checks that the DB holds what the loads reported. The DB
+ * is authoritative: a load report that disagrees with it is a discrepancy too.
  *
- * <p>Runs last in both pipelines (/Jenkinsfile and Jenkinsfile.migration), read-only. Outcomes:
+ * <p>dbGaP's API is slow (~13 s a call) and answers HTTP 502 when busy, so by default the job asks
+ * it one study at a time, at least {@code --dbgap-request-spacing-seconds} apart (see
+ * {@link RequestPacer}).
+ *
+ * <p>Read-only. Outcomes:
  * <ul>
  *   <li>every consent matches: exit 0;</li>
  *   <li>any discrepancy (see {@link Status}): one WARNING issue each, SUCCESS_WITH_WARNINGS (exit 0;
@@ -101,12 +110,16 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
     static final String COL_PARTICIPANTS_LOADED = "participants_loaded";
     static final String COL_SOURCE = "source";
 
-    static final int DEFAULT_CONCURRENCY = 4;
+    /** One at a time: dbGaP's gateway answers 502 when sent several at once. */
+    static final int DEFAULT_CONCURRENCY = 1;
     static final int DEFAULT_GIVE_UP_AFTER = 20;
     /** After a study fails because dbGaP could not be connected to, no new lookup starts for this long. */
     static final int DEFAULT_UNREACHABLE_PAUSE_SECONDS = 120;
-    /** 90 minutes: plus the in-flight lookups' retries (~6 min), well inside the runner's 14400 s monitor timeout. */
-    static final int DEFAULT_DEADLINE_SECONDS = 5400;
+    /**
+     * 3.5 hours: ~600 studies one at a time at ~13 s a call plus spacing take ~2.5 h when dbGaP is
+     * healthy. Plus the in-flight lookup's retries, inside the runner's 18000 s monitor timeout.
+     */
+    static final int DEFAULT_DEADLINE_SECONDS = 12600;
     static final int MAX_CONCURRENCY = 16;
 
     private final ManagedInputsService managedInputsService;
@@ -148,18 +161,24 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         return JobExpectations.of(
                 List.of(
                         ParamSpec.optional("load-counts",
-                                "This run's participants loaded per consent group: a CSV with columns "
+                                "A run's participants loaded per consent group: a CSV with columns "
                                         + "study_id,consent_code,participants_loaded[,source] (local path or s3:// URI; "
                                         + "participants_migration_consent_counts.csv and migration_consent_counts.csv "
                                         + "qualify; other columns are ignored). Studies it does not list, and groups with "
                                         + "a blank participants_loaded (not loaded this run), are compared DB vs dbGaP "
                                         + "only. Blank skips the load-report check.",
-                                "s3://bucket/etl-runner/reports/permanent-pipeline/<tag>/qa_load_counts.csv"),
+                                "s3://bucket/etl-runner/reports/migration-pipeline/<tag>/migration-report/migration_consent_counts.csv"),
+                        ParamSpec.optional("studies",
+                                "The study versions to check, instead of the managed inputs' ready studies: "
+                                        + "comma-, semicolon- or space-separated phsNNNNNN.vN (a .pN suffix is ignored). "
+                                        + "When given, the managed inputs are not read and --study-filter must be blank",
+                                "phs000956.v6,phs001412.v4"),
                         ParamSpec.optional("study-filter",
-                                "Comma-separated study ids to check; blank checks every ready study", "phs000200,phs001412"),
+                                "With the managed inputs: comma-separated study ids to check; blank checks every "
+                                        + "ready study", "phs000200,phs001412"),
                         ParamSpec.optional("concurrency",
                                 "Studies looked up in dbGaP at once (1-" + MAX_CONCURRENCY + "; default "
-                                        + DEFAULT_CONCURRENCY + ")", "4"),
+                                        + DEFAULT_CONCURRENCY + "; dbGaP answers 502 when busy)", "1"),
                         ParamSpec.optional("dbgap-base-url",
                                 "dbGaP SSTR study endpoint (default " + d.baseUrl() + ")", d.baseUrl()),
                         ParamSpec.optional("dbgap-max-attempts",
@@ -175,9 +194,13 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                                 "Per-request timeout (1-600; default " + d.requestTimeout().toSeconds() + ")", "60"),
                         ParamSpec.optional("dbgap-give-up-after",
                                 "Stop asking dbGaP once this many studies in a row got no usable answer "
-                                        + "(1-1000; default " + DEFAULT_GIVE_UP_AFTER + "): an outage then ends the lookups "
-                                        + "in about half an hour (4 at a time), the rest UNVERIFIED, instead of retrying "
-                                        + "every study", "20"),
+                                        + "(1-1000; default " + DEFAULT_GIVE_UP_AFTER + "): an outage then ends the lookups, "
+                                        + "the rest UNVERIFIED, instead of retrying every study", "20"),
+                        ParamSpec.optional("dbgap-request-spacing-seconds",
+                                "Least gap between dbGaP requests, from the previous one's start and end (0-600; "
+                                        + "default " + d.requestSpacing().toSeconds() + "; 0: none). Doubles, up to "
+                                        + RequestPacer.MAX_SPACING.toSeconds() + " s, while dbGaP answers overloaded "
+                                        + "(429, 502, 503, 504, a timeout) and narrows back as it answers", "2"),
                         ParamSpec.optional("dbgap-unreachable-pause-seconds",
                                 "After a study fails because dbGaP could not be connected to (connection error or "
                                         + "connect timeout, after its retries), wait this long before starting the next "
@@ -186,7 +209,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                         ParamSpec.optional("dbgap-deadline-seconds",
                                 "No dbGaP lookup starts after this many seconds of lookups (1-86400; default "
                                         + DEFAULT_DEADLINE_SECONDS + "), so the run ends, with its report, inside the "
-                                        + "runner's monitor timeout; studies not looked up by then are UNVERIFIED", "5400")),
+                                        + "runner's monitor timeout; studies not looked up by then are UNVERIFIED", "12600")),
                 List.of(COUNTS_FILE + " and " + DISCREPANCIES_FILE + " in the reports directory; a WARNING issue "
                         + "per discrepancy or study dbGaP could not answer for; exit 4 when dbGaP answered for no study"));
     }
@@ -200,6 +223,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         intParam(ctx, report, "dbgap-timeout-seconds", 1, 600);
         intParam(ctx, report, "dbgap-give-up-after", 1, 1000);
         intParam(ctx, report, "dbgap-unreachable-pause-seconds", 0, 3600);
+        intParam(ctx, report, "dbgap-request-spacing-seconds", 0, 600);
         intParam(ctx, report, "dbgap-deadline-seconds", 1, 86400);
         ctx.get("dbgap-base-url").ifPresent(url -> {
             if (!isHttpUrl(url.trim())) {
@@ -222,6 +246,17 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
             }
         });
 
+        String listed = Strings.trimToNull(ctx.get("studies", ""));
+        if (listed != null) {
+            if (!studyFilter(ctx).isEmpty()) {
+                report.error("STUDIES_WITH_FILTER", "--study-filter applies to the managed inputs; with --studies, "
+                        + "list only the study versions to check", "--study-filter");
+            }
+            if (parseStudies(listed, report).isEmpty() && !report.hasErrors()) {
+                report.warning("NO_STUDIES_TO_CHECK", "--studies lists no study version; nothing was checked");
+            }
+            return;
+        }
         List<ManagedInputRow> rows = managedInputsService.read();
         Set<String> filter = studyFilter(ctx);
         List<ManagedInputRow> selected = select(rows, filter);
@@ -241,17 +276,17 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
     @Override
     protected Output execute(JobContext ctx) {
-        List<ManagedInputRow> studies = select(managedInputsService.read(), studyFilter(ctx));
-        List<String> studyIds = studies.stream().map(ManagedInputRow::studyId).toList();
+        List<Target> studies = targets(ctx);
+        List<String> studyIds = studies.stream().map(Target::studyId).toList();
         Map<String, Map<String, DbConsent>> db = dbCounts(studyIds);
         String loadCountsUri = Strings.trimToNull(ctx.get("load-counts", ""));
         LoadCounts load = loadCountsUri == null ? LoadCounts.NONE : readLoadCounts(loadCountsUri);
 
         List<StudyInput> inputs = new ArrayList<>();
-        for (ManagedInputRow row : studies) {
-            String sid = row.studyId();
-            inputs.add(new StudyInput(sid, row.abv(), ConsentCountComparison.normalizeVersion(row.version()),
-                    row.version(), db.getOrDefault(sid, Map.of()), load.counts().get(sid), load.sources().get(sid)));
+        for (Target t : studies) {
+            String sid = t.studyId();
+            inputs.add(new StudyInput(sid, t.abv(), ConsentCountComparison.normalizeVersion(t.version()),
+                    t.version(), db.getOrDefault(sid, Map.of()), load.counts().get(sid), load.sources().get(sid)));
         }
         Map<String, DbgapLookup> lookups = lookUp(inputs, clientConfig(ctx), intValue(ctx, "concurrency", DEFAULT_CONCURRENCY),
                 intValue(ctx, "dbgap-give-up-after", DEFAULT_GIVE_UP_AFTER),
@@ -296,6 +331,53 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
     }
 
     /* ---- Study selection and inputs ---- */
+
+    /** A study to check: its id, abbreviation (null when listed in --studies) and raw version. */
+    record Target(String studyId, String abv, String version) {
+    }
+
+    /** phsNNNNNN.vN, optionally .pN (ignored: dbGaP answers the same for either). */
+    private static final Pattern STUDY_VERSION =
+            Pattern.compile("(phs\\d+)\\.(v\\d+)(?:\\.p\\d+)?", Pattern.CASE_INSENSITIVE);
+
+    /** The studies to check: those listed in --studies, else the managed inputs' ready studies. */
+    private List<Target> targets(JobContext ctx) {
+        String listed = Strings.trimToNull(ctx.get("studies", ""));
+        if (listed != null) {
+            return parseStudies(listed, null);
+        }
+        return select(managedInputsService.read(), studyFilter(ctx)).stream()
+                .map(r -> new Target(r.studyId(), r.abv(), r.version())).toList();
+    }
+
+    /**
+     * The study versions in {@code raw}, each once, in order. A malformed entry, or a study listed
+     * with two versions (the DB holds one set of participants per study), is an error in
+     * {@code report} when given, and is left out.
+     */
+    static List<Target> parseStudies(String raw, ValidationReport report) {
+        Map<String, Target> byId = new LinkedHashMap<>();
+        for (String token : raw.trim().split("[\\s,;]+")) {
+            if (token.isEmpty()) {
+                continue;
+            }
+            Matcher m = STUDY_VERSION.matcher(token);
+            if (!m.matches()) {
+                if (report != null) {
+                    report.error("BAD_STUDY", "--studies entry '" + token + "' is not a study version like "
+                            + "phs000956.v6", "--studies");
+                }
+                continue;
+            }
+            Target t = new Target(m.group(1).toLowerCase(Locale.ROOT), null, m.group(2).toLowerCase(Locale.ROOT));
+            Target seen = byId.putIfAbsent(t.studyId(), t);
+            if (seen != null && !seen.version().equals(t.version()) && report != null) {
+                report.error("STUDY_LISTED_TWICE", "--studies lists " + t.studyId() + " as both " + seen.version()
+                        + " and " + t.version() + "; list one version", "--studies");
+            }
+        }
+        return List.copyOf(byId.values());
+    }
 
     /** Ready studies (each once), restricted to {@code filter} when it is not empty. */
     private static List<ManagedInputRow> select(List<ManagedInputRow> rows, Set<String> filter) {
@@ -396,7 +478,8 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                 intValue(ctx, "dbgap-max-attempts", d.maxAttempts()),
                 Duration.ofSeconds(intValue(ctx, "dbgap-initial-backoff-seconds", (int) d.initialBackoff().toSeconds())),
                 Duration.ofSeconds(intValue(ctx, "dbgap-max-backoff-seconds", (int) d.maxBackoff().toSeconds())),
-                Duration.ofSeconds(intValue(ctx, "dbgap-timeout-seconds", (int) d.requestTimeout().toSeconds())));
+                Duration.ofSeconds(intValue(ctx, "dbgap-timeout-seconds", (int) d.requestTimeout().toSeconds())),
+                Duration.ofSeconds(intValue(ctx, "dbgap-request-spacing-seconds", (int) d.requestSpacing().toSeconds())));
     }
 
     /**
@@ -683,7 +766,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
     /**
      * Result of {@link #execute}.
      *
-     * @param results               one per checked study, in managed-inputs order
+     * @param results               one per checked study, in input order
      * @param loadCountsUri         the --load-counts given, or null
      * @param studiesWithLoadCounts studies the load counts list (checked or not)
      */

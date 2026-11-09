@@ -481,71 +481,6 @@ def failureDetail(downstream) {
 }
 
 // -----------------------------------------------------------------------------
-// QA consent counts
-// -----------------------------------------------------------------------------
-
-// The last stage: every ready study's participants per consent group in the participant DB, and this
-// run's SSTR load reports (qaLoadCounts), compared with dbGaP's counts for its study version.
-// Discrepancies, and studies dbGaP could not answer for after the retries, make the child (and this
-// build) UNSTABLE; dbGaP answering for no study at all fails it (exit 4). Its reports land in
-// downstream-artifacts/qa-consent-counts/ either way, for the end-of-run report.
-def runQaConsentCounts(String job) {
-    // Every stage that writes the participant DB is done: see backupParticipantDb.
-    env.QA_STAGE_REACHED = 'true'
-    // Every child parameter is passed: one left out gets the default the child registered on its
-    // previous build. One request per study, up to 3 in all (2 retries, 60 s then 120 s apart,
-    // Retry-After honoured), 60 s per request; 4 studies at once; no more lookups after 20 studies
-    // fail in a row or after 90 minutes; new lookups pause 2 minutes after dbGaP could not be
-    // connected to. Unanswered studies are UNVERIFIED warnings (UNSTABLE); only
-    // dbGaP answering for no study at all is exit 4.
-    runDownstream(job, [
-        string(name: 'MANAGED_INPUTS', value: laterStageManagedInputs()),
-        string(name: 'LOAD_COUNTS', value: qaLoadCounts()),
-        string(name: 'STUDY_FILTER', value: ''),
-        string(name: 'CONCURRENCY', value: '4'),
-        string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
-        string(name: 'DBGAP_MAX_ATTEMPTS', value: '3'),
-        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '60'),
-        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
-        string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
-        string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
-        string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', value: '120'),
-        string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
-        string(name: 'INSTANCE_TYPE', value: 't3.medium'),
-        string(name: 'JOB_TIMEOUT_SECONDS', value: '14400'),
-        string(name: 'RUN_ID', value: "${env.BUILD_TAG}-qa-consent-counts"),
-        string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
-        string(name: 'ENV', value: params.ENV),
-        booleanParam(name: 'SKIP_TESTS', value: true),
-    ], 'downstream-artifacts/qa-consent-counts',
-                  ': no consent count was verified against dbGaP. downstream-artifacts/qa-consent-counts/ ' +
-                  'has what was compared; a dbGaP outage (exit 4) is retryable.')
-}
-
-// This run's participants loaded per consent group, from the SSTR load reports under
-// downstream-artifacts/sstr/ (etl-runners/qa-consent-counts/build-load-counts.py), uploaded beside
-// this run's report in the DATA_ROOT bucket for the runner to read. A study this run did not load
-// is compared DB vs dbGaP only. '' (no load-report check) when the file cannot be built or uploaded:
-// the DB-vs-dbGaP check is still worth running.
-def qaLoadCounts() {
-    def local = 'downstream-artifacts/qa-consent-counts/qa_load_counts.csv'
-    def bucket = params.DATA_ROOT.trim().substring('s3://'.length()).split('/')[0]
-    def dest = "s3://${bucket}/etl-runner/reports/permanent-pipeline/${runTag()}/qa_load_counts.csv"
-    int rc
-    withEnv(["QA_LOCAL=${local}", "QA_DEST=${dest}"]) {
-        rc = sh(returnStatus: true, script: '''
-            python3 etl-runners/qa-consent-counts/build-load-counts.py downstream-artifacts/sstr "$QA_LOCAL" &&
-              aws s3 cp "$QA_LOCAL" "$QA_DEST" --only-show-errors
-        ''')
-    }
-    if (rc != 0) {
-        echo "WARNING: could not build or upload this run's load counts (rc=${rc}); QA compares the DB with dbGaP only."
-        return ''
-    }
-    return dest
-}
-
-// -----------------------------------------------------------------------------
 // Parameters
 // -----------------------------------------------------------------------------
 
@@ -613,16 +548,13 @@ def startParticipantDb() {
 // Dumps the participant DB to S3 at the end of the run, if this build's start succeeded. The
 // database stays up. A SUCCESS or UNSTABLE build overwrites participant_db.tar, the latest clean
 // backup; a failed or aborted one writes participant_db_not_promoted.tar instead and marks the live
-// database as holding a failed run (the next start acts on IF_LAST_RUN_FAILED) -- unless it got as far
-// as QA consent counts, which writes nothing. A failed backup fails the build loudly: this run's
-// writes then exist only in the live database.
+// database as holding a failed run (the next start acts on IF_LAST_RUN_FAILED). A failed backup
+// fails the build loudly: this run's writes then exist only in the live database.
 def backupParticipantDb(String backupJob, String envName) {
     if (env.DB_STARTED != 'true') {
         return
     }
-    // QA consent counts runs last and only reads the database: reaching it means every stage that
-    // writes the database succeeded, so a QA failure (dbGaP down) must not cost this run's writes.
-    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE'] || env.QA_STAGE_REACHED == 'true'
+    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']
     echo "Backing up the participant database (promote: ${promote})"
     def downstream = build(
         job: backupJob,

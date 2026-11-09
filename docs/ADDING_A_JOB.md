@@ -76,7 +76,7 @@ A thrown exception normally leaves the report with just the error. A job that fa
 has already established something worth reporting attaches it:
 `throw new InfrastructureException(msg).withPartialResult(metrics, outputValidation)`, and
 `JobExecutor` keeps those metrics and issues in the failed run's report (see `QaConsentCountsJob`,
-which still reports every study it checked when dbGaP stops answering).
+which still reports every study it checked when dbGaP answers for none of them).
 
 ## 4. Reuse the Building Blocks
 

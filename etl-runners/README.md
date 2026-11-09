@@ -39,7 +39,7 @@ etl-runners/
 ├── create-vcf-indexes/                 PERMANENT (JobType.PERMANENT)
 ├── merge-allconcepts/                  PERMANENT (JobType.PERMANENT), no DB
 ├── generate-allconcepts-manifest/      PERMANENT (JobType.PERMANENT), no DB, after the merge in both orchestrators
-├── qa-consent-counts/                  PERMANENT (JobType.PERMANENT), reads the DB and calls dbGaP, last stage of both orchestrators
+├── qa-consent-counts/                  PERMANENT (JobType.PERMANENT), reads the DB and calls dbGaP, standalone (in neither orchestrator)
 ├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT), per study from /Jenkinsfile
 └── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone, no DB
 ```
@@ -169,7 +169,7 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `all-concepts-data-generator`       | `TF_VAR_study_id`, `TF_VAR_data_dir`, `TF_VAR_mapping_uri`, `TF_VAR_output_uri`, `TF_VAR_skip_analysis` |
 | `generate-global-all-concepts`      | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_allow_empty`     |
 | `create-vcf-indexes`                | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_include_processed` |
-| `qa-consent-counts`                 | `TF_VAR_managed_inputs_uri`, `TF_VAR_load_counts_uri`, `TF_VAR_study_filter`, `TF_VAR_concurrency`, `TF_VAR_dbgap_base_url`, `TF_VAR_dbgap_max_attempts`, `TF_VAR_dbgap_initial_backoff_seconds`, `TF_VAR_dbgap_max_backoff_seconds`, `TF_VAR_dbgap_timeout_seconds` (blank = the job's default) |
+| `qa-consent-counts`                 | `TF_VAR_managed_inputs_uri` or `TF_VAR_studies` (one of the two), `TF_VAR_load_counts_uri`, `TF_VAR_study_filter`, `TF_VAR_concurrency`, `TF_VAR_dbgap_base_url`, `TF_VAR_dbgap_max_attempts`, `TF_VAR_dbgap_initial_backoff_seconds`, `TF_VAR_dbgap_max_backoff_seconds`, `TF_VAR_dbgap_timeout_seconds`, `TF_VAR_dbgap_give_up_after`, `TF_VAR_dbgap_unreachable_pause_seconds`, `TF_VAR_dbgap_request_spacing_seconds`, `TF_VAR_dbgap_deadline_seconds` (blank = the job's default) |
 | `generate-identity-consent-mapping` | `TF_VAR_base_uri`, `TF_VAR_dataset_prefix`, `TF_VAR_input_role_arn`, `TF_VAR_output_uri`, `TF_VAR_per_study` |
 
 Every runner also takes `TF_VAR_instance_type`, from its Jenkins `INSTANCE_TYPE` parameter.

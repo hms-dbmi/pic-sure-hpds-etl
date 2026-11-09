@@ -58,13 +58,13 @@ the Jenkins host; see [`docs/PARTICIPANT_DB.md`](docs/PARTICIPANT_DB.md).
 
 Each orchestrator stage triggers that job's own pipeline under [`etl-runners/`](etl-runners/),
 which provisions a self-terminating EC2 runner with Terraform, runs the JAR in a container,
-publishes the exit code and JSON report to S3, and tears itself down. Both pipelines finish with
-a QA stage (`qa-consent-counts`) that compares every ready study's participants per consent group
-in the participant database, and this run's loads, with dbGaP's counts for that study version
-(the dbGaP SSTR API; its runner needs HTTPS egress to `www.ncbi.nlm.nih.gov`), and end every run
-with a consolidated report (`downstream-artifacts/pipeline-report/` or `migration-report/`, also in
-S3) that opens with the QA's discrepancies; see
-[docs/PERMANENT_PIPELINE.md](docs/PERMANENT_PIPELINE.md#stage-11-qa-consent-counts).
+publishes the exit code and JSON report to S3, and tears itself down. Both pipelines end every
+run with a consolidated report (`downstream-artifacts/pipeline-report/` or `migration-report/`,
+also in S3). A standalone QA job (`qa-consent-counts`), run by hand with a managed inputs file or a
+list of study versions, compares the participant database's participants per consent group (and,
+optionally, a run's load counts) with dbGaP's counts for that study version (the dbGaP SSTR API;
+its runner needs HTTPS egress to `www.ncbi.nlm.nih.gov`); see
+[docs/JENKINS.md](docs/JENKINS.md#qa-consent-counts-standalone).
 
 The pattern follows [`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — the same
 `terraform-modules/etl-runner` shape and `s3://<stack>/etl-runner/…` layout — with Java in place
@@ -161,8 +161,7 @@ etl-runners/participant-db/       the long-lived Postgres container on the Jenki
 etl-runners/common/orchestrator.groovy  the permanent orchestrator's stage logic (loaded)
 etl-runners/pipeline-report/      the permanent pipeline's end-of-run report
 etl-runners/migration-report/     the migration pipeline's end-of-run report (TEMPORARY)
-etl-runners/qa-consent-counts/    the consent count QA runner, its load-counts builder, and the
-                                  reports' shared QA section (qa_report.py)
+etl-runners/qa-consent-counts/    the standalone consent count QA runner
 etl-runners/environments/         per-environment tfvars (development.tfvars)
 docs/JENKINS.md                   architecture, validation, AWS setup, runbook
 docs/PARTICIPANT_DB.md            participant database lifecycle, dumps, seeding

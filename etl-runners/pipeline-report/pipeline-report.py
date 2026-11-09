@@ -22,8 +22,6 @@ Inputs, under <artifacts-dir> (each optional):
   merge-allconcepts/**/merge-allconcepts-*-folders.json every folder's outcome, written by a failed merge
                                                         (whose report carries no metrics)
   allconcepts-manifest/**/generate-allconcepts-manifest-*.json
-  qa-consent-counts/**/qa-consent-counts-*.json, and beside it qa_consent_counts.csv and
-        qa_consent_count_discrepancies.csv (etl-runners/qa-consent-counts/qa_report.py)
 
 Writes, under <out-dir>:
   pipeline_study_outcomes.csv   one row per study
@@ -33,10 +31,7 @@ Writes, under <out-dir>:
   pipeline-report.json          the same, plus the stage summary, every review item, and the VCF
                                 consent groups held back for bad data with the previously published
                                 files deleted for them (heldBackVcfGroups) (reportVersion 1)
-  pipeline-report.md            for people: the consent count QA's discrepancies first, then the
-                                summary, stages, studies needing follow-up, all studies
-  qa_consent_counts.csv, qa_consent_count_discrepancies.csv
-                                copies of the QA's own CSVs, when it ran (consentCountQa in the JSON)
+  pipeline-report.md            for people: the summary, stages, studies needing follow-up, all studies
 
 Study status (most severe wins):
   FAILED                  a stage failed for it (the child's reason is in `reasons`)
@@ -64,11 +59,6 @@ import re
 import sys
 from collections import OrderedDict
 from datetime import datetime, timezone
-
-# The consent count QA section, shared with the migration report.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "qa-consent-counts"))
-sys.dont_write_bytecode = True  # no __pycache__ left in the Jenkins workspace
-import qa_report  # noqa: E402
 
 REPORT_VERSION = 1
 STATUS_ORDER = ["FAILED", "EXCLUDED", "NOT_REACHED", "COMPLETE_WITH_WARNINGS", "COMPLETE", "ALREADY_PROCESSED"]
@@ -270,15 +260,6 @@ def main(argv):
             if sev in ("ERROR", "WARNING") and sid in studies and studies[sid]["plan"] != "excluded":
                 review(sid, name, "FAILED" if sev == "ERROR" else "WARNING", i.get("code"), i.get("message"))
 
-    # The consent count QA: its own section, not review items -- a discrepancy is about the participant
-    # DB as a whole, and an unverified study (dbGaP down) says nothing about that study's load.
-    qa = qa_report.load(art, rel, load_json, preflight)
-    stages.append(OrderedDict(stage="qa-consent-counts", ran=qa["ran"], result=qa["status"], exitCode=qa["exitCode"],
-                              errors=qa["errors"], warnings=qa["warnings"],
-                              note=qa_report.summary_line(qa).split(": ", 1)[1] if qa["ran"] else
-                              "no report: the stage did not run (or its artifacts were not copied)",
-                              report=qa["report"]))
-
     # A failed merge names only its first failing folder; its -folders.json has every folder's outcome.
     # Only the one written by the same run as the merge report, never an older build's leftover.
     merge_rep = run_reports.get("merge-allconcepts")
@@ -347,16 +328,13 @@ def main(argv):
         studiesByStatus=OrderedDict((k, len(v)) for k, v in by_status.items()),
         excludedStudies=by_status["EXCLUDED"],
         reviewItems=len(review_rows),
-        heldBackVcfGroups=len(held_back),
-        consentCountQa=qa["outcome"],
-        consentCountDiscrepancies=len(qa["discrepancies"]))
+        heldBackVcfGroups=len(held_back))
     report = OrderedDict(
         reportVersion=REPORT_VERSION, runId=run_id, pipelineResult=pipeline_result, preflightOnly=preflight,
         generatedAt=os.environ.get("PIPELINE_REPORT_NOW")
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         studyPlanFound=plan is not None, summary=summary, stages=stages, studyIdsByStatus=by_status,
-        studies=list(studies.values()), review=review_rows, heldBackVcfGroups=held_back,
-        consentCountQa=qa_report.public(qa, rel))
+        studies=list(studies.values()), review=review_rows, heldBackVcfGroups=held_back)
 
     def write(name, text):
         path = os.path.join(out, name)
@@ -388,14 +366,12 @@ def main(argv):
           "; ".join(f"{r['stage']}: {r['code']}: {r['detail']}" for r in s["review"])]
          for sid, s in studies.items()]))
     write("pipeline-report.md", markdown(report, studies))
-    qa_report.copy_csvs(qa, out)
 
     print("================ Pipeline report ================")
     print(f"  run {run_id}{' (pre-flight only)' if preflight else ''}: {summary['studies']} studies -- "
           + (", ".join(f"{n} {k}" for k, n in summary["studiesByStatus"].items() if n) or "none"))
     for st in stages:
         print(f"  {st['stage']}: " + (str(st.get("note") or st.get("exitCode") or "ran") if st["ran"] else "did not run"))
-    print(f"  {qa_report.summary_line(qa)}")
     if held_back:
         print(f"  VCF consent groups held back: {', '.join(g['consentGroup'] or '?' for g in held_back)} "
               f"({sum(len(g['deletedFiles']) for g in held_back)} previously published file(s) deleted)")
@@ -417,7 +393,6 @@ def markdown(report, studies):
              + (" (pre-flight only: inputs were checked, nothing was written)" if report["preflightOnly"] else "")
              + f". Generated {report['generatedAt']}. Machine-readable: `pipeline-report.json`, "
              "`pipeline_study_outcomes.csv`.", ""]
-    lines += qa_report.markdown(report["consentCountQa"], cell)
     if not report["studyPlanFound"]:
         lines += ["The build stopped before it resolved its studies (no `pipeline-studies.tsv`).", ""]
     meaning = {"FAILED": "a stage failed for it", "EXCLUDED": "inputs missing; left out of this run",

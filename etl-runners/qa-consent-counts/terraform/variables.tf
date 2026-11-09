@@ -100,7 +100,13 @@ variable "image_tar" {
 variable "managed_inputs_uri" {
   type        = string
   default     = ""
-  description = "--managed-inputs: CSV whose ready studies are checked (local path or s3:// URI). Blank uses the job's configured etl.managed-inputs.uri."
+  description = "--managed-inputs: CSV whose ready studies are checked (s3:// URI). Give this or studies, not both."
+}
+
+variable "studies" {
+  type        = string
+  default     = ""
+  description = "--studies: comma-separated study versions to check instead of the managed inputs, e.g. phs000956.v6,phs001412.v4."
 }
 
 variable "load_counts_uri" {
@@ -112,13 +118,13 @@ variable "load_counts_uri" {
 variable "study_filter" {
   type        = string
   default     = ""
-  description = "--study-filter: comma-separated study ids to check. Blank checks every ready study."
+  description = "--study-filter: with managed_inputs_uri, comma-separated study ids to check. Blank checks every ready study."
 }
 
 variable "concurrency" {
   type        = string
   default     = ""
-  description = "--concurrency: studies looked up in dbGaP at once (1-16). Blank: the job's default, 4."
+  description = "--concurrency: studies looked up in dbGaP at once (1-16). Blank: the job's default, 1."
 }
 
 variable "dbgap_base_url" {
@@ -163,10 +169,16 @@ variable "dbgap_unreachable_pause_seconds" {
   description = "--dbgap-unreachable-pause-seconds: after a study fails because dbGaP could not be connected to, no new lookup starts for this long (0-3600). Blank: 120."
 }
 
+variable "dbgap_request_spacing_seconds" {
+  type        = string
+  default     = ""
+  description = "--dbgap-request-spacing-seconds: least gap between dbGaP requests, widened while dbGaP answers overloaded (0-600). Blank: 2."
+}
+
 variable "dbgap_deadline_seconds" {
   type        = string
   default     = ""
-  description = "--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Blank: 5400."
+  description = "--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Blank: 12600."
 }
 
 variable "java_opts" {

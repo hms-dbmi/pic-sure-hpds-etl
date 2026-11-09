@@ -19,9 +19,7 @@
       "phs000004"
     ],
     "reviewItems": 15,
-    "heldBackVcfGroups": 0,
-    "consentCountQa": "NOT_RUN",
-    "consentCountDiscrepancies": 0
+    "heldBackVcfGroups": 0
   },
   "stages": [
     {
@@ -79,16 +77,6 @@
       "errors": null,
       "warnings": null,
       "note": "no report: the stage did not run (or its artifacts were not copied)"
-    },
-    {
-      "stage": "qa-consent-counts",
-      "ran": false,
-      "result": null,
-      "exitCode": null,
-      "errors": null,
-      "warnings": null,
-      "note": "no report: the stage did not run (or its artifacts were not copied)",
-      "report": null
     }
   ],
   "studyIdsByStatus": {
@@ -497,26 +485,5 @@
       "detail": "generate-allconcepts-manifest did not run (or its report was not copied), so this study's outputs were not published"
     }
   ],
-  "heldBackVcfGroups": [],
-  "consentCountQa": {
-    "ran": false,
-    "outcome": "NOT_RUN",
-    "report": null,
-    "status": null,
-    "exitCode": null,
-    "errorMessage": null,
-    "errors": null,
-    "warnings": null,
-    "loadCounts": null,
-    "studiesChecked": null,
-    "studiesVerified": null,
-    "consentsCompared": null,
-    "consentsMatching": null,
-    "discrepancyCount": null,
-    "discrepanciesByType": {},
-    "studiesWithDiscrepancies": [],
-    "unverifiedStudies": [],
-    "discrepancies": [],
-    "csvs": []
-  }
+  "heldBackVcfGroups": []
 }

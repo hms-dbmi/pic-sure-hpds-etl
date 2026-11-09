@@ -38,6 +38,7 @@ module "etl_runner" {
   job_params = { for k, v in {
     managed_inputs                  = var.managed_inputs_uri
     load_counts                     = var.load_counts_uri
+    studies                         = var.studies
     study_filter                    = var.study_filter
     concurrency                     = var.concurrency
     dbgap_base_url                  = var.dbgap_base_url
@@ -47,6 +48,7 @@ module "etl_runner" {
     dbgap_timeout_seconds           = var.dbgap_timeout_seconds
     dbgap_give_up_after             = var.dbgap_give_up_after
     dbgap_unreachable_pause_seconds = var.dbgap_unreachable_pause_seconds
+    dbgap_request_spacing_seconds   = var.dbgap_request_spacing_seconds
     dbgap_deadline_seconds          = var.dbgap_deadline_seconds
   } : k => v if v != "" }
 

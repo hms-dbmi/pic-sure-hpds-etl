@@ -17,8 +17,6 @@ Inputs, under <artifacts-dir> (each optional):
   vcf-indexes/**/create-vcf-indexes-*.json
   merge-allconcepts/**/merge-allconcepts-*.json
   allconcepts-manifest/**/generate-allconcepts-manifest-*.json and allConcepts_manifest.csv
-  qa-consent-counts/**/qa-consent-counts-*.json, and beside it qa_consent_counts.csv and
-        qa_consent_count_discrepancies.csv (etl-runners/qa-consent-counts/qa_report.py)
 
 Writes, under <out-dir> (machine-readable first; the .md is the same content for people):
   migration_consent_counts.csv   one row per (study, consent code): the participant counts to
@@ -36,10 +34,7 @@ Writes, under <out-dir> (machine-readable first; the .md is the same content for
         study_id,abv,status,stage,category,code,detail,action
   migration-report.json          all of the above plus the stage summary, under one schema
                                  (reportVersion 1)
-  migration-report.md            for people: the consent count QA's discrepancies first, then the
-                                summary, the review list, then the counts
-  qa_consent_counts.csv, qa_consent_count_discrepancies.csv
-                                copies of the QA's own CSVs, when it ran (consentCountQa in the JSON)
+  migration-report.md            for people: summary, the review list, then the counts
 
 Study status (most severe wins):
   NOT_MIGRATED     its data kept it out (missing, malformed, or mismatched); fix the data, re-run
@@ -63,11 +58,6 @@ import re
 import sys
 from collections import OrderedDict
 from datetime import datetime, timezone
-
-# The consent count QA section, shared with the permanent pipeline's report.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "qa-consent-counts"))
-sys.dont_write_bytecode = True  # no __pycache__ left in the Jenkins workspace
-import qa_report  # noqa: E402
 
 REPORT_VERSION = 1
 STATUS_ORDER = ["NOT_MIGRATED", "RERUN_NEEDED", "NOT_REACHED", "MIGRATED_WITH_GAPS", "MIGRATED"]
@@ -184,10 +174,6 @@ def main(argv):
     stages = [stage_summary("participants-migration", p_report, p_path),
               stage_summary("split-allconcepts", s_report, s_path)]
     stages += [stage_summary(name, rep, path) for name, (path, rep) in later.items()]
-    # The consent count QA: its own section at the top, not review items -- a dbGaP outage says nothing
-    # about a study's migration, and a discrepancy is listed with its counts there.
-    qa = qa_report.load(art, lambda p: p, load_json)
-    stages.append(stage_summary("qa-consent-counts", load_json(qa["report"]) if qa["report"] else None, qa["report"]))
 
     # --- every ready study, with what each stage did ---------------------------------------
     studies = OrderedDict()
@@ -331,17 +317,14 @@ def main(argv):
         participantsSplit=split_total,
         reviewItems=len(review_rows),
         reviewItemsByCategory=OrderedDict(
-            (cat, sum(1 for r in review_rows if r["category"] == cat)) for cat in ACTIONS),
-        consentCountQa=qa["outcome"],
-        consentCountDiscrepancies=len(qa["discrepancies"]))
+            (cat, sum(1 for r in review_rows if r["category"] == cat)) for cat in ACTIONS))
     report = OrderedDict(
         reportVersion=REPORT_VERSION, runId=run_id, pipelineResult=pipeline_result,
         generatedAt=os.environ.get("MIGRATION_REPORT_NOW")
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         summary=summary, stages=stages, studyIdsByStatus=by_status,
         studies=[dict(s, consents=list(s["consents"].values())) for s in studies.values()],
-        consentCounts=consent_rows, review=review_rows,
-        consentCountQa=qa_report.public(qa, lambda p: p))
+        consentCounts=consent_rows, review=review_rows)
 
     def write(name, text):
         path = os.path.join(out, name)
@@ -379,7 +362,6 @@ def main(argv):
         [[r["studyId"], r["abv"], r["status"], r["stage"], r["category"], r["code"], r["detail"], r["action"]]
          for r in review_rows]))
     write("migration-report.md", markdown(report, studies))
-    qa_report.copy_csvs(qa, out)
 
     print("================ Migration report ================")
     print(f"  run {run_id}: {summary['readyStudies']} ready studies -- "
@@ -387,7 +369,6 @@ def main(argv):
     print(f"  {summary['consentGroups']} consent group(s); {loaded} participant(s) loaded, {split_total} split")
     for st in stages:
         print(f"  {st['stage']}: " + (f"{st['exitCode']}" if st["ran"] else "did not run"))
-    print(f"  {qa_report.summary_line(qa)}")
     for k in STATUS_ORDER[:3]:
         if by_status[k]:
             print(f"  {k}: {', '.join(by_status[k])}")
@@ -404,9 +385,8 @@ def markdown(report, studies):
     lines = [f"# Migration report: {report['runId']}", "",
              f"Pipeline result: **{report['pipelineResult'] or 'unknown'}**. Generated {report['generatedAt']}. "
              "Machine-readable: `migration-report.json`, `migration_consent_counts.csv`, "
-             "`migration_study_outcomes.csv`, `migration_review.csv`.", ""]
-    lines += qa_report.markdown(report["consentCountQa"], cell)
-    lines += ["| Study status | Studies |", "|---|---|"]
+             "`migration_study_outcomes.csv`, `migration_review.csv`.", "",
+             "| Study status | Studies |", "|---|---|"]
     meaning = {"NOT_MIGRATED": "data missing, malformed or mismatched -- needs data work",
                "RERUN_NEEDED": "a stage failed for a non-data reason -- re-run",
                "NOT_REACHED": "the pipeline stopped before handling it",

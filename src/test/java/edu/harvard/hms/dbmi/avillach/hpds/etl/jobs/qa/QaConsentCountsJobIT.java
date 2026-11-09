@@ -91,6 +91,7 @@ class QaConsentCountsJobIT extends AbstractIntegrationTest {
         p.put("dbgap-initial-backoff-seconds", "0");
         p.put("dbgap-max-attempts", "3");
         p.put("dbgap-timeout-seconds", "5");
+        p.put("dbgap-request-spacing-seconds", "0");
         for (int i = 0; i < extra.length; i += 2) {
             p.put(extra[i], extra[i + 1]);
         }

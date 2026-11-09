@@ -218,9 +218,10 @@ class QaConsentCountsJobTest {
         assertThat(configUsed.get()).isEqualTo(DbgapStudyClient.Config.defaults());
 
         run(job(), Map.of("dbgap-base-url", "http://stub.local/study/", "dbgap-max-attempts", "3",
-                "dbgap-initial-backoff-seconds", "1", "dbgap-max-backoff-seconds", "9", "dbgap-timeout-seconds", "7"));
+                "dbgap-initial-backoff-seconds", "1", "dbgap-max-backoff-seconds", "9", "dbgap-timeout-seconds", "7",
+                "dbgap-request-spacing-seconds", "5"));
         assertThat(configUsed.get()).isEqualTo(new DbgapStudyClient.Config("http://stub.local/study", 3,
-                Duration.ofSeconds(1), Duration.ofSeconds(9), Duration.ofSeconds(7)));
+                Duration.ofSeconds(1), Duration.ofSeconds(9), Duration.ofSeconds(7), Duration.ofSeconds(5)));
     }
 
     @Test
@@ -589,6 +590,47 @@ class QaConsentCountsJobTest {
                 "phs000001,v1,,abv,0,2,,,MISSING_IN_DBGAP,");
     }
 
+    /* ---- --studies instead of the managed inputs ---- */
+
+    @Test
+    void listed_studies_are_checked_without_reading_the_managed_inputs() throws IOException {
+        dbCounts("phs000956", "1", 5, "phs001412", "1", 7);
+        answers.put("phs000956.v6", found("phs000956", 6, 1, 5));
+        answers.put("phs001412.v4", found("phs001412", 4, 1, 7));
+
+        JobResult r = run(job(), Map.of("studies", " PHS000956.v6.p1, phs001412.v4;phs000956.v6 "));
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(asked).containsExactly("phs000956.v6", "phs001412.v4");
+        org.mockito.Mockito.verifyNoInteractions(managedInputs);
+        assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER,
+                "phs000956,v6,1,G1,5,5,,,MATCH,", "phs001412,v4,1,G1,7,7,,,MATCH,");
+    }
+
+    @Test
+    void listed_studies_are_separated_by_newlines_too() {
+        assertThat(QaConsentCountsJob.parseStudies("phs000001.v1\nphs000002.v2\r\n phs000003.v3", null))
+                .extracting(QaConsentCountsJob.Target::studyId)
+                .containsExactly("phs000001", "phs000002", "phs000003");
+    }
+
+    @Test
+    void malformed_or_conflicting_listed_studies_fail_input_validation() {
+        JobResult r = run(job(), Map.of("studies", "phs000001, phs000002.v2, phs000002.v3, v4"));
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(codes(r)).containsExactly("ERROR:BAD_STUDY", "ERROR:STUDY_LISTED_TWICE", "ERROR:BAD_STUDY");
+        assertThat(asked).isEmpty();
+    }
+
+    @Test
+    void listed_studies_and_a_study_filter_are_not_both_allowed() {
+        JobResult r = run(job(), Map.of("studies", "phs000001.v1", "study-filter", "phs000001"));
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+        assertThat(codes(r)).containsExactly("ERROR:STUDIES_WITH_FILTER");
+    }
+
     /* ---- Bad input ---- */
 
     @Test
@@ -597,11 +639,11 @@ class QaConsentCountsJobTest {
 
         JobResult r = run(job(), Map.of("concurrency", "0", "dbgap-max-attempts", "x",
                 "dbgap-base-url", "ftp://nope", "dbgap-timeout-seconds", "601",
-                "dbgap-unreachable-pause-seconds", "3601"));
+                "dbgap-unreachable-pause-seconds", "3601", "dbgap-request-spacing-seconds", "-1"));
 
         assertThat(r.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(codes(r)).containsExactly("ERROR:BAD_PARAM", "ERROR:BAD_PARAM", "ERROR:BAD_PARAM",
-                "ERROR:BAD_PARAM", "ERROR:BAD_DBGAP_BASE_URL");
+                "ERROR:BAD_PARAM", "ERROR:BAD_PARAM", "ERROR:BAD_DBGAP_BASE_URL");
         assertThat(asked).isEmpty();
     }
 

@@ -2,10 +2,6 @@
 
 Pipeline result: **FAILURE**. Generated 2026-10-16T00:00:00Z. Machine-readable: `pipeline-report.json`, `pipeline_study_outcomes.csv`.
 
-## Consent count QA (dbGaP)
-
-**QA did not run**: the pipeline stopped before the QA consent counts stage (or its report was not copied), so no consent count was checked against dbGaP.
-
 | Study status | Studies |
 |---|---|
 | FAILED (a stage failed for it) | 1 |
@@ -26,7 +22,6 @@ Pipeline result: **FAILURE**. Generated 2026-10-16T00:00:00Z. Machine-readable: 
 | create-vcf-indexes | yes | SUCCESS | SUCCESS_WITH_WARNINGS | 0 | 1 |  |
 | merge-allconcepts | no |  |  |  |  | no report: the stage did not run (or its artifacts were not copied) |
 | generate-allconcepts-manifest | no |  |  |  |  | no report: the stage did not run (or its artifacts were not copied) |
-| qa-consent-counts | no |  |  |  |  | no report: the stage did not run (or its artifacts were not copied) |
 
 ## Studies needing follow-up
 

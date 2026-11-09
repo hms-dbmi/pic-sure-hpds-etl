@@ -19,7 +19,7 @@
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
 // SKIP_TESTS=true so the same commit's suites are not re-run per study. The runner jobs rebuild
 // nothing: 'Package runner image' builds the runner image once and passes it to every one of them
-// (SSTR load, global AllConcepts, VCF indexes, per-study allConcepts, merge, manifest and QA) as
+// (SSTR load, global AllConcepts, VCF indexes, per-study allConcepts, merge and manifest) as
 // PREBUILT_IMAGE_TAR.
 //
 // Per-study stages: SSTR load runs one study at a time, or STUDY_CONCURRENCY at once with
@@ -37,12 +37,8 @@
 //   STUDY_ID set      load exactly that study (the reload/manual entry path); INPUT overrides
 //                     the SSTR file discovered under DATA_ROOT. A missing input fails the build.
 //
-// Last stage: QA consent counts (etl-runners/qa-consent-counts/) checks every ready study's
-// participants per consent group against dbGaP; a discrepancy makes the build UNSTABLE.
-//
 // End of every run: downstream-artifacts/pipeline-report/ (etl-runners/pipeline-report/), archived
-// and uploaded to s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/. Its
-// first section is the consent count QA's discrepancies.
+// and uploaded to s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/.
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -120,9 +116,7 @@ pipeline {
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
         string(name: 'ALLCONCEPTS_MANIFEST_JOB', defaultValue: 'generate-allconcepts-manifest',
-               description: 'Jenkins job that writes the versioned allConcepts_manifest.csv at DATA_ROOT (before QA consent counts)')
-        string(name: 'QA_CONSENT_COUNTS_JOB', defaultValue: 'qa-consent-counts',
-               description: 'Jenkins job that checks every ready study\'s participants per consent group (participant DB and this run\'s loads) against dbGaP (last stage). Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov.')
+               description: 'Jenkins job that writes the versioned allConcepts_manifest.csv at DATA_ROOT')
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
@@ -182,7 +176,6 @@ pipeline {
                         // (stubbed docker/aws; seconds, no AWS or runtime needed).
                         sh 'make -C etl-runners/participant-db test'
                         sh 'make -C etl-runners/pipeline-report test'
-                        sh 'make -C etl-runners/qa-consent-counts test'
                     }
                     post {
                         always {
@@ -371,17 +364,6 @@ pipeline {
                             ], 'downstream-artifacts/allconcepts-manifest',
                                ': the manifest was NOT updated. Its report lists every missing or stale MERGED file.')
                         }
-                    }
-                }
-
-                stage('QA consent counts') {
-                    // Last: every ready study's participants per consent group (participant DB, and
-                    // this run's SSTR loads) against dbGaP's counts for its version. Read-only.
-                    // Discrepancies make the build UNSTABLE; dbGaP not answering after retries fails it.
-                    // The end-of-run report puts the discrepancies at its top.
-                    when { expression { !params.PREFLIGHT_ONLY } }
-                    steps {
-                        script { orch().runQaConsentCounts(params.QA_CONSENT_COUNTS_JOB) }
                     }
                 }
             }

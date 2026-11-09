@@ -1,10 +1,10 @@
 #!/bin/bash
 # Tests for the qa-consent-counts runner's scripts. No AWS, Jenkins or JVM needed.
 #
-#   1. build-load-counts.py turns the SSTR load reports into the --load-counts CSV: successful
-#      loads only, newest report per study, header even when empty.
-#   2. validate.sh exits 0 when every consent matches, 10 on discrepancies (and lists them), and 1
-#      when dbGaP could not answer (exit 4), the report is missing, or the CSVs disagree.
+#   1. validate.sh exits 0 when every consent matches, 10 on discrepancies or studies dbGaP did not
+#      answer for (and lists them), and 1 when dbGaP answered for none (exit 4), the report is
+#      missing, or the CSVs disagree.
+#   2. preflight.sh needs exactly one of MANAGED_INPUTS and STUDIES.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -15,41 +15,6 @@ FAILED=0
 
 pass() { echo "  [ok]   $*"; }
 fail() { echo "  [FAIL] $*"; FAILED=$((FAILED + 1)); }
-
-sstr_report() {   # <dir> <study> <run> <status> <exitCode> <countsJson>
-  local d="$1/$2/etl-runners/sstr-populate-rds-participants/reports"
-  mkdir -p "$d"
-  printf '{"jobName":"sstr-populate-rds-participants","runId":"%s","status":"%s","exitCode":"%s","metrics":{"countsByConsentGroup":%s}}\n' \
-    "$3" "$4" "$5" "$6" > "$d/sstr-populate-rds-participants-$3.json"
-  echo "$d/sstr-populate-rds-participants-$3.json"
-}
-
-echo "build-load-counts.py"
-S="$TMP/sstr"
-sstr_report "$S" phs000001 t-phs000001 SUCCESS SUCCESS '{"1":402,"2":3}' >/dev/null
-sstr_report "$S" phs000002 t-phs000002 FAILED DATA_ERROR '{"1":9}' >/dev/null
-old=$(sstr_report "$S" phs000003 t-phs000003 SUCCESS SUCCESS '{"1":1}')
-touch -t 202001010000 "$old"
-sstr_report "$S" phs000003 t-phs000003-r2 SUCCESS SUCCESS_WITH_WARNINGS '{"c1":7}' >/dev/null
-mkdir -p "$S/phs000004" "$S/not-a-study"
-if python3 "$RUNNER/build-load-counts.py" "$S" "$TMP/out/load.csv" >"$TMP/build.log" 2>&1; then
-  pass "written"
-else
-  fail "exited $? ($(cat "$TMP/build.log"))"
-fi
-expected='study_id,consent_code,participants_loaded,source
-phs000001,1,402,sstr
-phs000001,2,3,sstr
-phs000003,c1,7,sstr'
-[ "$(cat "$TMP/out/load.csv")" = "$expected" ] \
-  && pass "successful loads only, newest report per study" || fail "got: $(cat "$TMP/out/load.csv")"
-grep -q 'no load counts for 2 study/studies: phs000002 (DATA_ERROR); phs000004 (no readable report' "$TMP/build.log" \
-  && pass "names the studies it left out" || fail "log: $(cat "$TMP/build.log")"
-python3 "$RUNNER/build-load-counts.py" "$TMP/absent" "$TMP/empty.csv" >/dev/null 2>&1
-[ "$(cat "$TMP/empty.csv")" = "study_id,consent_code,participants_loaded,source" ] \
-  && pass "no SSTR reports: header only" || fail "empty: $(cat "$TMP/empty.csv" 2>&1)"
-python3 "$RUNNER/build-load-counts.py" >/dev/null 2>&1
-[ $? -eq 64 ] && pass "usage error exits 64" || fail "usage error did not exit 64"
 
 echo "validate.sh"
 HEADER="study_id,version,consent_code,consent_short_name,dbgap_subjects,db_participants,load_participants,load_source,status,note"
@@ -89,6 +54,23 @@ mkdir -p "$TMP/none"
 expect_rc "a missing report fails" 1 "$TMP/none"
 "$RUNNER/validate.sh" >/dev/null 2>&1
 [ $? -eq 64 ] && pass "usage error exits 64" || fail "usage error did not exit 64"
+
+echo "preflight.sh"
+preflight_rc() {   # <label> <want> <managed inputs> <studies>
+  # A closed local port: the dbGaP probe fails at once (a soft warning) and no network is used.
+  TF_VAR_managed_inputs_uri="$3" TF_VAR_studies="$4" TF_VAR_dbgap_base_url=http://127.0.0.1:9/study \
+    "$RUNNER/preflight.sh" >"$TMP/p.log" 2>&1
+  local rc=$?
+  [ "$rc" -eq "$2" ] && pass "$1 (exit $rc)" || { fail "$1: exit $rc, want $2"; cat "$TMP/p.log"; }
+}
+printf 'x\n' > "$TMP/managed.csv"
+preflight_rc "a managed inputs file is enough" 10 "$TMP/managed.csv" ""
+preflight_rc "a list of study versions is enough" 10 "" "phs000956.v6,PHS001412.v4.p2"
+preflight_rc "neither fails" 1 "" ""
+preflight_rc "both fail" 1 "$TMP/managed.csv" "phs000956.v6"
+preflight_rc "a missing managed inputs file fails" 1 "$TMP/absent.csv" ""
+preflight_rc "an entry that is not a study version fails" 1 "" "phs000956.v6,phs000957"
+grep -q 'not: phs000957' "$TMP/p.log" && pass "names the bad entry" || fail "bad entry not named"
 
 echo
 if [ "$FAILED" -gt 0 ]; then

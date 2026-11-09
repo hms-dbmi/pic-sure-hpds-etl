@@ -199,6 +199,32 @@ class DbgapStudyClientTest {
     }
 
     @Test
+    void requests_are_spaced_and_a_502_widens_the_spacing() {
+        StubDbgapServer s = server().on("phs001412.v4", Reply.json(502, "Bad Gateway"),
+                Reply.json(200, StubDbgapServer.sample()));
+        ManualClock clock = new ManualClock();
+        DbgapStudyClient c = new DbgapStudyClient(HttpClient.newHttpClient(),
+                new DbgapStudyClient.Config(s.baseUrl(), 3, Duration.ofSeconds(1), Duration.ofSeconds(1),
+                        Duration.ofSeconds(5), Duration.ofSeconds(2)),
+                new ObjectMapper(), d -> {
+                    waits.add(d);
+                    clock.advance(d);
+                }, clock);
+        closeables.add(c);
+
+        DbgapLookup first = c.fetch("phs001412", "v4");
+        DbgapLookup second = c.fetch("phs001412", "v4");
+
+        assertThat(first.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
+        assertThat(first.attempts()).isEqualTo(2);
+        assertThat(second.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
+        // The 502 widens the gap to 4 s: the 1 s backoff, then 3 s more before the retry. The answer
+        // narrows it back to 2 s before the next study's request.
+        assertThat(waits).containsExactly(Duration.ofSeconds(1), Duration.ofSeconds(3), Duration.ofSeconds(2));
+        assertThat(s.requestsFor("phs001412.v4")).isEqualTo(3);
+    }
+
+    @Test
     void backoff_is_capped_at_the_maximum() {
         StubDbgapServer s = server().on("phs001412.v4", Reply.json(500, ""));
         DbgapStudyClient c = client(s.baseUrl(), new DbgapStudyClient.Config(s.baseUrl(), 6, Duration.ofSeconds(2),

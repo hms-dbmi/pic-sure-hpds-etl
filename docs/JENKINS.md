@@ -73,33 +73,115 @@ they resolve to siblings inside the same folder.
 orchestrator's `Generate per-study AllConcepts` stage, and can also be run by hand.
 `generate-identity-consent-mapping` is standalone — no orchestrator triggers it; run it when a
 new DMC harmonization drop lands (ALS-12727).
+`qa-consent-counts` is standalone too: run it to check the participant DB's consent counts against
+dbGaP (see [below](#qa-consent-counts-standalone)).
 
-### `qa-consent-counts` Parameters
+### `qa-consent-counts` (standalone)
 
-The last stage of both orchestrators, and runnable by hand (it needs the participant DB up). Each
-parameter maps to the job's `--` flag; both orchestrators pass all of them explicitly, with the
-defaults below. See [PERMANENT_PIPELINE.md](PERMANENT_PIPELINE.md#stage-11-qa-consent-counts).
+**Job:** `qa-consent-counts` ([`etl-runners/qa-consent-counts/`](../etl-runners/qa-consent-counts/))
+**Class:** [`QaConsentCountsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/qa/QaConsentCountsJob.java)
+**Runs:** by hand only; neither orchestrator triggers it. Reads the participant DB (which must be
+up: run `participant-db-start` first) and writes nothing to it.
+
+For each study to check, counts the distinct participants per consent group in the participant
+DB's `consents` table and compares them with dbGaP's `subject_count` for that consent group of the
+study **version**, read from the dbGaP SSTR API:
+`GET https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study/{phs}.{v}/summary`
+(`study.consent_groups[]`; one request per study, its answer covering every consent group). With
+`LOAD_COUNTS` it also checks the DB against what a run's loads reported. **The DB is
+authoritative**: a load report that disagrees with it is a discrepancy too.
+
+Give exactly one of (pre-flight fails on neither or both):
+
+- `MANAGED_INPUTS`: a managed inputs CSV (`s3://`); its studies marked ready are checked, by
+  `Study Identifier` and `Version` (e.g. `v4`). `STUDY_FILTER` narrows them to some study ids.
+- `STUDIES`: the study versions to check, e.g. `phs000956.v6, phs001412.v4`, separated by commas,
+  spaces or new lines; a `.pN` suffix is ignored. The managed inputs are not read, and
+  `STUDY_FILTER` must be blank. A malformed entry (`BAD_STUDY`), a study listed with two versions
+  (`STUDY_LISTED_TWICE`) or a `STUDY_FILTER` given too (`STUDIES_WITH_FILTER`) fails validation.
+
+`LOAD_COUNTS` is optional: a CSV `study_id,consent_code,participants_loaded[,source]`, other
+columns ignored, so a migration run's `migration_consent_counts.csv` or
+`participants_migration_consent_counts.csv` works as is. Studies it does not list, and groups with
+a blank `participants_loaded` (not loaded that run), are compared DB vs dbGaP only. The MULTI
+fallback drops consent 0 subjects, so for a study loaded from MULTI a consent 0 that dbGaP lists is
+still a discrepancy (`MISSING_IN_DB`), noted "source MULTI drops consent 0".
+
+Consent codes are matched after normalizing (`c1`, `01` and `1` are one group). A group on one
+side only counts as 0 on the other. Consent 0 is compared like any other code.
+
+| Status | Meaning |
+|--------|---------|
+| `MATCH` | dbGaP, the DB (and the load report, when it covers the study) agree |
+| `COUNT_MISMATCH` | dbGaP and the DB both have the group, with different counts |
+| `MISSING_IN_DB` | dbGaP lists subjects in a group the DB has none in (DB 0) |
+| `MISSING_IN_DBGAP` | the DB has participants in a group dbGaP does not list (dbGaP 0) |
+| `DBGAP_COUNT_MISSING` | dbGaP lists the group without a `subject_count` |
+| `REPORT_DB_MISMATCH` | the load report disagrees with the DB |
+| `NO_VERSION` | the study has no usable `Version` in managed inputs; not looked up |
+| `VERSION_NOT_FOUND` | dbGaP has no such study version (HTTP 400, `error_code` 2); never retried |
+| `VERSION_MISMATCH` | dbGaP answered for a different accession or version than requested; its counts are not compared |
+| `UNVERIFIED` | dbGaP gave no usable answer after the retries (see below); a warning, not a discrepancy |
+
+A row can carry two findings (`COUNT_MISMATCH;REPORT_DB_MISMATCH`). `study_status` is not checked.
+
+**Pacing.** dbGaP's API is slow (~13 s a call) and its gateway answers HTTP 502 when sent several
+requests at once, so studies are looked up one at a time (`CONCURRENCY` 1) and requests are at
+least `DBGAP_REQUEST_SPACING_SECONDS` (2 s) apart, counted from both the previous request's start
+and its end. While dbGaP answers overloaded (429, 502, 503, 504 or a request timeout) the gap
+doubles, up to 60 s; each answered request halves it again, back to the setting. ~600 studies take
+~2.5 h when dbGaP is healthy.
+
+**Outcome.** Every discrepancy is a WARNING issue, so the job succeeds with warnings, `validate.sh`
+exits 10, and the build is **UNSTABLE**. A request is retried, gently, on 429, 408, 5xx, timeouts,
+connection errors and a 200 whose body is not the expected JSON: up to 3 requests in all (2
+retries), waiting 60 s then 120 s (a `Retry-After` header, seconds or HTTP-date, is honoured
+instead, up to 5 minutes), 60 s per request. Any other 4xx is not retried. A study that failed
+because dbGaP could not be **connected to** at all (connection refused or reset, DNS or TLS
+failure, connect timeout) holds back every lookup not yet started for 2 minutes
+(`DBGAP_UNREACHABLE_PAUSE_SECONDS`); a slow or error answer does not. So that an outage ends with
+its report rather than in the runner's monitor timeout (exit 124, nothing written), no lookup
+starts once 20 studies in a row got no usable answer, or 3.5 h into the lookups; those studies are
+`UNVERIFIED` too. A study still unanswered is `UNVERIFIED`, one `DBGAP_UNAVAILABLE` WARNING each:
+the job **succeeds with warnings** (UNSTABLE), every other study is compared, and both CSVs and the
+JSON report are written and archived as usual. Only when dbGaP answered for **no** study does the
+job fail with exit 4 (retryable; `RETRY_ON_INFRA` reruns it once), the CSVs and the JSON report
+(metrics and issues included) still written. A `VERSION_NOT_FOUND` answer counts as an answer.
+
+**Outputs** (archived on the build, and under
+`s3://bdc-etl-data-d0d6191/etl-runner/reports/qa-consent-counts/<run-id>/`):
+`qa_consent_counts.csv` (one row per study and consent code) and
+`qa_consent_count_discrepancies.csv` (its non-`MATCH` rows), columns `study_id, version,
+consent_code, consent_short_name, dbgap_subjects, db_participants, load_participants, load_source,
+status, note`; and the JSON report's metrics `studiesChecked`, `studiesVerified`,
+`consentsCompared`, `consentsMatching`, `discrepancies`, `discrepanciesByType`,
+`studiesWithDiscrepancies`, `studiesAnswered`, `unverifiedStudies`, `apiAttempts`, `apiRetries`.
+
+**Network.** The runner needs HTTPS egress to `www.ncbi.nlm.nih.gov`; see
+[QA consent counts: network egress](#qa-consent-counts-network-egress).
+
+Each parameter maps to the job's `--` flag (blank Terraform values fall back to the job's own
+defaults, which match these):
 
 | Parameter                       | Default                                               | Description |
 |---------------------------------|-------------------------------------------------------|-------------|
-| `MANAGED_INPUTS`                | (blank)                                               | `--managed-inputs`: its ready studies are checked, by `Study Identifier` and `Version`. Blank: the configured `etl.managed-inputs.uri`. The orchestrators pass their later-stage copy (excluded studies marked not ready) |
-| `LOAD_COUNTS`                   | (blank)                                               | `--load-counts`: CSV `study_id,consent_code,participants_loaded[,source]` of this run's loads (other columns ignored; a blank `participants_loaded` means not loaded this run, so not compared); blank skips the load-report check. Permanent: built from the SSTR reports; migration: `participants_migration_consent_counts.csv` |
-| `STUDY_FILTER`                  | (blank)                                               | `--study-filter`: comma-separated study ids; blank checks every ready study |
-| `CONCURRENCY`                   | `4`                                                   | Studies looked up in dbGaP at once, 1-16 (each call takes ~10 s) |
+| `MANAGED_INPUTS`                | (blank)                                               | `--managed-inputs`: CSV (`s3://`) whose ready studies are checked, by `Study Identifier` and `Version`. This or `STUDIES`, not both |
+| `STUDIES`                       | (blank)                                               | `--studies`: study versions to check instead, e.g. `phs000956.v6, phs001412.v4` (commas, spaces or new lines; `.pN` ignored). This or `MANAGED_INPUTS`, not both |
+| `LOAD_COUNTS`                   | (blank)                                               | `--load-counts`: CSV `study_id,consent_code,participants_loaded[,source]` of a run's loads (other columns ignored; a blank `participants_loaded` means not loaded that run, so not compared), e.g. a migration run's `migration_consent_counts.csv`; blank skips the load-report check |
+| `STUDY_FILTER`                  | (blank)                                               | `--study-filter`: with `MANAGED_INPUTS` only, comma-separated study ids; blank checks every ready study |
+| `CONCURRENCY`                   | `1`                                                   | Studies looked up in dbGaP at once, 1-16. Keep it at 1: each call takes ~13 s and dbGaP's gateway answers 502 when sent several at once |
+| `DBGAP_REQUEST_SPACING_SECONDS` | `2`                                                   | Least gap between requests, after the previous one starts and ends, 0-600 (0: off); doubles up to 60 s while dbGaP answers overloaded (429, 502, 503, 504, a timeout), narrowing back as it answers |
 | `DBGAP_BASE_URL`                | `https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study`  | `{phs}.{v}/summary` is appended |
 | `DBGAP_MAX_ATTEMPTS`            | `3`                                                   | Requests per study, retries included, 1-20 (one study, one request: its answer covers every consent group) |
 | `DBGAP_INITIAL_BACKOFF_SECONDS` | `60`                                                  | Wait after the first failure, doubling per retry, 0-600 |
 | `DBGAP_MAX_BACKOFF_SECONDS`     | `120`                                                 | Longest wait, 1-3600; a `Retry-After` header is honoured instead (up to 5 minutes) |
 | `DBGAP_TIMEOUT_SECONDS`         | `60`                                                  | Per-request timeout, 1-600 |
-| `DBGAP_GIVE_UP_AFTER`           | `20`                                                  | Stop asking dbGaP once this many studies in a row got no usable answer, 1-1000; the rest are `UNVERIFIED`, so an outage ends in about half an hour rather than retrying every study |
+| `DBGAP_GIVE_UP_AFTER`           | `20`                                                  | Stop asking dbGaP once this many studies in a row got no usable answer, 1-1000; the rest are `UNVERIFIED`, so an outage ends with the report rather than retrying every study |
 | `DBGAP_UNREACHABLE_PAUSE_SECONDS` | `120`                                               | After a study fails because dbGaP could not be connected to (connection error or connect timeout, after its retries), no new lookup starts for this long, 0-3600 (0: off); lookups already running carry on |
-| `DBGAP_DEADLINE_SECONDS`        | `5400`                                                | No lookup starts after this many seconds, 1-86400; keep it well inside `JOB_TIMEOUT_SECONDS`, or a slow dbGaP ends in a monitor timeout (exit 124) with no report |
+| `DBGAP_DEADLINE_SECONDS`        | `12600`                                               | No lookup starts after this many seconds, 1-86400; keep it well inside `JOB_TIMEOUT_SECONDS`, or a slow dbGaP ends in a monitor timeout (exit 124) with no report |
 | `INSTANCE_TYPE`                 | `t3.medium`                                           | Runner instance type |
-| `JOB_TIMEOUT_SECONDS`           | `14400`                                               | Monitor timeout (exit 124); the job's own Jenkins timeout is 9 h, for two attempts |
+| `JOB_TIMEOUT_SECONDS`           | `18000`                                               | Monitor timeout (exit 124); the job's own Jenkins timeout is 11 h, for two attempts |
 | `RUN_ID`, `PREBUILT_IMAGE_TAR`, `SKIP_TESTS`, `RETRY_ON_INFRA`, `ENV` | | As for every runner job; `RETRY_ON_INFRA` reruns it once after exit 4 (dbGaP answered for no study) |
-
-Discrepancies make the build UNSTABLE (validate.sh exit 10); dbGaP not answering for a study after
-its retries fails it (exit 4), with the report and both CSVs still archived.
 
 > **Folder names must not contain a space.** `common.mk` uses unquoted workspace paths, so a job
 > in a folder such as `__Harmonization Work` breaks at `ensure-terraform` (identity-mapping
@@ -131,9 +213,8 @@ The permanent orchestrator's stage logic is in `etl-runners/common/orchestrator.
             Init ▸ Build JAR ▸ Pre-flight ▸ Package image
             ▸ Provision (require-db.sh, terraform apply) ▸ Monitor ▸ Fetch reports ▸ Validate
             post: terraform destroy, archive reports
-  └─ last stage 'QA consent counts'          build job: qa-consent-counts (DB and loads vs dbGaP; read-only)
-  post { always }: build job: participant-db-backup    PROMOTE_BACKUP = build SUCCESS/UNSTABLE, or QA reached (DB stays up)
-                   pipeline-report / migration-report  downstream-artifacts/<report>/ + S3; QA discrepancies first
+  post { always }: build job: participant-db-backup    PROMOTE_BACKUP = build SUCCESS/UNSTABLE (DB stays up)
+                   pipeline-report / migration-report  downstream-artifacts/<report>/ + S3
 ```
 
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
@@ -142,7 +223,7 @@ jobs go further: each orchestrator builds the runner image once and passes it as
 `PREBUILT_IMAGE_TAR`, so those builds (SSTR load, allConcepts generation, large splits) build
 nothing on the Jenkins host; smaller splits run on a runner pool with no per-study build at all.
 The permanent orchestrator passes it to every runner job it calls (SSTR load, global AllConcepts,
-VCF indexes, per-study allConcepts, merge, manifest and QA consent counts).
+VCF indexes, per-study allConcepts, merge and manifest).
 
 The orchestrator backs up only a database its own start succeeded on (`DB_STARTED`): a failed
 start changed nothing worth saving, and is never recorded as a run's backup. The participant DB
@@ -333,7 +414,7 @@ Validators never abort on the first failure, so one console read shows everythin
 | Terraform ≥ 1.3        | provisions runners (`common.mk` installs 1.9.8 if missing)                |
 | AWS CLI v2             | image upload, report sync, SSM, EC2 describe                             |
 | `jq`                   | report and sentinel parsing                                              |
-| `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module; the end-of-run reports, and the QA's load-counts builder and validator |
+| `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module; the end-of-run reports, and the QA's validator |
 | `bdc-etl-jenkins-role` | the agent's own role; it does all AWS work as this role (no profiles)    |
 
 ### Jenkins Plugins
@@ -554,9 +635,9 @@ reload.
 
 A DB-backed runner job (`sstr-populate-rds-participants`, `participants-migration`,
 `split-allconcepts`, `generate-global-all-concepts`, `create-vcf-indexes`,
-`all-concepts-data-generator`) run on its own needs the participant DB up: run
+`all-concepts-data-generator`, `qa-consent-counts`) run on its own needs the participant DB up: run
 `participant-db-start` first (it leaves the database up; run `participant-db-backup` afterwards
-to save the runner's writes). Without it, `require-db.sh`
+to save the runner's writes; `qa-consent-counts` writes nothing). Without it, `require-db.sh`
 fails the build before provisioning. For a manual single-study SSTR load, the per-study checks are
 job parameters on `sstr-populate-rds-participants`: `EXPECTED_CONSENT_CODES`,
 `EXPECTED_MIN_PARTICIPANTS`, and `INSTANCE_TYPE`.
@@ -703,8 +784,7 @@ etl-runners/
 ├─ create-vcf-indexes/                PERMANENT
 ├─ merge-allconcepts/                 PERMANENT (no DB)
 ├─ generate-allconcepts-manifest/     PERMANENT (no DB), after the merge in both orchestrators
-├─ qa-consent-counts/                 PERMANENT QA (reads the DB, calls dbGaP), last stage of both orchestrators;
-│                                     also build-load-counts.py and qa_report.py (the reports' QA section), test/
+├─ qa-consent-counts/                 PERMANENT QA, standalone (reads the DB, calls dbGaP; + test/)
 ├─ all-concepts-data-generator/       PERMANENT (per study, from the permanent orchestrator)
 └─ generate-identity-consent-mapping/ PERMANENT, standalone (no DB)
    each runner: Jenkinsfile  Makefile  preflight.sh  validate.sh  terraform/
@@ -723,7 +803,6 @@ etl-runners/
 | Runner log          | `s3://bdc-etl-data-d0d6191/etl-runner/logs/<job>-<run-id>.log` (bootstrap plus container output) |
 | Completion sentinel | `status.json` under the report prefix                                                       |
 | Permanent run report| `downstream-artifacts/pipeline-report/` on the build, and `s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/pipeline-report/` |
-| QA load counts      | `s3://<DATA_ROOT bucket>/etl-runner/reports/{permanent,migration}-pipeline/<build-tag>/qa_load_counts.csv` (the QA's `--load-counts`) |
 | Exclusion managed inputs | `s3://<MANAGED_INPUTS bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/managed_inputs.csv` (only when studies were excluded) |
 | Terraform state     | `s3://bdc-etl-data-d0d6191/tf_backend/etl-runners/hpds-etl/…`                               |
 | Participant DB dumps| `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<env>/backups/`        |

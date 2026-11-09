@@ -1,18 +1,24 @@
 // =============================================================================
 // PERMANENT QA -- qa-consent-counts (JobType.PERMANENT)
 //
-// For every study marked ready in managed inputs, counts the distinct participants per consent
-// group in the participant database and compares them with dbGaP's subject counts for that study
-// version (the dbGaP SSTR API, GET {DBGAP_BASE_URL}/{phs}.{v}/summary). With LOAD_COUNTS -- this
-// run's participants loaded per consent group -- it also checks the database holds what the loads
-// reported; the database is authoritative. Read-only. Runs last in both orchestrators (/Jenkinsfile
-// and Jenkinsfile.migration), or standalone.
+// Standalone only: neither pipeline runs it. For each study to check -- every study marked ready in
+// MANAGED_INPUTS, or the study versions listed in STUDIES (exactly one of the two) -- counts the
+// distinct participants per consent group in the participant database and compares them with
+// dbGaP's subject counts for that study version (the dbGaP SSTR API, GET
+// {DBGAP_BASE_URL}/{phs}.{v}/summary). With LOAD_COUNTS -- a run's participants loaded per consent
+// group -- it also checks the database holds what the loads reported; the database is
+// authoritative. Read-only. The participant database must be running (participant-db-start).
 //
 // Findings (each a WARNING; the build is UNSTABLE): COUNT_MISMATCH, MISSING_IN_DB (dbGaP lists
 // subjects in a group the DB lacks; consent 0 included), MISSING_IN_DBGAP, DBGAP_COUNT_MISSING,
 // REPORT_DB_MISMATCH, NO_VERSION (no usable Version in managed inputs; not looked up),
 // VERSION_NOT_FOUND (dbGaP answers HTTP 400 error_code 2) and VERSION_MISMATCH (dbGaP answered for
 // another version).
+//
+// dbGaP's API is slow (~13 s a call) and its gateway answers 502 when sent several at once, so by
+// default studies are looked up one at a time (CONCURRENCY 1), requests at least
+// DBGAP_REQUEST_SPACING_SECONDS (2) apart -- the gap doubling, up to 60 s, while dbGaP answers
+// overloaded (429, 502, 503, 504, a timeout) and narrowing back as it answers.
 //
 // dbGaP: one request per study (its answer covers every consent group), retried on 429, 5xx,
 // timeouts, connection errors and unparseable 200s up to DBGAP_MAX_ATTEMPTS requests in all (default
@@ -29,8 +35,9 @@
 // Network: the runner's security group must allow HTTPS (443) egress to www.ncbi.nlm.nih.gov,
 // besides the participant DB and S3. See docs/JENKINS.md.
 //
-// Inputs
+// Inputs (MANAGED_INPUTS or STUDIES, not both)
 //   --managed-inputs   managed inputs CSV; its ready studies (Study Identifier + Version) are checked
+//   --studies          study versions to check instead, e.g. phs000956.v6,phs001412.v4
 //   --load-counts      optional CSV study_id,consent_code,participants_loaded[,source]
 //   RDS credentials read by the runner at boot from the SSM parameter
 //                   /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
@@ -41,7 +48,7 @@
 //     load_participants,load_source,status,note
 //   qa-consent-counts-<runId>.json report: studiesChecked, studiesVerified, consentsCompared,
 //     consentsMatching, discrepancies, discrepanciesByType, studiesWithDiscrepancies,
-//     unverifiedStudies, apiAttempts, apiRetries.
+//     studiesAnswered, unverifiedStudies, apiAttempts, apiRetries.
 //
 // Exit codes (see ExitCode.java)
 //   0 success (discrepancies make the build UNSTABLE) | 1 unknown | 2 validation (bad parameter) |
@@ -49,9 +56,9 @@
 //   when RETRY_ON_INFRA) | 5 config | 124 monitor timeout (not retried)
 //
 // Runner image
-//   Standalone, this build compiles the JAR and builds, saves and uploads its own runner image.
-//   The orchestrators pass an image they already built as PREBUILT_IMAGE_TAR; this build then skips
-//   both build stages, uses that tarball, and leaves deleting it to the orchestrator.
+//   This build compiles the JAR and builds, saves and uploads its own runner image, unless
+//   PREBUILT_IMAGE_TAR names one already uploaded; it then skips both build stages and leaves that
+//   tarball in place.
 // =============================================================================
 
 pipeline {
@@ -63,23 +70,25 @@ pipeline {
 
     options {
         timestamps()
-        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
-        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
-        // Two attempts of up to JOB_TIMEOUT_SECONDS (default 4 h) each (RETRY_ON_INFRA), plus provisioning.
-        timeout(time: 9, unit: 'HOURS')
+        // Two attempts of up to JOB_TIMEOUT_SECONDS (default 5 h) each (RETRY_ON_INFRA), plus provisioning.
+        timeout(time: 11, unit: 'HOURS')
     }
 
     parameters {
         string(name: 'MANAGED_INPUTS', defaultValue: '',
-               description: '--managed-inputs: CSV whose studies marked ready are checked, by Study Identifier and Version (local path or s3://). Blank uses the configured etl.managed-inputs.uri.')
+               description: '--managed-inputs: CSV whose studies marked ready are checked, by Study Identifier and Version (s3://). Give this or STUDIES, not both.')
+        text(name: 'STUDIES', defaultValue: '',
+             description: '--studies: the study versions to check instead of a managed inputs file, e.g. phs000956.v6, phs001412.v4 -- separated by commas, spaces or new lines (a .pN suffix is ignored). Give this or MANAGED_INPUTS, not both.')
         string(name: 'LOAD_COUNTS', defaultValue: '',
-               description: '--load-counts: this run\'s participants loaded per consent group, a CSV with study_id,consent_code,participants_loaded[,source] (s3:// URI). Other columns are ignored, so the migration report\'s migration_consent_counts.csv also works. Studies it does not list, or lists with a blank participants_loaded, are compared DB vs dbGaP only. Blank skips the load-report check.')
+               description: '--load-counts: a run\'s participants loaded per consent group, a CSV with study_id,consent_code,participants_loaded[,source] (s3:// URI). Other columns are ignored, so the migration report\'s migration_consent_counts.csv also works. Studies it does not list, or lists with a blank participants_loaded, are compared DB vs dbGaP only. Blank skips the load-report check.')
         string(name: 'STUDY_FILTER', defaultValue: '',
-               description: '--study-filter: comma-separated study ids to check. Blank checks every ready study.')
-        string(name: 'CONCURRENCY', defaultValue: '4',
-               description: '--concurrency: studies looked up in dbGaP at once, 1-16 (each call takes ~10 s).')
+               description: '--study-filter: with MANAGED_INPUTS, comma-separated study ids to check. Blank checks every ready study.')
+        string(name: 'CONCURRENCY', defaultValue: '1',
+               description: '--concurrency: studies looked up in dbGaP at once, 1-16. Keep it at 1: each call takes ~13 s, and dbGaP\'s gateway answers 502 when sent several at once.')
+        string(name: 'DBGAP_REQUEST_SPACING_SECONDS', defaultValue: '2',
+               description: '--dbgap-request-spacing-seconds: least gap between dbGaP requests, after the previous one ends, 0-600 (0: none). Doubles, up to 60 s, while dbGaP answers overloaded (429, 502, 503, 504, a timeout), narrowing back as it answers.')
         string(name: 'DBGAP_BASE_URL', defaultValue: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study',
                description: '--dbgap-base-url: the dbGaP SSTR study endpoint; {phs}.{v}/summary is appended.')
         string(name: 'DBGAP_MAX_ATTEMPTS', defaultValue: '3',
@@ -94,16 +103,16 @@ pipeline {
                description: '--dbgap-give-up-after: stop asking dbGaP once this many studies in a row got no usable answer (1-1000), so an outage ends with the report rather than retrying every study; the rest are UNVERIFIED.')
         string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', defaultValue: '120',
                description: '--dbgap-unreachable-pause-seconds: after a study fails because dbGaP could not be connected to (connection error or connect timeout, after its retries), no new study lookup starts for this long, 0-3600 (0: no pause). Lookups already running carry on.')
-        string(name: 'DBGAP_DEADLINE_SECONDS', defaultValue: '5400',
+        string(name: 'DBGAP_DEADLINE_SECONDS', defaultValue: '12600',
                description: '--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Keep it well inside JOB_TIMEOUT_SECONDS, so a slow dbGaP still ends with the report written rather than a monitor timeout (exit 124, no report).')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
                description: 'Runner instance type.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '14400',
-               description: 'How long to wait for the runner before giving up (monitor exits 124). ~600 studies at 4 at a time take ~30 minutes when dbGaP is healthy.')
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '18000',
+               description: 'How long to wait for the runner before giving up (monitor exits 124). ~600 studies one at a time take ~2.5 hours when dbGaP is healthy.')
         string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
-               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
+               description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/, e.g. one a pipeline run uploaded. Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,
                description: 'Skip the JAR test suites.')
         booleanParam(name: 'RETRY_ON_INFRA', defaultValue: true,
@@ -119,6 +128,8 @@ pipeline {
         RUNNER_DIR = 'etl-runners/qa-consent-counts'
 
         TF_VAR_managed_inputs_uri            = "${params.MANAGED_INPUTS.trim()}"
+        // One line, comma-separated: the runner's job parameters are single-line values.
+        TF_VAR_studies                       = "${(params.STUDIES ?: '').trim().replaceAll(/[\s,;]+/, ',')}"
         TF_VAR_load_counts_uri               = "${params.LOAD_COUNTS.trim()}"
         TF_VAR_study_filter                  = "${params.STUDY_FILTER.trim()}"
         TF_VAR_concurrency                   = "${params.CONCURRENCY.trim()}"
@@ -129,6 +140,7 @@ pipeline {
         TF_VAR_dbgap_timeout_seconds         = "${params.DBGAP_TIMEOUT_SECONDS.trim()}"
         TF_VAR_dbgap_give_up_after           = "${params.DBGAP_GIVE_UP_AFTER.trim()}"
         TF_VAR_dbgap_unreachable_pause_seconds = "${params.DBGAP_UNREACHABLE_PAUSE_SECONDS.trim()}"
+        TF_VAR_dbgap_request_spacing_seconds = "${params.DBGAP_REQUEST_SPACING_SECONDS.trim()}"
         TF_VAR_dbgap_deadline_seconds        = "${params.DBGAP_DEADLINE_SECONDS.trim()}"
         TF_VAR_instance_type                 = "${params.INSTANCE_TYPE.trim()}"
 
@@ -142,7 +154,7 @@ pipeline {
                 script {
                     // The workspace persists between builds, and post { always } archives reports/**
                     // even when this build never fetched any (say, a failed apply): start empty, so an
-                    // earlier build's report is never archived, or copied by an orchestrator, as this one's.
+                    // earlier build's report is never archived as this one's.
                     sh "rm -rf ${RUNNER_DIR}/reports"
 
                     def base = (params.RUN_ID?.trim())
@@ -162,7 +174,8 @@ pipeline {
                     echo "image:  ${env.IMAGE_TAR}" + (prebuilt ? ' (pre-built)' : ' (built by this job)')
 
                     currentBuild.displayName = "#${env.BUILD_NUMBER} qa-consent-counts"
-                    echo "managed inputs: ${params.MANAGED_INPUTS ?: '<configured default>'}"
+                    echo "managed inputs: ${params.MANAGED_INPUTS?.trim() ?: '<none>'}"
+                    echo "studies:        ${env.TF_VAR_studies ?: '<none>'}"
                     echo "load counts:    ${params.LOAD_COUNTS ?: '<none>'}"
                     echo "run id: ${env.BASE_RUN_ID}"
                 }
@@ -233,7 +246,7 @@ pipeline {
                     // The participant DB is up only between participant-db-start and -stop.
                     // Fail here, in seconds, rather than after ~5 minutes of provisioning.
                     if (sh(returnStatus: true, script: "etl-runners/common/require-db.sh ${env.ENV}") != 0) {
-                        error('The participant database is not running. Run participant-db-start (or run this job through an orchestrator), then retry.')
+                        error('The participant database is not running. Run participant-db-start, then retry.')
                     }
 
                     int maxAttempts = params.RETRY_ON_INFRA ? 2 : 1
@@ -337,7 +350,7 @@ pipeline {
                         echo "WARNING: terraform destroy returned ${rc}."
                     }
                 }
-                // Only an image this build uploaded; a pre-built one belongs to the orchestrator.
+                // Only an image this build uploaded; a pre-built one belongs to whoever uploaded it.
                 if (env.OWNS_IMAGE == 'true') {
                     sh(returnStatus: true, script: """
                         aws s3 rm s3://\$(sed -n 's/^stack_s3_bucket[[:space:]]*=[[:space:]]*"\\(.*\\)"/\\1/p' \
@@ -354,7 +367,7 @@ pipeline {
         }
         failure {
             script {
-                // Read by the orchestrators, which quote it when this build fails their stage.
+                // Shown on the build, so the job list says why it failed.
                 currentBuild.description = env.FAILURE_REASON ?: env.FAILURE_MEANING ?:
                     (env.JOB_EXIT_CODE ? 'the job ran, then a later step failed; see the console' : 'failed before the job ran; see the console')
             }
