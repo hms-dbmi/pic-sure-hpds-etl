@@ -441,6 +441,7 @@ Read legacy allConcepts CSV (streaming)
         │
         ▼
 For each row:
+  ├─ Drop it if its concept path does not start and end with the same µ or \ delimiter
   ├─ Drop it unless its concept path's first node is the study id (µ{study_id}µ…)
   ├─ Replace the legacy HPDS id with the new hpds_id (via mapping)
   └─ Look up the patient's consent group
@@ -467,10 +468,17 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
 
 ### Error Handling
 
-- Rows whose concept path's first node is not the study id are dropped, with a
+- Rows whose concept path has no node structure are dropped, with a `MALFORMED_CONCEPT_PATHS`
+  warning: the path must start and end with the same delimiter, `µ` or `\`, with at least one
+  node between them (`µaµ`). Metric `malformedPathRows`; the warning carries up to 10 of the
+  paths. Checked first, so these rows are never counted as other studies' (below). `validate.sh`
+  soft-fails "no malformed concept paths", the split report totals them, and the migration report
+  lists the study for review (`SPLIT_MALFORMED_CONCEPT_PATHS`, `PARTIAL_DATA`)
+- Rows whose concept path's first node does not include the study id are dropped, with a
   `FOREIGN_CONCEPTS` warning. Some legacy allConcepts files carry other studies' concepts for the
-  participants they share. The path's delimiter is its first character (`µ`, `\` or `/`), and the
-  node must equal the study id exactly (`phs000123.v1` is not `phs000123`). The job's metrics have
+  participants they share. The first node is the text up to the path's second delimiter. It
+  belongs to the study when it contains the study id (case-sensitive) not followed by another
+  digit: `phs000123`, `phs000123.v1.p1` and `phs000123_v2` are kept, `phs0001234` is not. The job's metrics have
   `foreignConceptRows` and `foreignFirstNodes` (rows per first node, the 50 largest, the rest under
   `(other)`); the warning also carries up to 10 of the dropped paths. These rows are not counted as
   unmapped or without consent. The study's `validate.sh` soft-fails "no concepts from other

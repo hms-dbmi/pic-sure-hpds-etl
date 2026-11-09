@@ -40,10 +40,13 @@ import java.util.stream.Stream;
  * {@link ParticipantsMigrationJob}, then splits the result into per-consent
  * output files using the consent assignments already in the database.
  *
- * <p>Only the study's own concepts are kept: a row whose concept path's first node is not the
- * study id ({@code µphs000123µ...}) is dropped and reported as {@code FOREIGN_CONCEPTS}. Some legacy
- * allConcepts files carry other studies' concepts for the participants they share; those rows
- * belong to the other study's partitions, never this one's.
+ * <p>Only the study's own, well-formed concepts are kept. A concept path must start and end with
+ * the same node delimiter ({@code µ} or {@code \}); a row whose path doesn't has no node structure
+ * and is dropped as {@code MALFORMED_CONCEPT_PATHS}. A row whose path's first node does not include
+ * the study id ({@code µphs000123µ...}, {@code µphs000123.v1µ...}; see {@link #belongsToStudy}) is
+ * dropped as {@code FOREIGN_CONCEPTS}: some legacy allConcepts files
+ * carry other studies' concepts for the participants they share, and those rows belong to the other
+ * study's partitions, never this one's.
  *
  * <p>Delete once the migration has run in every environment.
  */
@@ -51,13 +54,13 @@ import java.util.stream.Stream;
 @ConditionalOnProperty(name = "etl.jobs.split-allconcepts.enabled", havingValue = "true")
 public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output> {
 
-    /** Distinct dropped concept paths kept for the report. */
+    /** Distinct dropped concept paths kept for the report, per reason. */
     static final int FOREIGN_SAMPLE_SIZE = 10;
     /** Foreign first nodes listed in the report, most rows first; the rest are summed under {@link #OTHER_NODES}. */
     static final int FOREIGN_NODES_REPORTED = 50;
     static final String OTHER_NODES = "(other)";
     /** A concept path's node delimiters; the path's first character says which one it uses. */
-    private static final String PATH_DELIMITERS = "µ\\/";
+    private static final String PATH_DELIMITERS = "µ\\";
 
     private final IoResolver io;
     private final DelimitedReader delimitedReader;
@@ -148,6 +151,8 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         long noConsentRows = 0;
         long malformedRows = 0;
         long foreignConceptRows = 0;
+        long malformedPathRows = 0;
+        Set<String> malformedPathSample = new LinkedHashSet<>();
         List<String> unmappedSample = new ArrayList<>();
         Map<String, Long> foreignRowsByFirstNode = new HashMap<>();
         Set<String> foreignConceptSample = new LinkedHashSet<>();
@@ -169,8 +174,15 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                     }
 
                     String conceptPath = row.get(1);
+                    if (!isWellFormedPath(conceptPath)) {
+                        malformedPathRows++;
+                        if (malformedPathSample.size() < FOREIGN_SAMPLE_SIZE) {
+                            malformedPathSample.add(conceptPath);
+                        }
+                        continue;
+                    }
                     String firstNode = firstNode(conceptPath);
-                    if (!studyId.equals(firstNode)) {
+                    if (!belongsToStudy(firstNode, studyId)) {
                         foreignConceptRows++;
                         foreignRowsByFirstNode.merge(firstNode, 1L, Long::sum);
                         if (foreignConceptSample.size() < FOREIGN_SAMPLE_SIZE) {
@@ -212,10 +224,15 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 writer.close();
             }
 
-            log.info("Read {} row(s): {} mapped to consents, {} other studies' concept row(s), {} unmapped id(s), "
-                            + "{} no-consent row(s), {} malformed row(s)",
+            log.info("Read {} row(s): {} mapped to consents, {} malformed concept path(s), {} other studies' "
+                            + "concept row(s), {} unmapped id(s), {} no-consent row(s), {} malformed row(s)",
                     totalRows, rowsPerConsent.values().stream().mapToLong(Long::longValue).sum(),
-                    foreignConceptRows, unmappedIds, noConsentRows, malformedRows);
+                    malformedPathRows, foreignConceptRows, unmappedIds, noConsentRows, malformedRows);
+
+            if (malformedPathRows > 0) {
+                log.warn("Dropped {} row(s) whose concept path does not start and end with the same µ or \\ "
+                        + "delimiter; sample: {}", malformedPathRows, malformedPathSample);
+            }
 
             Map<String, Long> foreignFirstNodes = topCounts(foreignRowsByFirstNode);
             if (foreignConceptRows > 0) {
@@ -248,6 +265,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             }
 
             return new Output(studyId, abbreviation, totalRows, unmappedIds, noConsentRows, malformedRows,
+                    malformedPathRows, List.copyOf(malformedPathSample),
                     foreignConceptRows, foreignFirstNodes, List.copyOf(foreignConceptSample),
                     List.copyOf(unmappedSample), rowsPerConsent, participantsPerConsent, outputPaths);
         } catch (IOException e) {
@@ -295,18 +313,40 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
     }
 
     /**
-     * The first node of a concept path: the text between its leading delimiter ({@code µ}, {@code \}
-     * or {@code /}, whichever the path starts with) and the next one. A path that starts with none of
-     * them has no first node, so it can never match a study id; it is returned whole for the report.
+     * True when a concept path has its node structure: it starts and ends with the same delimiter
+     * ({@code µ} or {@code \}) and holds at least one node between them ({@code µaµ}, {@code \a\}).
      */
-    static String firstNode(String conceptPath) {
-        if (conceptPath == null || conceptPath.isEmpty()
-                || PATH_DELIMITERS.indexOf(conceptPath.charAt(0)) < 0) {
-            return conceptPath == null ? "" : conceptPath;
+    static boolean isWellFormedPath(String conceptPath) {
+        if (conceptPath == null || conceptPath.length() < 3) {
+            return false;
         }
         char delimiter = conceptPath.charAt(0);
-        int end = conceptPath.indexOf(delimiter, 1);
-        return end < 0 ? conceptPath.substring(1) : conceptPath.substring(1, end);
+        return PATH_DELIMITERS.indexOf(delimiter) >= 0
+                && conceptPath.charAt(conceptPath.length() - 1) == delimiter;
+    }
+
+    /**
+     * The first node of a {@linkplain #isWellFormedPath well-formed} concept path: the text between its
+     * leading delimiter and the next one.
+     */
+    static String firstNode(String conceptPath) {
+        char delimiter = conceptPath.charAt(0);
+        return conceptPath.substring(1, conceptPath.indexOf(delimiter, 1));
+    }
+
+    /**
+     * True when a first node includes the study id, so a versioned or decorated node
+     * ({@code phs000123.v1.p1}, {@code phs000123_v2}) still belongs to the study. The id must not run
+     * on into another digit: {@code phs0001234} is a different accession, not {@code phs000123}.
+     */
+    static boolean belongsToStudy(String firstNode, String studyId) {
+        for (int i = firstNode.indexOf(studyId); i >= 0; i = firstNode.indexOf(studyId, i + 1)) {
+            int after = i + studyId.length();
+            if (after == firstNode.length() || !Character.isDigit(firstNode.charAt(after))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The {@link #FOREIGN_NODES_REPORTED} largest counts, largest first, the rest summed under {@link #OTHER_NODES}. */
@@ -368,11 +408,21 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                             "percent", Math.round(pct * 10) / 10.0,
                             "firstOldHpdsIds", output.unmappedSample())));
         }
+        if (output.malformedPathRows() > 0) {
+            double pct = 100.0 * output.malformedPathRows() / Math.max(output.totalRows(), 1);
+            report.add(ValidationIssue.warning("MALFORMED_CONCEPT_PATHS",
+                    output.malformedPathRows() + " row(s) (" + String.format("%.1f%%", pct)
+                            + ") have a concept path that does not start and end with the same µ or \\ "
+                            + "delimiter and were dropped. First: " + output.malformedPathSample(),
+                    Map.of("count", output.malformedPathRows(),
+                            "percent", Math.round(pct * 10) / 10.0,
+                            "sampleConceptPaths", output.malformedPathSample())));
+        }
         if (output.foreignConceptRows() > 0) {
             double pct = 100.0 * output.foreignConceptRows() / Math.max(output.totalRows(), 1);
             report.add(ValidationIssue.warning("FOREIGN_CONCEPTS",
                     output.foreignConceptRows() + " row(s) (" + String.format("%.1f%%", pct)
-                            + ") have a concept path whose first node is not " + output.studyId()
+                            + ") have a concept path whose first node does not include " + output.studyId()
                             + " and were dropped; by first node: " + output.foreignFirstNodes(),
                     Map.of("count", output.foreignConceptRows(),
                             "percent", Math.round(pct * 10) / 10.0,
@@ -400,6 +450,7 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
                 .metric("unmappedIds", output.unmappedIds())
                 .metric("noConsentRows", output.noConsentRows())
                 .metric("malformedRows", output.malformedRows())
+                .metric("malformedPathRows", output.malformedPathRows())
                 .metric("foreignConceptRows", output.foreignConceptRows())
                 .metric("foreignFirstNodes", output.foreignFirstNodes())
                 .metric("rowsPerConsent", output.rowsPerConsent())
@@ -414,7 +465,11 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
             long unmappedIds,
             long noConsentRows,
             long malformedRows,
-            /** Rows dropped because their concept path's first node is not the study id. */
+            /** Rows dropped because their concept path does not start and end with the same delimiter. */
+            long malformedPathRows,
+            /** Up to {@link #FOREIGN_SAMPLE_SIZE} of their distinct concept paths. */
+            List<String> malformedPathSample,
+            /** Rows dropped because their concept path's first node does not include the study id. */
             long foreignConceptRows,
             /** Those rows per first node (see {@link #topCounts}). */
             Map<String, Long> foreignFirstNodes,

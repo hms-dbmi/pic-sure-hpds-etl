@@ -500,20 +500,114 @@ class SplitAllConceptsJobTest {
     void first_node_follows_the_paths_own_delimiter() {
         assertThat(SplitAllConceptsJob.firstNode("µphs000123µageµ")).isEqualTo("phs000123");
         assertThat(SplitAllConceptsJob.firstNode("\\phs000123\\age\\")).isEqualTo("phs000123");
-        assertThat(SplitAllConceptsJob.firstNode("/phs000123/age/")).isEqualTo("phs000123");
-        assertThat(SplitAllConceptsJob.firstNode("µphs000123")).isEqualTo("phs000123");
+        assertThat(SplitAllConceptsJob.firstNode("µphs000123µ")).isEqualTo("phs000123");
         // A µ path is split only on µ: a backslash inside a node is part of it.
         assertThat(SplitAllConceptsJob.firstNode("µa\\bµcµ")).isEqualTo("a\\b");
-        // No leading delimiter: no first node, so it can match no study.
-        assertThat(SplitAllConceptsJob.firstNode("phs000123µageµ")).isEqualTo("phs000123µageµ");
-        assertThat(SplitAllConceptsJob.firstNode("")).isEmpty();
     }
 
     @Test
-    void only_an_exact_first_node_belongs_to_the_study() {
-        // A longer id or a versioned id is another node, not this study's.
-        assertThat(SplitAllConceptsJob.firstNode("µphs0001234µxµ")).isNotEqualTo("phs000123");
-        assertThat(SplitAllConceptsJob.firstNode("µphs000123.v1µxµ")).isNotEqualTo("phs000123");
+    void a_path_must_start_and_end_with_the_same_delimiter() {
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µphs000123µageµ")).isTrue();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("\\phs000123\\age\\")).isTrue();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µaµ")).isTrue();
+
+        assertThat(SplitAllConceptsJob.isWellFormedPath("phs000123µageµ")).as("no leading delimiter").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µphs000123µage")).as("no trailing delimiter").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µphs000123µage\\")).as("mixed delimiters").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("/phs000123/age/")).as("not a node delimiter").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µµ")).as("no node").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µ")).isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("")).isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath(null)).isFalse();
+    }
+
+    @Test
+    void drops_rows_whose_concept_path_has_no_node_structure() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs001211";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µphs001211µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"phs001211µbmiµ\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs001211µbmi\",\"27\",\"\",\"0\"",
+                "\"100\",\"\",\"\",\"x\",\"0\"",
+                // Malformed is checked first: a malformed path is never counted as another study's.
+                "\"100\",\"µphs000280µbmi\",\"27\",\"\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        Path outputDir = tempDir.resolve("output");
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "ARIC",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", outputDir.toString()), "test-malformed-paths");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
+                .containsExactly("\"1\",\"µphs001211µageµ\",\"42\",\"\",\"0\"");
+        assertThat(result.getMetrics())
+                .containsEntry("malformedPathRows", 4L)
+                .containsEntry("foreignConceptRows", 0L)
+                .containsEntry("malformedRows", 0L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MALFORMED_CONCEPT_PATHS")
+                        && i.message().startsWith("4 row(s) (80.0%)")
+                        && i.context().get("sampleConceptPaths").equals(
+                                List.of("phs001211µbmiµ", "µphs001211µbmi", "", "µphs000280µbmi")))
+                .noneMatch(i -> i.code().equals("FOREIGN_CONCEPTS"));
+    }
+
+    @Test
+    void a_first_node_that_includes_the_study_id_belongs_to_the_study() {
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123.v1", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123.v1.p1", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123_v2", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("TOPMed phs000123", "phs000123")).isTrue();
+        // A later occurrence counts when an earlier one runs on into a digit.
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234 phs000123", "phs000123")).isTrue();
+
+        // Another accession, not this study's.
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000280", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("DCC Harmonized data set", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("PHS000123", "phs000123")).as("case-sensitive").isFalse();
+    }
+
+    @Test
+    void keeps_rows_whose_first_node_is_a_versioned_study_id() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs001211";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µphs001211.v1µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"\\phs001211.v1.p1\\bmi\\\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs0012110µbmiµ\",\"27\",\"\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        Path outputDir = tempDir.resolve("output");
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "ARIC",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", outputDir.toString()), "test-versioned");
+
+        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
+                .containsExactly(
+                        "\"1\",\"µphs001211.v1µageµ\",\"42\",\"\",\"0\"",
+                        "\"1\",\"\\phs001211.v1.p1\\bmi\\\",\"27\",\"\",\"0\"");
+        assertThat(result.getMetrics())
+                .containsEntry("foreignConceptRows", 1L)
+                .containsEntry("foreignFirstNodes", Map.of("phs0012110", 1L));
     }
 
     @Test

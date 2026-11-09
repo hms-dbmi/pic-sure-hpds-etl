@@ -126,6 +126,7 @@ jq --arg run "$RUN_ID" --arg started "${STAGE_STARTED_EPOCH:-}" --arg finished "
         unmappedIds: ($all | sum_metric("unmappedIds")),
         noConsentRows: ($all | sum_metric("noConsentRows")),
         foreignConceptRows: ($all | sum_metric("foreignConceptRows")),
+        malformedPathRows: ($all | sum_metric("malformedPathRows")),
         malformedRows: ($all | sum_metric("malformedRows")),
         inputBytes: ($all | map(.inputBytes // 0) | add // 0),
         largeStudyGb: ($largeGb | num),
@@ -173,7 +174,7 @@ jq -r --arg json "$(basename "$JSON")" '
       "| Runner pool | \($m.poolLane)\(if $m.poolWorkers then " (\($m.poolWorkers) workers)" else "" end) |",
       "| Own instance (input of \($m.largeStudyGb // "?") GiB or more) | \($m.largeLane) |",
       "",
-      "Rows split: \($m.totalRows). Unmapped HPDS ids: \($m.unmappedIds). Rows without a consent: \($m.noConsentRows). Rows with concepts from other studies, dropped: \($m.foreignConceptRows). Input read: \($m.inputBytes | size). Studies retried after an infrastructure error: \($m.retried).",
+      "Rows split: \($m.totalRows). Unmapped HPDS ids: \($m.unmappedIds). Rows without a consent: \($m.noConsentRows). Rows with concepts from other studies, dropped: \($m.foreignConceptRows). Rows with malformed concept paths, dropped: \($m.malformedPathRows). Input read: \($m.inputBytes | size). Studies retried after an infrastructure error: \($m.retried).",
       "",
       (if ($failed | length) > 0 then
         "## Failed studies", "",
@@ -199,8 +200,8 @@ jq -r --arg json "$(basename "$JSON")" '
         ($unstarted[] | "| \(.studyId | cell) | \(.failureReason // "" | cell) |"), ""
        else empty end),
       (if ($warned | length) > 0 then
-        "## Studies with warnings", "", "| Study | Warnings | Unmapped ids | Rows without consent | Concepts from other studies, dropped |", "|---|---|---|---|---|",
-        ($warned[] | "| \(.studyId | cell) | \(.validation.warnings | join("; ") | cell) | \(.job.metrics.unmappedIds // "") | \(.job.metrics.noConsentRows // "") | \(if (.job.metrics.foreignConceptRows // 0) > 0 then "\(.job.metrics.foreignConceptRows) (\(.job.metrics.foreignFirstNodes // {} | to_entries | map("\(.key): \(.value)") | join(", ")))" else "" end | cell) |"), ""
+        "## Studies with warnings", "", "| Study | Warnings | Unmapped ids | Rows without consent | Concepts from other studies, dropped | Malformed concept paths, dropped |", "|---|---|---|---|---|---|",
+        ($warned[] | "| \(.studyId | cell) | \(.validation.warnings | join("; ") | cell) | \(.job.metrics.unmappedIds // "") | \(.job.metrics.noConsentRows // "") | \(if (.job.metrics.foreignConceptRows // 0) > 0 then "\(.job.metrics.foreignConceptRows) (\(.job.metrics.foreignFirstNodes // {} | to_entries | map("\(.key): \(.value)") | join(", ")))" else "" end | cell) | \(if (.job.metrics.malformedPathRows // 0) > 0 then .job.metrics.malformedPathRows else "" end) |"), ""
        else empty end),
       "## All studies", "",
       "| Study | Abv | Lane | Outcome | Exit | Rows | Consents | Unmapped | No consent | Input | Duration | Attempts | Worker or build |",

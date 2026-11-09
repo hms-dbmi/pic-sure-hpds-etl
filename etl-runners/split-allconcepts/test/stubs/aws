@@ -14,10 +14,10 @@ path() { local u="${1#s3://}"; echo "$S/s3/$u"; }
 
 report() {   # report <dir> <run> <study> <kind>
   local dir="$1" run="$2" sid="$3" kind="$4"
-  local status=SUCCESS exit=SUCCESS err=null rows=10 unmapped=0 consents='{"1": 7, "2": 3}' foreign=0 nodes='{}'
+  local status=SUCCESS exit=SUCCESS err=null rows=10 unmapped=0 consents='{"1": 7, "2": 3}' foreign=0 nodes='{}' badpaths=0
   case "$kind" in
     warn) exit=SUCCESS_WITH_WARNINGS; unmapped=2 ;;
-    foreign) exit=SUCCESS_WITH_WARNINGS; foreign=3; nodes='{"phs000280": 2, "DCC Harmonized data set": 1}' ;;
+    foreign) exit=SUCCESS_WITH_WARNINGS; foreign=3; nodes='{"phs000280": 2, "DCC Harmonized data set": 1}'; badpaths=4 ;;
     data) status=FAILED; exit=DATA_ERROR; err='"Mapping CSV at s3://b/m.csv contained no data rows"'; rows=0; consents='{}' ;;
     validation) rows=0; consents='{}' ;;
     infra) status=FAILED; exit=INFRASTRUCTURE_ERROR; err='"Delete from consents failed: connection refused"'; rows=0; consents='{}' ;;
@@ -29,7 +29,7 @@ report() {   # report <dir> <run> <study> <kind>
  "inputValidation": {"phase": "input", "issues": [], "counts": {"error": 0, "warning": 0, "info": 0}},
  "outputValidation": {"phase": "output", "issues": [], "counts": {"error": 0, "warning": 0, "info": 0}},
  "metrics": {"studyId": "$sid", "totalRows": $rows, "unmappedIds": $unmapped, "noConsentRows": 0,
-             "malformedRows": 0, "foreignConceptRows": $foreign, "foreignFirstNodes": $nodes,
+             "malformedRows": 0, "foreignConceptRows": $foreign, "foreignFirstNodes": $nodes, "malformedPathRows": $badpaths,
              "rowsPerConsent": $consents}}
 JSON
   echo '{"job": "split-allconcepts"}' > "$dir/container-status.json"

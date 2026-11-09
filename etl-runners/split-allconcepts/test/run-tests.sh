@@ -192,7 +192,8 @@ pooled_foreign_concepts_are_a_warning_listing_their_first_nodes() {
     run_pooled phs000001 foreign
     expect_rc 10
     expect_eq "$(result .outcome)" SUCCESS_WITH_WARNINGS
-    expect_eq "$(result '.validation.warnings | join(",")')" "job reported SUCCESS_WITH_WARNINGS,no concepts from other studies"
+    expect_eq "$(result '.validation.warnings | join(",")')" "job reported SUCCESS_WITH_WARNINGS,no concepts from other studies,no malformed concept paths"
+    expect_file_has "$T/out/phs000001/validation.txt" "Bad paths:      4"
     expect_file_has "$T/out/phs000001/validation.txt" "Other studies': 3"
     expect_file_has "$T/out/phs000001/validation.txt" "phs000280: 2 row(s)"
 }
@@ -204,7 +205,9 @@ report_counts_and_lists_other_studies_concepts() {
     expect_rc 10
     expect_eq "$(J .metrics.foreignConceptRows)" 3
     expect_file_has "$(MDFILE)" "Rows with concepts from other studies, dropped: 3."
-    expect_file_has "$(MDFILE)" "| 3 (phs000280: 2, DCC Harmonized data set: 1) |"
+    expect_file_has "$(MDFILE)" "| 3 (phs000280: 2, DCC Harmonized data set: 1) | 4 |"
+    expect_eq "$(J .metrics.malformedPathRows)" 4
+    expect_file_has "$(MDFILE)" "Rows with malformed concept paths, dropped: 4."
 }
 
 pooled_data_error_carries_the_jobs_error_message() {
@@ -406,7 +409,7 @@ report_warnings_only_is_success_with_warnings() {
     expect_eq "$(J .exitCode)" SUCCESS_WITH_WARNINGS
     expect_eq "$(J '.outputValidation.issues[0].code')" STUDY_WARNINGS
     expect_file_has "$(MDFILE)" "## Studies with warnings"
-    expect_file_has "$(MDFILE)" "| phs000002 | job reported SUCCESS_WITH_WARNINGS; no unmapped hpds ids | 2 | 0 |  |"
+    expect_file_has "$(MDFILE)" "| phs000002 | job reported SUCCESS_WITH_WARNINGS; no unmapped hpds ids | 2 | 0 |  |  |"
     # The stage report's warnings make the standard report checks pass with warnings (UNSTABLE).
     RC=0; OUT=$("$COMMON/validate-report.sh" "$T/report/split-allconcepts-report-build-1.json" 2>&1) || RC=$?
     expect_rc 10
