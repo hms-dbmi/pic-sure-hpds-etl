@@ -441,6 +441,7 @@ Read legacy allConcepts CSV (streaming)
         │
         ▼
 For each row:
+  ├─ Drop it unless its concept path's first node is the study id (µ{study_id}µ…)
   ├─ Replace the legacy HPDS id with the new hpds_id (via mapping)
   └─ Look up the patient's consent group
         │
@@ -461,10 +462,20 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
 `__migration__/split_allconcepts/`; copy it across if it should be merged.)
 
 - Legacy HPDS ids replaced by new HPDS ids
+- Only the study's own concepts
 - One file per consent group instead of one unified file
 
 ### Error Handling
 
+- Rows whose concept path's first node is not the study id are dropped, with a
+  `FOREIGN_CONCEPTS` warning. Some legacy allConcepts files carry other studies' concepts for the
+  participants they share. The path's delimiter is its first character (`µ`, `\` or `/`), and the
+  node must equal the study id exactly (`phs000123.v1` is not `phs000123`). The job's metrics have
+  `foreignConceptRows` and `foreignFirstNodes` (rows per first node, the 50 largest, the rest under
+  `(other)`); the warning also carries up to 10 of the dropped paths. These rows are not counted as
+  unmapped or without consent. The study's `validate.sh` soft-fails "no concepts from other
+  studies", the split report totals them, and the migration report lists the study for review
+  (`SPLIT_FOREIGN_CONCEPTS`, `PARTIAL_DATA`)
 - Rows with unmapped HPDS ids are logged as warnings and skipped
 - `CONTINUE_ON_STUDY_FAILURE` (default `true`) lets the remaining studies finish when one
   fails; off, no new study is started after a failure (runs already in progress finish), and the

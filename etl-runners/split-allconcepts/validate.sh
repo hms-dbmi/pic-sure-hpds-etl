@@ -52,16 +52,19 @@ STUDY_ID=$(jq -r '.metrics.studyId // "unknown"' "$REPORT")
 TOTAL_ROWS=$(jq -r '.metrics.totalRows // 0' "$REPORT")
 UNMAPPED=$(jq -r '.metrics.unmappedIds // 0' "$REPORT")
 NO_CONSENT=$(jq -r '.metrics.noConsentRows // 0' "$REPORT")
+FOREIGN=$(jq -r '.metrics.foreignConceptRows // 0' "$REPORT")
 
 echo ""
 echo "  Study:          $STUDY_ID"
 echo "  Total rows:     $TOTAL_ROWS"
 echo "  Unmapped ids:   $UNMAPPED"
 echo "  No-consent:     $NO_CONSENT"
+echo "  Other studies': $FOREIGN"
 
 check "at least one row was read"          test "$TOTAL_ROWS" -gt 0
 soft  "no unmapped hpds ids"               test "$UNMAPPED" -eq 0
 soft  "no rows without consent assignment" test "$NO_CONSENT" -eq 0
+soft  "no concepts from other studies"     test "$FOREIGN" -eq 0
 
 CONSENT_COUNT=$(jq -r '.metrics.rowsPerConsent | length' "$REPORT" 2>/dev/null || echo 0)
 check "at least one consent file produced" test "$CONSENT_COUNT" -gt 0
@@ -69,5 +72,10 @@ check "at least one consent file produced" test "$CONSENT_COUNT" -gt 0
 echo ""
 echo "  Consent breakdown:"
 jq -r '.metrics.rowsPerConsent // {} | to_entries[] | "    c\(.key): \(.value) row(s)"' "$REPORT" 2>/dev/null || true
+if [[ "$FOREIGN" != 0 ]]; then
+  echo ""
+  echo "  Dropped: concepts of other studies, by first node:"
+  jq -r '.metrics.foreignFirstNodes // {} | to_entries[] | "    \(.key): \(.value) row(s)"' "$REPORT" 2>/dev/null || true
+fi
 
 summary

@@ -14,9 +14,10 @@ path() { local u="${1#s3://}"; echo "$S/s3/$u"; }
 
 report() {   # report <dir> <run> <study> <kind>
   local dir="$1" run="$2" sid="$3" kind="$4"
-  local status=SUCCESS exit=SUCCESS err=null rows=10 unmapped=0 consents='{"1": 7, "2": 3}'
+  local status=SUCCESS exit=SUCCESS err=null rows=10 unmapped=0 consents='{"1": 7, "2": 3}' foreign=0 nodes='{}'
   case "$kind" in
     warn) exit=SUCCESS_WITH_WARNINGS; unmapped=2 ;;
+    foreign) exit=SUCCESS_WITH_WARNINGS; foreign=3; nodes='{"phs000280": 2, "DCC Harmonized data set": 1}' ;;
     data) status=FAILED; exit=DATA_ERROR; err='"Mapping CSV at s3://b/m.csv contained no data rows"'; rows=0; consents='{}' ;;
     validation) rows=0; consents='{}' ;;
     infra) status=FAILED; exit=INFRASTRUCTURE_ERROR; err='"Delete from consents failed: connection refused"'; rows=0; consents='{}' ;;
@@ -28,7 +29,8 @@ report() {   # report <dir> <run> <study> <kind>
  "inputValidation": {"phase": "input", "issues": [], "counts": {"error": 0, "warning": 0, "info": 0}},
  "outputValidation": {"phase": "output", "issues": [], "counts": {"error": 0, "warning": 0, "info": 0}},
  "metrics": {"studyId": "$sid", "totalRows": $rows, "unmappedIds": $unmapped, "noConsentRows": 0,
-             "malformedRows": 0, "rowsPerConsent": $consents}}
+             "malformedRows": 0, "foreignConceptRows": $foreign, "foreignFirstNodes": $nodes,
+             "rowsPerConsent": $consents}}
 JSON
   echo '{"job": "split-allconcepts"}' > "$dir/container-status.json"
 }
@@ -49,7 +51,7 @@ simulate_worker() {   # the task file just written to <mailbox>/<instance>/task.
     hang) return ;;
   esac
   report "$reports" "$run" "$sid" "$kind"
-  case "$kind" in ok|warn|validation) code=0 ;; data) code=3 ;; infra) code=4 ;; esac
+  case "$kind" in ok|warn|foreign|validation) code=0 ;; data) code=3 ;; infra) code=4 ;; esac
   instance=$(basename "$(dirname "$task")")
   printf '{"runId": "%s", "instanceId": "%s", "phase": "done", "exitCode": %s, "exitName": "x"}\n' \
     "$run" "$instance" "$code" > "$reports/status.json"

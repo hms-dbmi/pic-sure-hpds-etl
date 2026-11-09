@@ -262,7 +262,11 @@ def main(argv):
             else:
                 for key, code, what in (("unmappedIds", "SPLIT_UNMAPPED_IDS", "allConcepts row(s) with a legacy hpds id not in the mapping"),
                                         ("noConsentRows", "SPLIT_ROWS_WITHOUT_CONSENT", "allConcepts row(s) whose participant has no consent in the DB"),
-                                        ("malformedRows", "SPLIT_MALFORMED_ROWS", "malformed allConcepts row(s)")):
+                                        ("malformedRows", "SPLIT_MALFORMED_ROWS", "malformed allConcepts row(s)"),
+                                        ("foreignConceptRows", "SPLIT_FOREIGN_CONCEPTS",
+                                         "allConcepts row(s) with another study's concept (first node "
+                                         + ", ".join(f"{k}: {v}" for k, v in (m.get("foreignFirstNodes") or {}).items())
+                                         + ")")):
                     if as_int(m.get(key)) > 0:
                         review(sid, "split-allconcepts", "PARTIAL_DATA", code, f"{m.get(key)} {what} were dropped")
 
