@@ -333,17 +333,19 @@ For each ready study:
   ├─ Query consents        ─▶ build _consents concept rows
   │                           (consent group membership per patient)
   │
-  ├─ Query participants    ─▶ build _source_subject_id concept rows
-  │                           (participant identifier per patient)
+  ├─ Combine study + consent info  ─▶ build _studies_consents concept rows
+  │                                   (study-level and individual consent paths)
   │
-  ├─ Query samples         ─▶ build _source_sample_id concept rows
-  │                           (sample identifier per patient)
+  ├─ Query participants    ─▶ collect subject ids, with the studies each is found in
   │
-  └─ Combine study + consent info  ─▶ build _studies_consents concept rows
-                                      (study-level and individual consent paths)
+  └─ Query samples         ─▶ collect sample ids (this study's own), with their studies
         │
         ▼
-Aggregate all studies into one CSV
+Build _source_subject_id and _source_sample_id rows: each (hpds_id, id) once, however many
+studies it applies to
+        │
+        ▼
+Aggregate into one CSV; write global_allconcepts_identity_studies.csv to the reports
         │
         ▼
 Write global_AllConcepts.csv to ALL_CONCEPTS_OUTPUT (s3://)
@@ -353,6 +355,21 @@ Write global_AllConcepts.csv to ALL_CONCEPTS_OUTPUT (s3://)
 
 A single `global_AllConcepts.csv` containing concept rows for consent, subject, sample, and
 study metadata across all ready studies.
+
+One participant (one dbGaP subject, one `hpds_id`) can be in several studies, typically a parent
+study and its TOPMed study, and a sample can be loaded by more than one of them. `_consents` and
+`_studies_consents` are per study, so such a participant has a row per study. `_source_subject_id`
+and `_source_sample_id` are not, so each `(hpds_id, id)` row is written **once**, and the job
+reports how many studies each applies to:
+
+- `global_allconcepts_identity_studies.csv` in the job's reports (archived with the build):
+  `concept, hpds_id, value, study_count, study_ids` (`;`-joined) for every subject and sample id row.
+- Metrics `subjectIdRows` / `sampleIdRows`, `subjectIdsByStudyCount` / `sampleIdsByStudyCount`
+  (number of studies → rows, e.g. `{"1": 9500, "2": 500}`), and `sharedSubjectIdStudySets` /
+  `sharedSampleIdStudySets` (for shared rows, the studies joined with `+` → rows; the 50 most common).
+  `rowsPerStudy` counts only a study's own `_consents` and `_studies_consents` rows.
+- Info issues `SHARED_SUBJECT_IDS` / `SHARED_SAMPLE_IDS` when any row applies to more than one study.
+  Sharing is expected, so it is not a warning.
 
 ---
 

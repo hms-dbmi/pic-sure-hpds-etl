@@ -37,6 +37,11 @@ fi
 STUDIES_PROCESSED=$(jq -r '.metrics.studiesProcessed // 0' "$REPORT")
 echo "Studies processed: $STUDIES_PROCESSED"
 echo "Total rows: $TOTAL_ROWS"
+# _source_subject_id / _source_sample_id are written once each; a row shared by studies is expected
+# (a parent study and its TOPMed study), so this is information, not a warning.
+jq -r '.metrics | "Subject id rows: \(.subjectIdRows // "n/a") (by number of studies: \(.subjectIdsByStudyCount // {} | tojson))",
+                  "Sample id rows:  \(.sampleIdRows // "n/a") (by number of studies: \(.sampleIdsByStudyCount // {} | tojson))",
+                  "Studies of every subject/sample id row: \(.identityStudiesReport // "n/a")"' "$REPORT"
 
 # Check for warnings in output validation
 WARNINGS=$(jq -r '.outputValidation.counts.warning // 0' "$REPORT")

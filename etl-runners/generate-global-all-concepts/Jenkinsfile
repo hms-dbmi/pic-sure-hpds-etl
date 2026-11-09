@@ -19,7 +19,9 @@
 // Outputs
 //   global_AllConcepts.csv at the --output location
 //   generate-global-all-concepts-<runId>.json report with studiesProcessed, totalRows,
-//   rowsPerStudy, and outputUri.
+//   rowsPerStudy, subject/sample id row counts by number of studies, and outputUri.
+//   global_allconcepts_identity_studies.csv: every subject/sample id row with the studies it
+//   applies to.
 //
 // Exit codes (see ExitCode.java)
 //   0 success | 2 validation | 3 data | 4 infrastructure | 5 config | 1 unknown |

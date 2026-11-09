@@ -244,6 +244,81 @@ class GenerateGlobalAllConceptsJobTest {
         verify(consentRepository, never()).findByStudyId("phs000003");
     }
 
+    /**
+     * One participant (hpds id 1) in a parent study and its TOPMed study: its subject id is written
+     * once, a sample both studies loaded is written once, and the report says which studies each row
+     * applies to. The per-study concepts stay per study.
+     */
+    @Test
+    void writes_each_subject_and_sample_id_once_and_reports_the_studies_it_applies_to() throws Exception {
+        String parent = "phs000280";
+        String topmed = "phs001211";
+        when(managedInputsService.read()).thenReturn(List.of(
+                ManagedInputRow.of("ARIC", parent, true),
+                ManagedInputRow.of("ARIC_TOPMED", topmed, true)));
+
+        when(consentRepository.findByStudyId(parent)).thenReturn(List.of(
+                new Consent(1L, parent, "1", "HMB"), new Consent(2L, parent, "1", "HMB")));
+        when(consentRepository.findByStudyId(topmed)).thenReturn(List.of(
+                new Consent(1L, topmed, "2", "DS")));
+
+        when(participantRepository.findByStudyId(parent)).thenReturn(List.of(
+                new Participant(1L, "SUBJ1", "DBGap"), new Participant(2L, "SUBJ2", "DBGap")));
+        when(participantRepository.findByStudyId(topmed)).thenReturn(List.of(
+                new Participant(1L, "SUBJ1", "DBGap")));
+
+        when(sampleRepository.findByStudyId(parent)).thenReturn(List.of(
+                new Sample(1L, parent, "SRS1", "DBGap"),
+                new Sample(1L, parent, "NWD1", "submitted")));
+        when(sampleRepository.findByStudyId(topmed)).thenReturn(List.of(
+                new Sample(1L, topmed, "NWD1", "submitted"),
+                // The same id under both sources in one study counts for that study once.
+                new Sample(1L, topmed, "NWD9", "DBGap"),
+                new Sample(1L, topmed, "NWD9", "submitted")));
+
+        String outputPath = tempDir.resolve("output.csv").toString();
+        JobResult result = executor.run(job, Map.of("output", outputPath), "test-shared");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        ArgumentCaptor<IoResolver.IoWriter> writerCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
+        verify(ioResolver).writeOutput(eq(outputPath), writerCaptor.capture());
+        List<String> lines = List.of(invokeWriter(writerCaptor.getValue()).split("\n"));
+
+        assertThat(lines.stream().filter(l -> l.contains("µ_source_subject_idµ"))).containsExactly(
+                "\"1\",\"µ_source_subject_idµ\",\"\",\"SUBJ1\",\"0\"",
+                "\"2\",\"µ_source_subject_idµ\",\"\",\"SUBJ2\",\"0\"");
+        assertThat(lines.stream().filter(l -> l.contains("µ_source_sample_idµ"))).containsExactly(
+                "\"1\",\"µ_source_sample_idµ\",\"\",\"SRS1\",\"0\"",
+                "\"1\",\"µ_source_sample_idµ\",\"\",\"NWD1\",\"0\"",
+                "\"1\",\"µ_source_sample_idµ\",\"\",\"NWD9\",\"0\"");
+        // Per-study concepts are still one per study.
+        assertThat(lines.stream().filter(l -> l.contains("µ_consentsµ"))).containsExactly(
+                "\"1\",\"µ_consentsµ\",\"\",\"phs000280.c1\",\"0\"",
+                "\"2\",\"µ_consentsµ\",\"\",\"phs000280.c1\",\"0\"",
+                "\"1\",\"µ_consentsµ\",\"\",\"phs001211.c2\",\"0\"");
+
+        assertThat(result.getMetrics())
+                .containsEntry("subjectIdRows", 2L)
+                .containsEntry("subjectIdsByStudyCount", Map.of("1", 1L, "2", 1L))
+                .containsEntry("sharedSubjectIdStudySets", Map.of("phs000280+phs001211", 1L))
+                .containsEntry("sampleIdRows", 3L)
+                .containsEntry("sampleIdsByStudyCount", Map.of("1", 2L, "2", 1L))
+                .containsEntry("sharedSampleIdStudySets", Map.of("phs000280+phs001211", 1L))
+                .containsEntry("rowsPerStudy", Map.of(parent, 6L, topmed, 3L));
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("SHARED_SUBJECT_IDS") && i.message().startsWith("1 of 2 "))
+                .anyMatch(i -> i.code().equals("SHARED_SAMPLE_IDS") && i.message().startsWith("1 of 3 "));
+
+        assertThat(Files.readAllLines(tempDir.resolve("reports")
+                .resolve(GenerateGlobalAllConceptsJob.IDENTITY_STUDIES_REPORT))).containsExactly(
+                "concept,hpds_id,value,study_count,study_ids",
+                "\"µ_source_subject_idµ\",1,\"SUBJ1\",2,\"phs000280;phs001211\"",
+                "\"µ_source_subject_idµ\",2,\"SUBJ2\",1,\"phs000280\"",
+                "\"µ_source_sample_idµ\",1,\"SRS1\",1,\"phs000280\"",
+                "\"µ_source_sample_idµ\",1,\"NWD1\",2,\"phs000280;phs001211\"",
+                "\"µ_source_sample_idµ\",1,\"NWD9\",1,\"phs001211\"");
+    }
+
     @Test
     void skips_study_with_no_consents_in_database() {
         long id2 = 2L;
