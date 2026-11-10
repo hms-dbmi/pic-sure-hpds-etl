@@ -13,7 +13,7 @@
 // Summaries: read from {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json when there.
 // Only the rest are asked of dbGaP's SSTR API (GET {DBGAP_BASE_URL}/{phs}.{v}/summary) -- one at a
 // time, at least DBGAP_REQUEST_SPACING_SECONDS apart (widening while dbGaP answers overloaded),
-// retried gently, and none started after DBGAP_DEADLINE_SECONDS (default 90 minutes) -- and each
+// retried gently, and none started after DBGAP_DEADLINE_SECONDS (default 6 hours) -- and each
 // answer is cached there at once (CACHE_SUMMARIES), so dbGaP is asked for a study version once.
 // A study still without a summary is UNVERIFIED (a warning: a later run fetches it).
 //
@@ -56,8 +56,8 @@ pipeline {
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
-        // Two attempts of up to JOB_TIMEOUT_SECONDS (default 2.5 h) each (RETRY_ON_INFRA), plus provisioning.
-        timeout(time: 6, unit: 'HOURS')
+        // Two attempts of up to JOB_TIMEOUT_SECONDS (default 7 h) each (RETRY_ON_INFRA), plus provisioning.
+        timeout(time: 15, unit: 'HOURS')
     }
 
     parameters {
@@ -93,13 +93,13 @@ pipeline {
                description: '--dbgap-give-up-after: stop asking dbGaP once this many studies in a row got no usable answer (1-1000); the rest are UNVERIFIED.')
         string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', defaultValue: '120',
                description: '--dbgap-unreachable-pause-seconds: after a study fails because dbGaP could not be connected to, no new lookup starts for this long, 0-3600.')
-        string(name: 'DBGAP_DEADLINE_SECONDS', defaultValue: '5400',
+        string(name: 'DBGAP_DEADLINE_SECONDS', defaultValue: '21600',
                description: '--dbgap-deadline-seconds: no dbGaP lookup starts after this many seconds (1-86400). Bounds how long the end of a pipeline waits on dbGaP; what is not fetched by then is UNVERIFIED and fetched by a later run.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 't3.medium',
                description: 'Runner instance type.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '9000',
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '25200',
                description: 'How long to wait for the runner before giving up (monitor exits 124). Keep it above DBGAP_DEADLINE_SECONDS plus a study\'s retries.')
         string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
                description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/, e.g. one a pipeline run uploaded. Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')

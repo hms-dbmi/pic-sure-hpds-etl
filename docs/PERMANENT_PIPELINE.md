@@ -732,7 +732,7 @@ processed, its SSTR loads (`countsByConsentGroup`), the per-study allConcepts ge
 
 Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json` when
 there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
-none started after 90 minutes), and cached there at once. A study still without one is
+none started after 6 hours), and cached there at once. A study still without one is
 `UNVERIFIED` and is fetched by a later run.
 
 Any discrepancy, or a study without a summary, makes the build **UNSTABLE**; so does QA failing to

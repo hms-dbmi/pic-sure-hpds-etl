@@ -109,7 +109,7 @@ SSTR API, and each answer is written there at once (`CACHE_SUMMARIES`), so each 
 fetched once, ever. dbGaP is volatile, so it is asked gently: one study at a time, 2 s apart (the
 gap doubling, up to 60 s, while it answers overloaded), 3 attempts per study (60 s then 120 s
 apart, `Retry-After` honoured), 2 minutes' pause after it cannot be connected to, no more lookups
-after 20 studies in a row get no answer, and none started after **90 minutes**
+after 20 studies in a row get no answer, and none started after **6 hours**
 (`DBGAP_DEADLINE_SECONDS`). A study still without a summary is `UNVERIFIED` (a
 `DBGAP_UNAVAILABLE` warning): the build is UNSTABLE and a later run fetches it. An answer for
 another study version than requested is `VERSION_MISMATCH` and is not cached.

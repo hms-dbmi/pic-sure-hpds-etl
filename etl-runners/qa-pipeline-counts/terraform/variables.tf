@@ -194,7 +194,7 @@ variable "dbgap_request_spacing_seconds" {
 variable "dbgap_deadline_seconds" {
   type        = string
   default     = ""
-  description = "--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Blank: 5400."
+  description = "--dbgap-deadline-seconds: no lookup starts after this many seconds (1-86400). Blank: 21600."
 }
 
 variable "java_opts" {

@@ -88,8 +88,11 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
 
     /** One at a time: dbGaP's gateway answers 502 when sent several at once. */
     static final int DEFAULT_CONCURRENCY = 1;
-    /** 90 minutes: the pipeline's end is not held for longer; what is not fetched by then is UNVERIFIED. */
-    static final int DEFAULT_DEADLINE_SECONDS = 5400;
+    /**
+     * 6 hours: dbGaP is volatile, so an outage is waited out this long before the pipeline's end moves
+     * on; what is not fetched by then is UNVERIFIED and fetched by a later run.
+     */
+    static final int DEFAULT_DEADLINE_SECONDS = 21600;
     static final int DEFAULT_CACHE_CONCURRENCY = 8;
     static final int MAX_CACHE_CONCURRENCY = 64;
 

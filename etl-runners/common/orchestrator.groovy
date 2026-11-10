@@ -658,8 +658,9 @@ def runQaPipelineCounts(String job, String pipeline) {
         string(name: 'CACHE_CONCURRENCY', value: '8'),
         booleanParam(name: 'CACHE_SUMMARIES', value: true),
         // One dbGaP request at a time, 2 s apart (widening while dbGaP is overloaded), 3 attempts
-        // each (60 s then 120 s apart), none started after 90 minutes: an outage is waited out that
+        // each (60 s then 120 s apart), none started after 6 hours: an outage is waited out that
         // long, then the studies still without a summary are UNVERIFIED and a later run fetches them.
+        // The runner gets 7 h (the deadline, the in-flight study's retries, and the DB and cache reads).
         string(name: 'CONCURRENCY', value: '1'),
         string(name: 'DBGAP_REQUEST_SPACING_SECONDS', value: '2'),
         string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
@@ -669,10 +670,10 @@ def runQaPipelineCounts(String job, String pipeline) {
         string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
         string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
         string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', value: '120'),
-        string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
+        string(name: 'DBGAP_DEADLINE_SECONDS', value: '21600'),
         string(name: 'RUN_ID', value: "${runTag()}-qa-pipeline-counts"),
         string(name: 'INSTANCE_TYPE', value: 't3.medium'),
-        string(name: 'JOB_TIMEOUT_SECONDS', value: '9000'),
+        string(name: 'JOB_TIMEOUT_SECONDS', value: '25200'),
         string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
         booleanParam(name: 'SKIP_TESTS', value: true),
         booleanParam(name: 'RETRY_ON_INFRA', value: true),

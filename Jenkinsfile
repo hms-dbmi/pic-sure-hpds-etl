@@ -398,10 +398,11 @@ pipeline {
                     echo "WARNING: the pipeline report was not written (${err})."
                 }
                 // Last: it reads the final report, and only reads the DB, so it never affects the backup.
-                // Bounded: its dbGaP lookups stop after 90 minutes; the runner's own timeout is 2.5 h.
+                // Bounded: its dbGaP lookups stop after 6 hours; the runner's own timeout is 7 h, and
+                // RETRY_ON_INFRA may run it twice.
                 if (params.QA_PIPELINE_COUNTS_JOB?.trim()) {
                     try {
-                        timeout(time: 6, unit: 'HOURS') {
+                        timeout(time: 15, unit: 'HOURS') {
                             orch().runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent')
                         }
                     } catch (err) {
