@@ -126,7 +126,7 @@ note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- no
 #         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
-#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject*data_dict*.xml      (optional, fallback only)
 # A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 # Probing is two S3 round trips per study (~3s), and done one study at a time it took 28 minutes
@@ -155,7 +155,7 @@ probe_study() {
   # Only presence matters here; when several match, the job picks the newest and reports it.
   subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
   sample_multi=$(grep -iE "^${sid}.*sample\.multi\.txt$" <<<"$listing" | head -1 || true)
-  data_dict=$(grep -iE "^${sid}.*subject\.data_dict\.xml$" <<<"$listing" | head -1 || true)
+  data_dict=$(grep -iE "^${sid}.*subject.*data_dict.*\.xml$" <<<"$listing" | head -1 || true)
   uri_exists "$mapping" && mapping_ok=1 || mapping_ok=0
 
   # Written whole, then renamed, so a probe that dies midway leaves no record at all.
@@ -175,7 +175,7 @@ fi
 #         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
-#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject*data_dict*.xml      (optional, fallback only)
 # A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 echo ""

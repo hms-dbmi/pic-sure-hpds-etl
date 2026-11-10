@@ -76,7 +76,7 @@ import java.util.stream.Stream;
  *             {@code BDC-ingestion-only__sstr_*} names are accepted, the canonical lowercase name
  *             preferred)</li>
  *         <li>{@code {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt}, and optionally
- *             {@code {studyid}*Sample.MULTI.txt} and {@code {studyid}*Subject.data_dict.xml}: the
+ *             {@code {studyid}*Sample.MULTI.txt} and {@code {studyid}*Subject*data_dict*.xml}: the
  *             dbGaP phenotype tables, the fallback when there is no usable SSTR</li>
  *         <li>{@code {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv}: per-study
  *             patient mapping (headerless; columns: id, abv, legacy hpds id)</li>
@@ -183,6 +183,8 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
     private static final Pattern TABLE_ACCESSION = Pattern.compile("pht\\d+");
+    private static final Pattern SUBJECT_DATA_DICT =
+            Pattern.compile(".*subject.*data_dict.*\\.xml", Pattern.CASE_INSENSITIVE);
 
     private final IoResolver io;
     private final DelimitedReader delimitedReader;
@@ -228,7 +230,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                 "Base URI whose subfolders, one per study id, hold per-study data: "
                                         + "{base}/{studyId}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
                                         + "or as a fallback {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt "
-                                        + "(+ optional *Sample.MULTI.txt and *Subject.data_dict.xml), "
+                                        + "(+ optional *Sample.MULTI.txt and *Subject*data_dict*.xml), "
                                         + "{base}/{studyId}/legacy/data/{ABV_UPPER}_PatientMapping.v2.csv "
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
@@ -1102,10 +1104,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return startsWithStudy(fileName, studyId) && fileName.toLowerCase(Locale.ROOT).endsWith("sample.multi.txt");
     }
 
-    /** {@code rawData/{studyid}*Subject.data_dict.xml}, case-insensitively. */
+    /**
+     * {@code rawData/{studyid}*Subject*data_dict*.xml}, case-insensitively: releases put other text
+     * between the parts, as in {@code ..._Subject.data_dict_2019_01_15.xml}.
+     */
     static boolean isSubjectDataDictFor(String fileName, String studyId) {
         return startsWithStudy(fileName, studyId)
-                && fileName.toLowerCase(Locale.ROOT).endsWith("subject.data_dict.xml");
+                && SUBJECT_DATA_DICT.matcher(fileName.substring(studyId.length())).matches();
     }
 
     private static boolean startsWithStudy(String fileName, String studyId) {

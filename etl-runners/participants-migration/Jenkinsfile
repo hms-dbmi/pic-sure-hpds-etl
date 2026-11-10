@@ -13,7 +13,7 @@
 //   participants / consents / samples RDS tables. Per study, from exactly one source:
 //     - {study_id}/rawData/sstr_{study_id}.{v}.txt, always preferred: SstrPopulateRdsParticipantsJob
 //     - else, or if that SSTR is malformed: {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional
-//       *Sample.MULTI.txt and *Subject.data_dict.xml): MultiPopulateRdsParticipantsJob
+//       *Sample.MULTI.txt and *Subject*data_dict*.xml): MultiPopulateRdsParticipantsJob
 //     - neither: the study fails
 //   then resolves legacy-hpds-id -> new-hpds-id pairs from {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv.
 //   One study's bad data fails that study only, reported as an output-validation error (exit 2).
@@ -71,7 +71,7 @@ pipeline {
                description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process", "Data Processed" (studies marked processed are not migrated)')
         string(name: 'DATA_FOLDER',
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
-               description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/ holding sstr_{study_id}.{v}.txt or, as a fallback, {study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt, *Subject.data_dict.xml); and {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv')
+               description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/ holding sstr_{study_id}.{v}.txt or, as a fallback, {study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt, *Subject*data_dict*.xml); and {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: '--study-filter: comma-separated study ids to process; blank processes every ready study')
         string(name: 'BATCH_SIZE', defaultValue: '1000',

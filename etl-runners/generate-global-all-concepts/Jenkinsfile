@@ -47,7 +47,7 @@ pipeline {
         copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
-        timeout(time: 2, unit: 'HOURS')
+        timeout(time: 4, unit: 'HOURS')
     }
 
     parameters {
@@ -59,8 +59,9 @@ pipeline {
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'm5.large',
                description: 'Runner instance type.')
-        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '3600',
-               description: 'How long to wait for the runner before giving up (monitor exits 124)')
+        // The full migration's run took 60 min end to end (50 min in the job), so 1 h was too tight.
+        string(name: 'JOB_TIMEOUT_SECONDS', defaultValue: '10800',
+               description: 'How long to wait for the runner before giving up (monitor exits 124). Keep it inside the 4 h build timeout.')
         string(name: 'PREBUILT_IMAGE_TAR', defaultValue: '',
                description: 'Runner image tarball already under s3://<stack bucket>/etl-runner/container/ (the orchestrator sets this). Skips Build JAR and Package runner image, and the tarball is not deleted afterwards. Blank builds and uploads a fresh image.')
         booleanParam(name: 'SKIP_TESTS', defaultValue: false,

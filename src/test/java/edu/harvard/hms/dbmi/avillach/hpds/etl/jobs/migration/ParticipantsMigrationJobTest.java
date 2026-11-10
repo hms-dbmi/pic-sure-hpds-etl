@@ -921,6 +921,17 @@ class ParticipantsMigrationJobTest {
                 "phs000007.v33.pht001416.v1.p14.FHS_Sample_Attributes.MULTI.txt", "phs000007")).isFalse();
 
         assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(DATA_DICT_NAME, "phs000007")).isTrue();
+        // Other text may sit between Subject, data_dict and .xml.
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.FHS_Subject.data_dict_2019_01_15.xml", "phs000007")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.p14.FHS_Subject_Consent.v2.data_dict.XML", "phs000007")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000008.v1.pht000182.v14.FHS_Subject.data_dict.xml", "phs000007")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.FHS_Subject.data_dict.xml.gz", "phs000007")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.FHS.data_dict.Subject.xml", "phs000007")).isFalse();
         assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
                 "phs000007.v33.pht001415.v1.FHS_Sample.data_dict.xml", "phs000007")).isFalse();
     }

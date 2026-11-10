@@ -35,7 +35,9 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Writes {@code global_AllConcepts.csv}: the concepts that describe every participant across all
@@ -297,6 +299,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
      */
     private long addStudiesConsentsConcepts(AllConceptsCsvBuilder builder, List<Consent> consents, String studyId) {
         long emptyAbbrevCount = 0;
+        Set<String> emptyCodes = new TreeSet<>();
 
         for (Consent c : consents) {
             builder.add(AllConceptsRow.nonNumeric(
@@ -306,8 +309,7 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
 
             if (c.consentAbbreviation() == null || c.consentAbbreviation().isBlank()) {
                 emptyAbbrevCount++;
-                log.warn("Skipping individual _studies_consents path for study {} consent_code {}: "
-                        + "consent_abbreviation is empty", studyId, c.consentCode());
+                emptyCodes.add(c.consentCode());
                 continue;
             }
 
@@ -317,6 +319,11 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
                     "TRUE"));
         }
 
+        // Once per study, not per row: a line per participant consent took most of a full run.
+        if (emptyAbbrevCount > 0) {
+            log.warn("Skipping individual _studies_consents paths for {} consent row(s) of study {} "
+                    + "(consent_code {}): consent_abbreviation is empty", emptyAbbrevCount, studyId, emptyCodes);
+        }
         return emptyAbbrevCount;
     }
 
