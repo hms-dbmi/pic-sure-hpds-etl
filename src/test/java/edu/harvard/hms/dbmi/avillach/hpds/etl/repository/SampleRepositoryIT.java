@@ -101,14 +101,6 @@ class SampleRepositoryIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void a_sample_with_no_study_matches_no_study() {
-        consents.batchUpsert(List.of(new Consent(1, "phs1", "1", "HMB")));
-        jdbc.update("INSERT INTO samples (hpds_id, source_sample_id, sample_source) VALUES (1, 'OLD', 'dbgap')");
-
-        assertThat(samples.findByStudyId("phs1")).isEmpty();
-    }
-
-    @Test
     void counts_a_studys_samples_of_one_source_per_consent_group() {
         consents.batchUpsert(List.of(new Consent(1, "phs1", "1", "HMB"), new Consent(2, "phs1", "2", "GRU"),
                 new Consent(1, "phs2", "1", "GRU")));

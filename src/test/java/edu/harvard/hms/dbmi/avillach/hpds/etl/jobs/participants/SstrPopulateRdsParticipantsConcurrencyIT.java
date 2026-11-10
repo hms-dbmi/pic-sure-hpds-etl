@@ -132,13 +132,14 @@ class SstrPopulateRdsParticipantsConcurrencyIT extends AbstractIntegrationTest {
                 sharedId, STUDY_B)).isEqualTo(1);
 
         // Each study's sample for the shared subject stays under that study, so neither study's
-        // genomic artifacts list the other's sample.
+        // genomic artifacts list the other's sample. (row() puts the id in both SAMPLE_ID and
+        // dbgap_sample_id, so each is also a "submitted" sample; the DBGap one is checked.)
         assertThat(jdbc.queryForList(
-                "SELECT source_sample_id FROM samples WHERE hpds_id = ? AND study_id = ?", String.class,
-                sharedId, STUDY_A)).containsExactly("SAMP_A1");
+                "SELECT source_sample_id FROM samples WHERE hpds_id = ? AND study_id = ? AND sample_source = ?",
+                String.class, sharedId, STUDY_A, SOURCE)).containsExactly("SAMP_A1");
         assertThat(jdbc.queryForList(
-                "SELECT source_sample_id FROM samples WHERE hpds_id = ? AND study_id = ?", String.class,
-                sharedId, STUDY_B)).containsExactly("SAMP_B1");
+                "SELECT source_sample_id FROM samples WHERE hpds_id = ? AND study_id = ? AND sample_source = ?",
+                String.class, sharedId, STUDY_B, SOURCE)).containsExactly("SAMP_B1");
     }
 
     /** The referential invariant, which holds however the race lands. */
