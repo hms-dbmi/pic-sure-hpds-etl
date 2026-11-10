@@ -98,7 +98,8 @@ variable "managed_inputs_uri" {
   type        = string
   description = <<-EOT
     --managed-inputs: CSV of studies with columns 'Study Abbreviated Name',
-    'Study Identifier', and 'Data is ready to process'. Local path or s3:// URI.
+    'Study Identifier', 'Data is ready to process' and 'Data Processed' (studies
+    marked processed are not migrated). Local path or s3:// URI.
   EOT
 }
 

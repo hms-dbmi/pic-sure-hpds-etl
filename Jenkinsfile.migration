@@ -85,7 +85,7 @@ pipeline {
         string(name: 'PARTICIPANTS_TIMEOUT_SECONDS', defaultValue: '43200',
                description: 'How long participants-migration waits for its runner before giving up (exit 124). Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'STUDY_FILTER', defaultValue: '',
-               description: 'Comma-separated study ids; blank runs every ready study. Applies to the participants and split stages only -- the global AllConcepts and VCF stages always cover ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
+               description: 'Comma-separated study ids; blank runs every study that is ready and not yet marked Data Processed. Applies to the participants and split stages only -- the VCF stage covers every ready, unprocessed study and the global AllConcepts stage ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
@@ -352,9 +352,8 @@ pipeline {
 
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
-                        // The migration regenerates artifacts for studies the legacy
-                        // system already processed; without this the job sees zero work.
-                        booleanParam(name: 'INCLUDE_PROCESSED', value: true),
+                        // Only studies not yet marked "Data Processed", like every per-study stage.
+                        booleanParam(name: 'INCLUDE_PROCESSED', value: false),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -978,7 +977,11 @@ def runSplitAllConcepts() {
             ? cols[header.indexOf('Study Abbreviated Name')].trim() : ''
         def readyRaw = cols.size() > header.indexOf('Data is ready to process') && header.indexOf('Data is ready to process') >= 0
             ? cols[header.indexOf('Data is ready to process')].trim() : ''
-        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)) {
+        def processedRaw = cols.size() > header.indexOf('Data Processed') && header.indexOf('Data Processed') >= 0
+            ? cols[header.indexOf('Data Processed')].trim() : ''
+        // As participants-migration: a study already marked "Data Processed" is not split again.
+        if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)
+                && !parseYesNo(processedRaw, 'Data Processed', studyId)) {
             studies << [studyId: studyId, abv: abv]
         }
     }
@@ -990,7 +993,7 @@ def runSplitAllConcepts() {
     }
 
     if (studies.isEmpty()) {
-        error('No ready studies found in managed inputs for Split AllConcepts.')
+        error('No studies ready and not yet processed found in managed inputs for Split AllConcepts.')
     }
 
     echo "Split AllConcepts: ${studies.size()} study/studies to process"

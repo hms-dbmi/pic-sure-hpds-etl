@@ -54,7 +54,7 @@ Build ▸ Tests
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
-│  Migrate participants    │  (all ready studies, one run)
+│  Migrate participants    │  (ready, unprocessed studies, one run)
 │  participants-migration  │
 └────────────┬────────────┘
              │  produces {studyid}_hpds_id_mapping.csv per study,
@@ -95,9 +95,13 @@ The global AllConcepts and VCF index stages read the tables populated by
 `participants-migration`. The participant database exists only for the run; see
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
+The per-study stages (participants, split, VCF indexes) run only studies marked **ready** that
+are **not yet marked "Data Processed"** in managed inputs, like the permanent pipeline's loads. The
+global AllConcepts, merge and manifest stages cover every ready study.
+
 `STUDY_FILTER` limits the participants and split stages to the listed studies; the global
-AllConcepts and VCF stages always cover all ready studies from the database, so a filtered
-rerun still ends with complete artifacts.
+AllConcepts stage always covers all ready studies from the database, so a filtered rerun still
+ends with complete artifacts.
 
 The first four jobs can also be run locally via `--pipeline=migrate-all`, which uses the
 in-process `PipelineRunner` defined in `application.yml`.
@@ -168,7 +172,7 @@ dump of the legacy RDS database must be placed.
 
 **Job:** `participants-migration`
 **Class:** [`ParticipantsMigrationJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/ParticipantsMigrationJob.java)
-**Runs:** once, processing all ready studies (or `STUDY_FILTER`) internally
+**Runs:** once, processing every ready study not yet marked "Data Processed" (or `STUDY_FILTER`) internally
 
 ### Input
 
@@ -188,10 +192,10 @@ sharing the Subject.MULTI's table accession (`pht######`) is preferred.
 ### Flow
 
 ```
-Read managed inputs ─▶ filter to ready studies
+Read managed inputs ─▶ filter to ready, unprocessed studies
         │
         ▼
-For each ready study:
+For each of them:
         │
         ├─── SSTR file? ── Yes ──▶ SstrPopulateRdsParticipantsJob (sub-job)
         │                              │
@@ -262,7 +266,7 @@ malformed SSTR or its MULTI files had problems.
   - `old_hpds_id` -- the legacy integer HPDS id
   - `new_hpds_id` -- the new integer HPDS id (from `hpds_id_seq`)
   - `common_dbgap_id` -- the dbGaP subject id
-- `participants_migration_sources.csv`: one row per ready study -- outcome, source used
+- `participants_migration_sources.csv`: one row per migrated (ready, unprocessed) study -- outcome, source used
   (`sstr`/`multi`/`none`), the SSTR/MULTI/dictionary files found, whether the SSTR was used or
   malformed, the consent column read, mapping and unresolved row counts, and the error if it failed
 - `participants_migration_file_issues.csv`: every problem found in those files, one row per
@@ -316,7 +320,7 @@ artifacts.
 
 **Job:** `split-allconcepts`
 **Class:** [`SplitAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/SplitAllConceptsJob.java)
-**Runs:** once per ready study. The stage is planned, then run in two lanes in parallel, largest
+**Runs:** once per ready study not yet marked "Data Processed". The stage is planned, then run in two lanes in parallel, largest
 studies first, then consolidated into one report. Every step is a script under
 [`etl-runners/split-allconcepts/`](../etl-runners/split-allconcepts/) with its own tests
 (`make -C etl-runners/split-allconcepts test`, also run in the Tests stage).
@@ -516,8 +520,8 @@ reused here to generate the global AllConcepts from the newly migrated data. Wri
 
 The same job as the permanent pipeline (see
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-6-create-vcf-indexes)), run with
-`INCLUDE_PROCESSED=true`: the migration regenerates artifacts for studies the legacy system
-already processed, which would otherwise be zero work. Writes
+`INCLUDE_PROCESSED=false`: like the other per-study stages, it covers only ready studies not yet
+marked "Data Processed". Writes
 `{studyId}.c{code}_vcfIndex.tsv` and `{studyId}.c{code}_SampleIds.csv` to
 `VCF_INDEXES_OUTPUT`.
 
@@ -668,7 +672,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MANAGED_INPUTS` | `…/__migration__/managed_inputs.csv` | Study list CSV |
 | `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders (see [S3 Layout](#s3-layout)); passed to `participants-migration` as `DATA_FOLDER`, used for the split input, mapping uploads, and split output (must be `s3://`) |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
-| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready |
+| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready, unprocessed |
 | `PARTICIPANTS_PARALLELISM` | `4` | Studies migrated at once (1-8). Each wants about a vCPU on the participants runner, whose size is that job's `INSTANCE_TYPE` |
 | `PARTICIPANTS_RESUME_FROM_RUN_ID` | (blank) | Run id of an earlier participants-migration run over the same `DATA_ROOT` (e.g. `<build-tag>-participants` of one that timed out); studies it migrated are copied, not loaded again |
 | `PARTICIPANTS_TIMEOUT_SECONDS` | `43200` | How long participants-migration waits for its runner. Passed explicitly: a downstream job gets a parameter left out of the build call from its previous build, not its current Jenkinsfile |

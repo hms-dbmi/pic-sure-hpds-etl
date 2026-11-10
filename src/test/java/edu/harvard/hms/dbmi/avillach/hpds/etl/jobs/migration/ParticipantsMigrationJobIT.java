@@ -279,10 +279,13 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         managedInputs(
                 "FHS,phs000007,Yes",
                 "MISSING,phs000009,Yes");
+        // phs000009 has participant files but no patient mapping: a failure, not a skip.
         String base = baseUri(Map.of(
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
-                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n",
+                "phs000009/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME.replace("phs000007", "phs000009"),
+                ParticipantsMigrationJobTest.SUBJECT_MULTI));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-isolation");

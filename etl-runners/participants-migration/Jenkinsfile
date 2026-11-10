@@ -68,7 +68,7 @@ pipeline {
     parameters {
         string(name: 'MANAGED_INPUTS',
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/__migration__/managed_inputs.csv',
-               description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process"')
+               description: '--managed-inputs: CSV with columns "Study Abbreviated Name", "Study Identifier", "Data is ready to process", "Data Processed" (studies marked processed are not migrated)')
         string(name: 'DATA_FOLDER',
                defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
                description: '--data-folder: root of the per-study folders: {root}/{study_id}/rawData/ holding sstr_{study_id}.{v}.txt or, as a fallback, {study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt, *Subject.data_dict.xml); and {root}/{study_id}/legacy/data/{ABV}_PatientMapping.v2.csv')

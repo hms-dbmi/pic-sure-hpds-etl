@@ -60,13 +60,13 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * MIGRATION. Orchestrates the one-time move of every "ready" study's participant
+ * MIGRATION. Orchestrates the one-time move of every "ready", not yet processed study's participant
  * identities into the {@code participants}/{@code consents}/{@code samples} RDS tables,
  * from a legacy export laid out as:
  *
  * <ul>
  *   <li>{@link ManagedInputsService}: provides the study list (columns "Study Abbreviated Name",
- *       "Study Identifier", and "Data is ready to process"), configured via
+ *       "Study Identifier", "Data is ready to process" and "Data Processed"), configured via
  *       {@code etl.managed-inputs.uri} or {@code --managed-inputs=<uri>}.</li>
  *   <li>{@code --data-folder}: a base URI (local or {@code s3://}) whose subfolders, one per
  *       study id, hold per-study data. Every rawData file is matched case-insensitively:
@@ -294,7 +294,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         // listed twice is migrated once.
         Map<String, ManagedInputRow> studies = new LinkedHashMap<>();
         for (ManagedInputRow row : managedInputs) {
-            if (!row.isReady() || (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId()))) {
+            // Like the permanent pipeline's loads: a study already marked "Data Processed" is not run again.
+            if (!row.isReady() || row.isProcessed()
+                    || (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId()))) {
                 continue;
             }
             if (studies.putIfAbsent(row.studyId(), row) != null) {
@@ -594,6 +596,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         trace.sampleMultiFile = first(sampleMultis);
         trace.dataDictFile = first(dataDicts);
 
+        // Before anything is staged: such a study is skipped, so it needs no patient mapping either.
+        if (sstrFileName == null && subjectMultis.isEmpty()) {
+            String reason = "no SSTR file and no Subject.MULTI file in rawData";
+            trace.issue(Severity.WARNING, NO_PARTICIPANT_FILES, null, reason + "; skipped", List.of());
+            throw new DataException(studyId + " has no participant files (" + reason + "); skipped");
+        }
+
         Path localSstr = null;
         if (sstrFileName != null) {
             localSstr = studyDir.resolve(sstrFileName);
@@ -631,11 +640,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             identities = runSstr(studyId, files, batchSize, ctx, trace);
         }
         if (identities == null) {
-            if (files.subjectMulti() == null && trace.sstrFile == null) {
-                String reason = "no SSTR file and no Subject.MULTI file in rawData";
-                trace.issue(Severity.WARNING, NO_PARTICIPANT_FILES, null, reason + "; skipped", List.of());
-                throw new DataException(studyId + " has no participant files (" + reason + "); skipped");
-            }
+            // discoverStudyFiles skipped a study with no participant files, so an SSTR is present.
             if (files.subjectMulti() == null) {
                 // There is a file, it is just unusable: that is a data error to fix, so the study fails.
                 String reason = "SSTR '" + trace.sstrFile + "' is malformed (" + trace.sstrError
@@ -1191,7 +1196,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
         if (output.studyResults().isEmpty()) {
-            report.error("NO_READY_STUDIES", "No studies marked ready to process were found");
+            report.error("NO_READY_STUDIES", "No studies marked ready to process and not yet processed were found");
         }
         for (StudyResult result : output.studyResults()) {
             SourceUsage usage = result.usage();

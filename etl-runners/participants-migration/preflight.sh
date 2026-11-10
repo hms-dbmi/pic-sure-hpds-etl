@@ -99,9 +99,10 @@ with open(sys.argv[1], newline="", encoding="utf-8-sig") as fh:
         sid = (row.get(SID) or "").strip()
         if not abv or not sid:
             continue
-        # Mirrors ParticipantsMigrationJob.parseReady exactly.
+        # Mirrors ParticipantsMigrationJob: ready, and not already marked processed.
         ready = (row.get(READY) or "").strip().lower() in ("true", "yes", "1")
-        print(f"{abv}\t{sid}\t{'ready' if ready else 'skip'}")
+        processed = (row.get(PROCESSED) or "").strip().lower() in ("true", "yes", "1")
+        print(f"{abv}\t{sid}\t{'processed' if ready and processed else 'ready' if ready else 'skip'}")
 PY
 ) || { fail "could not parse managed-inputs as CSV"; summary; exit 1; }
 
@@ -115,8 +116,10 @@ fi
 check "managed-inputs has the required columns" true
 
 READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
-check "at least one study is marked ready" test "$READY_COUNT" -gt 0
-note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
+PROCESSED_COUNT=$(awk -F'\t' '$3=="processed"' <<<"$STUDIES" | grep -c . || true)
+check "at least one study is marked ready and not yet processed" test "$READY_COUNT" -gt 0
+note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process and not yet processed"
+note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- not migrated"
 
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
@@ -124,7 +127,7 @@ note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
 #         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
-# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+# A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 # Probing is two S3 round trips per study (~3s), and done one study at a time it took 28 minutes
 # for ~580 studies. probe_study runs PARALLELISM at once, each writing $PROBES/<n>; the results
@@ -173,7 +176,7 @@ fi
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
 #         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
-# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+# A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 echo ""
 echo "  Per-study inputs:"
@@ -208,15 +211,20 @@ while IFS=$'\t' read -r abv sid state; do
   else
     NO_SOURCE_STUDIES=$((NO_SOURCE_STUDIES + 1))
     route="none"
-    warn "$sid ($abv): no SSTR and no Subject.MULTI in $raw_data_dir -- this study will fail"
+    warn "$sid ($abv): no SSTR and no Subject.MULTI in $raw_data_dir -- this study will be skipped (not migrated)"
   fi
 
-  # Required on every route; it supplies the old-hpds-id -> new-hpds-id pairs.
-  check "$sid ($abv, $route): $mapping" test "$mapping_ok" = 1
+  # Required on every route that loads; it supplies the old-hpds-id -> new-hpds-id pairs. A study
+  # with no participant source is skipped before its mapping is read, so it needs none.
+  if [[ "$route" == none ]]; then
+    [[ "$mapping_ok" == 1 ]] || note "$sid ($abv): no patient mapping either ($mapping)"
+  else
+    check "$sid ($abv, $route): $mapping" test "$mapping_ok" = 1
+  fi
 done < "$READY_STUDIES"
 
 echo ""
 note "$SSTR_STUDIES study/studies will load from their SSTR, $MULTI_STUDIES from their MULTI files, "
-note "$NO_SOURCE_STUDIES have no participant source and will fail"
+note "$NO_SOURCE_STUDIES have no participant source and will be skipped"
 
 summary

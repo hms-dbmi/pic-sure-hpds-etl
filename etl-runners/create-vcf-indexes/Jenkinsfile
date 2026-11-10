@@ -66,7 +66,7 @@ pipeline {
         string(name: 'MANAGED_INPUTS', defaultValue: '',
                description: '--managed-inputs: CSV listing studies to include (local path or s3:// URI). When blank the job falls back to etl.managed-inputs.uri from its config.')
         booleanParam(name: 'INCLUDE_PROCESSED', defaultValue: false,
-               description: '--include-processed: also generate indexes for studies marked Data Processed in managed inputs. The migration pipeline sets this.')
+               description: '--include-processed: also generate indexes for studies marked Data Processed in managed inputs.')
         string(name: 'RUN_ID', defaultValue: '',
                description: 'Correlation id. Blank derives one from BUILD_NUMBER.')
         string(name: 'INSTANCE_TYPE', defaultValue: 'm5.large',

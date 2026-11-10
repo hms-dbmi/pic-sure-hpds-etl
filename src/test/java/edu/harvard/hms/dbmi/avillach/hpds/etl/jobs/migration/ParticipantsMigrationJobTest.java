@@ -278,6 +278,24 @@ class ParticipantsMigrationJobTest {
         assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L);
     }
 
+    /** A study already marked "Data Processed" is not touched, even with no files at all. */
+    @Test
+    void skips_studies_already_marked_processed() {
+        String managed = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process,Data Processed\n"
+                        + "ABV2,phs000002,Yes,No\n"
+                        + "DONE,phs000003,Yes,Yes\n");
+        String folder = baseUri(Map.of(
+                "phs000002/rawData/sstr_phs000002.v1.txt", SSTR,
+                "phs000002/legacy/data/ABV2_PatientMapping.v2.csv", "1001,ABV2,2002\n"));
+
+        JobResult result = executor.run(newJob(managed), Map.of("data-folder", folder), "unit-processed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L)
+                .containsEntry("skippedStudyIds", List.of());
+    }
+
     @Test
     void rejects_parallelism_outside_one_to_eight() {
         for (String bad : List.of("0", "9", "x")) {
@@ -621,6 +639,19 @@ class ParticipantsMigrationJobTest {
         assertThat(report(ParticipantsMigrationJob.SUMMARY_REPORT))
                 .contains("| Skipped: no participant files | 1 |")
                 .contains("| Failed: no usable participant source | 0 |");
+    }
+
+    /** Such a study often has no patient mapping either; it is still skipped, not failed. */
+    @Test
+    void skips_a_study_with_no_participant_files_and_no_patient_mapping() {
+        JobResult result = run(Map.of(STUDY + "/rawData/" + SAMPLE_MULTI_NAME, SAMPLE_MULTI), ABV + "," + STUDY + ",Yes");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics())
+                .containsEntry("failedStudies", 0L)
+                .containsEntry("skippedStudyIds", List.of(STUDY));
+        assertThat(result.getOutputValidation().getIssues()).noneMatch(i -> i.code().equals("STUDY_FAILED"));
+        assertThat(issueCodes(STUDY)).contains("NO_PARTICIPANT_FILES");
     }
 
     @Test
