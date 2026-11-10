@@ -100,7 +100,6 @@ class SampleRepositoryIT extends AbstractIntegrationTest {
         assertThat(samples.findByStudyId("phs2")).containsExactly(new Sample(1, "phs2", "S2", "dbgap"));
     }
 
-    /** Rows from a dump taken before samples had a study (see lib.sh's pdb_upgrade_schema). */
     @Test
     void a_sample_with_no_study_matches_no_study() {
         consents.batchUpsert(List.of(new Consent(1, "phs1", "1", "HMB")));

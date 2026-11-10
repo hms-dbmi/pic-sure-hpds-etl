@@ -75,7 +75,7 @@ case "$prog" in
     elif [[ "$all" == *"pg_database_size"* ]]; then echo 1000
     elif [[ "$all" == *"information_schema.schemata"* ]]; then echo 1
     elif [[ "$all" == *"participants="* ]]; then echo "participants=1 consents=1 samples=1"
-    elif [[ "$all" == *"study_id IS NULL"* ]]; then f unattributed_samples 0
+    elif [[ "$all" == *"information_schema.columns"* ]]; then f samples_shape current
     elif [[ "$all" == *"-c "*"ALTER ROLE"* || "$all" == *"search_path"* ]]; then exit "$(f psql_rc 0)"
     else
       input=$(cat)

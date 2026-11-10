@@ -66,8 +66,7 @@ public class SampleRepository {
 
     /**
      * The samples a study's own loads wrote. Never the samples another study loaded for a shared
-     * participant: those belong to that study's genomic data, not this one's. Rows from before
-     * samples were attributed to studies (a NULL study_id) match no study.
+     * participant: those belong to that study's genomic data, not this one's.
      */
     public List<Sample> findByStudyId(String studyId) {
         try {

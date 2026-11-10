@@ -464,29 +464,25 @@ SQL
 }
 
 # Brings a database restored from an older dump, or kept running from before a schema change, up
-# to schema.sql. Every step is idempotent, so it runs on every start, kept or replaced.
+# to schema.sql, by running schema.sql itself: every statement in it is CREATE ... IF NOT EXISTS, so
+# it adds only what is missing (a newer index, say). A samples table from before samples were
+# attributed to studies (no study_id) is dropped first, so schema.sql recreates it empty: which
+# study loaded its rows was never recorded, and every study load writes its samples again.
 pdb_upgrade_schema() {
-    PDB_PSQL_DB="$DB_NAME" pdb_psql <<SQL || pdb_die "could not upgrade the $DB_SCHEMA schema to schema.sql"
-SET ROLE "$DB_USERNAME";
-SET search_path TO "$DB_SCHEMA";
--- A dump taken before ix_consents_study_id was added lacks it, and every study load's consents
--- purge would then scan the whole table.
-CREATE INDEX IF NOT EXISTS ix_consents_study_id ON consents (study_id);
--- Samples are attributed to the study whose load wrote them. Rows written before that keep a NULL
--- study_id: which study loaded them was never recorded, so they match no study until it is loaded
--- again (and a reload never touches them).
-ALTER TABLE samples ADD COLUMN IF NOT EXISTS study_id TEXT;
-ALTER TABLE samples DROP CONSTRAINT IF EXISTS uq_samples;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_samples_study ON samples (hpds_id, study_id, source_sample_id, sample_source);
-CREATE INDEX IF NOT EXISTS ix_samples_study_id ON samples (study_id);
-SQL
-    local unattributed
-    unattributed=$(PDB_PSQL_DB="$DB_NAME" pdb_psql -tAc \
-        "SELECT count(*) FROM \"$DB_SCHEMA\".samples WHERE study_id IS NULL" </dev/null | tr -d '[:space:]') \
-        || pdb_die "could not count the samples with no study"
-    if [[ "$unattributed" != 0 ]]; then
-        pdb_log "WARNING: $unattributed sample row(s) predate per-study samples and belong to no study; genomic jobs ignore them. Load each study again (no RESUME_FROM_RUN_ID) to rewrite its samples; the rows can then be dropped with DELETE FROM $DB_SCHEMA.samples WHERE study_id IS NULL."
+    local shape drop=""
+    shape=$(PDB_PSQL_DB="$DB_NAME" pdb_psql -tAc "SELECT CASE
+            WHEN to_regclass('\"$DB_SCHEMA\".samples') IS NULL THEN 'none'
+            WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = '$DB_SCHEMA'
+                         AND table_name = 'samples' AND column_name = 'study_id') THEN 'current'
+            ELSE 'old' END" </dev/null | tr -d '[:space:]') \
+        || pdb_die "could not read the shape of the samples table"
+    if [[ "$shape" == old ]]; then
+        pdb_log "The samples table predates per-study samples (no study_id): dropping it; schema.sql recreates it empty. Load every study again (participants-migration without RESUME_FROM_RUN_ID, or the SSTR loads) to refill it."
+        drop="DROP TABLE samples;"
     fi
+    { echo "SET ROLE \"$DB_USERNAME\"; SET search_path TO \"$DB_SCHEMA\"; $drop"
+      cat "$PDB_DIR/../../src/main/resources/repository/schema.sql"; } \
+        | PDB_PSQL_DB="$DB_NAME" pdb_psql || pdb_die "could not bring the $DB_SCHEMA schema up to schema.sql"
 }
 
 # --------------------------------------------------------------------------- credentials

@@ -180,14 +180,13 @@ live database *dirty* ("run … in progress"), whether it kept or replaced it; t
 *clean*, keeps one restored from `participant_db_not_promoted.tar` because of `continue` *dirty*,
 and leaves a kept database's state as it was.
 
-Every start, whether it kept or replaced the database, then brings the schema up to `schema.sql`
-(idempotent steps in `pdb_upgrade_schema`): it adds `ix_consents_study_id` and the `samples.study_id`
-column with its keys, if missing. A sample row written before `study_id` existed keeps it NULL,
-since which study loaded it was never recorded; it matches no study, so genomic jobs ignore it.
-When there are any, the start logs `WARNING: <n> sample row(s) predate per-study samples`. Load each
-affected study again (not with `RESUME_FROM_RUN_ID`, which copies a study instead of loading it) to
-rewrite its samples; the leftover rows can then be dropped with
-`DELETE FROM etl.samples WHERE study_id IS NULL`.
+Every start, whether it kept or replaced the database, then brings the schema up to `schema.sql` by
+running it (`pdb_upgrade_schema`): every statement in it is `CREATE ... IF NOT EXISTS`, so it adds
+only what is missing, such as `ix_consents_study_id`. A `samples` table from before samples were
+attributed to studies (no `study_id` column) is **dropped and recreated empty** first -- which study
+loaded its rows was never recorded -- and the start says so. Load every study again afterwards
+(`participants-migration` without `RESUME_FROM_RUN_ID`, which copies a study instead of loading it,
+or the SSTR loads) to refill it.
 
 `live_state.json` missing means "no recorded state" (a kept database is then recorded clean). Any
 other S3 error reading it, or a record with no known state, stops the start: guessing could erase a

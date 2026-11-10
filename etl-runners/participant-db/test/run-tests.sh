@@ -143,17 +143,19 @@ start_upgrades_the_schema_of_a_kept_db() {
     run_start
     expect_rc 0
     expect_out "Plan: keep"
-    check grep -q "ADD COLUMN IF NOT EXISTS study_id" "$STUB_STATE/psql.log"
-    check grep -q "uq_samples_study" "$STUB_STATE/psql.log"
-    refute grep -q "belong to no study" <<<"$OUT"
+    # schema.sql itself, which only adds what is missing; a current samples table is kept.
+    check grep -q "CREATE TABLE IF NOT EXISTS samples" "$STUB_STATE/psql.log"
+    refute grep -q "DROP TABLE samples" "$STUB_STATE/psql.log"
 }
 
-start_warns_about_samples_that_belong_to_no_study() {
+start_drops_and_recreates_a_samples_table_without_study_id() {
     given_running_db; given_live_state clean
-    echo 7 > "$STUB_STATE/unattributed_samples"
+    echo old > "$STUB_STATE/samples_shape"
     run_start
     expect_rc 0
-    expect_out "7 sample row(s) predate per-study samples and belong to no study"
+    expect_out "The samples table predates per-study samples (no study_id): dropping it"
+    check grep -q "DROP TABLE samples;" "$STUB_STATE/psql.log"
+    check grep -q "CREATE TABLE IF NOT EXISTS samples" "$STUB_STATE/psql.log"
 }
 
 start_fails_when_the_schema_upgrade_fails() {
@@ -161,7 +163,7 @@ start_fails_when_the_schema_upgrade_fails() {
     echo 3 > "$STUB_STATE/psql_rc"
     run_start
     expect_rc 1
-    expect_out "could not upgrade the etl schema"
+    expect_out "could not bring the etl schema up to schema.sql"
 }
 
 start_reissues_a_password_when_the_saved_one_is_stale() {
@@ -197,7 +199,6 @@ start_creates_a_fresh_schema_when_there_is_no_backup_at_all() {
     expect_rc 0
     expect_out "fresh schema"
     check grep -q "CREATE TABLE" "$STUB_STATE/psql.log"
-    check grep -q "ADD COLUMN IF NOT EXISTS study_id" "$STUB_STATE/psql.log"
     refute grep -q "aws s3 cp s3://.*participant_db.tar -" "$STUB_STATE/aws.log"
 }
 
