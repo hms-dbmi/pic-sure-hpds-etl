@@ -93,9 +93,11 @@ elif [[ "$err" != *"(404)"* && "$err" != *"Not Found"* ]]; then
   die "could not confirm s3://$BUCKET/$STATUS_KEY is gone: $(tr '\n' ' ' <<<"$err")"
 fi
 
-task=$(jq -n --arg run "$RUN_ID" --arg module "$MODULE" --arg reports "$REPORTS_PREFIX" \
+# Not $module: jq 1.6 reserves it, and the filter would not compile.
+task=$(jq -n --arg run "$RUN_ID" --arg mod "$MODULE" --arg reports "$REPORTS_PREFIX" \
              --arg log "$LOG_KEY" --argjson env "$env_json" \
-             '{runId: $run, module: $module, reportsPrefix: $reports, logKey: $log, env: $env}')
+             '{runId: $run, module: $mod, reportsPrefix: $reports, logKey: $log, env: $env}') \
+    || die "could not build the task for run $RUN_ID"
 printf '%s\n' "$task" | aws s3 cp - "$TASK_URI" --region "$REGION" --only-show-errors \
     || die "could not write $TASK_URI"
 
