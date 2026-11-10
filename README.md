@@ -64,7 +64,11 @@ also in S3). A standalone QA job (`qa-consent-counts`), run by hand with a manag
 list of study versions, compares the participant database's participants per consent group (and,
 optionally, a run's load counts) with dbGaP's counts for that study version (the dbGaP SSTR API;
 its runner needs HTTPS egress to `www.ncbi.nlm.nih.gov`); see
-[docs/JENKINS.md](docs/JENKINS.md#qa-consent-counts-standalone).
+[docs/JENKINS.md](docs/JENKINS.md#qa-consent-counts-standalone). Both pipelines end, after their
+report, with `qa-pipeline-counts`: every ready study's counts per consent group -- the participant
+DB, and the run's job and final reports -- against its dbGaP study summary, cached under
+`{DATA_ROOT}/{study}/rawData/`; see
+[docs/JENKINS.md](docs/JENKINS.md#qa-pipeline-counts-end-of-both-pipelines).
 
 The pattern follows [`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — the same
 `terraform-modules/etl-runner` shape and `s3://<stack>/etl-runner/…` layout — with Java in place
@@ -145,6 +149,7 @@ etl/
    ├─ harmonized/GenerateIdentityConsentMappingJob     permanent: DMC drop → identity/consent CSV
    ├─ qa/
    │  ├─ QaConsentCountsJob                            permanent QA: DB/load consent counts vs dbGaP
+   │  ├─ QaPipelineCountsJob                           permanent QA, end of both pipelines: DB and run counts vs dbGaP summaries
    │  ├─ ConsentCountComparison                        the comparison rules (pure)
    │  └─ DbgapStudyClient                              dbGaP SSTR API client with retry/backoff
    └─ migration/
@@ -167,6 +172,7 @@ etl-runners/common/orchestrator.groovy  the permanent orchestrator's stage logic
 etl-runners/pipeline-report/      the permanent pipeline's end-of-run report
 etl-runners/migration-report/     the migration pipeline's end-of-run report (TEMPORARY)
 etl-runners/qa-consent-counts/    the standalone consent count QA runner
+etl-runners/qa-pipeline-counts/   the end-of-pipeline consent count QA runner (+ collect-run-counts.py)
 etl-runners/environments/         per-environment tfvars (development.tfvars)
 docs/JENKINS.md                   architecture, validation, AWS setup, runbook
 docs/PARTICIPANT_DB.md            participant database lifecycle, dumps, seeding

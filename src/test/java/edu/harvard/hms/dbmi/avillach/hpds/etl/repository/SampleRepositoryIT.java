@@ -108,4 +108,20 @@ class SampleRepositoryIT extends AbstractIntegrationTest {
 
         assertThat(samples.findByStudyId("phs1")).isEmpty();
     }
+
+    @Test
+    void counts_a_studys_samples_of_one_source_per_consent_group() {
+        consents.batchUpsert(List.of(new Consent(1, "phs1", "1", "HMB"), new Consent(2, "phs1", "2", "GRU"),
+                new Consent(1, "phs2", "1", "GRU")));
+        samples.batchUpsert(List.of(
+                new Sample(1, "phs1", "S1", "DBGap"), new Sample(1, "phs1", "S1b", "DBGap"),
+                new Sample(1, "phs1", "NWD1", "submitted"),
+                new Sample(2, "phs1", "S2", "DBGap"),
+                // Another study's sample for the shared participant does not count for phs1.
+                new Sample(1, "phs2", "S9", "DBGap")));
+
+        assertThat(samples.countSamplesByConsent(List.of("phs1"), "DBGap")).containsExactly(
+                new SampleRepository.ConsentGroupSamples("phs1", "1", 2),
+                new SampleRepository.ConsentGroupSamples("phs1", "2", 1));
+    }
 }

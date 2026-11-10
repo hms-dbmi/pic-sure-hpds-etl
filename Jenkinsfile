@@ -19,7 +19,7 @@
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
 // SKIP_TESTS=true so the same commit's suites are not re-run per study. The runner jobs rebuild
 // nothing: 'Package runner image' builds the runner image once and passes it to every one of them
-// (SSTR load, global AllConcepts, VCF indexes, per-study allConcepts, merge and manifest) as
+// (SSTR load, global AllConcepts, VCF indexes, per-study allConcepts, merge, manifest and QA) as
 // PREBUILT_IMAGE_TAR.
 //
 // Per-study stages: SSTR load runs one study at a time, or STUDY_CONCURRENCY at once with
@@ -39,6 +39,10 @@
 //
 // End of every run: downstream-artifacts/pipeline-report/ (etl-runners/pipeline-report/), archived
 // and uploaded to s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/.
+// Then, when the run succeeded, QA pipeline counts (etl-runners/qa-pipeline-counts/) compares every
+// ready study's counts per consent group -- the DB, and this run's job and final reports -- with its
+// dbGaP summary; findings make the build UNSTABLE. Its report lands in
+// downstream-artifacts/qa-pipeline-counts/ and beside the pipeline report in S3.
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -121,6 +125,8 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
+        string(name: 'QA_PIPELINE_COUNTS_JOB', defaultValue: 'qa-pipeline-counts',
+               description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile at the end of the run (after the report and the DB backup): every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov. Blank skips it.')
         booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
                description: 'Replace the participant database before this run with DB_RESTORE_FROM (blank = the latest clean backup), whether or not one is up. A running database is saved to participant_db_pre_overwrite.tar first.')
         string(name: 'DB_RESTORE_FROM', defaultValue: '',
@@ -176,6 +182,7 @@ pipeline {
                         // (stubbed docker/aws; seconds, no AWS or runtime needed).
                         sh 'make -C etl-runners/participant-db test'
                         sh 'make -C etl-runners/pipeline-report test'
+                        sh 'make -C etl-runners/qa-pipeline-counts test'
                     }
                     post {
                         always {
@@ -389,6 +396,17 @@ pipeline {
                     }
                 } catch (err) {
                     echo "WARNING: the pipeline report was not written (${err})."
+                }
+                // Last: it reads the final report, and only reads the DB, so it never affects the backup.
+                // Bounded: its dbGaP lookups stop after 90 minutes; the runner's own timeout is 2.5 h.
+                if (params.QA_PIPELINE_COUNTS_JOB?.trim()) {
+                    try {
+                        timeout(time: 6, unit: 'HOURS') {
+                            orch().runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent')
+                        }
+                    } catch (err) {
+                        unstable("QA pipeline counts did not finish (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own.")
+                    }
                 }
                 orch().removeRunnerImage()
             }

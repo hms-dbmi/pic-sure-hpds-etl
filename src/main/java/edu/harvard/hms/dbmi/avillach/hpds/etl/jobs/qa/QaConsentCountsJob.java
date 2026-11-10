@@ -22,7 +22,6 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa.ConsentCountComparison.Stu
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
-import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -37,7 +36,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -46,13 +44,6 @@ import java.util.Map;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -112,15 +103,14 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
     /** One at a time: dbGaP's gateway answers 502 when sent several at once. */
     static final int DEFAULT_CONCURRENCY = 1;
-    static final int DEFAULT_GIVE_UP_AFTER = 20;
-    /** After a study fails because dbGaP could not be connected to, no new lookup starts for this long. */
-    static final int DEFAULT_UNREACHABLE_PAUSE_SECONDS = 120;
+    static final int DEFAULT_GIVE_UP_AFTER = DbgapParams.DEFAULT_GIVE_UP_AFTER;
+    static final int DEFAULT_UNREACHABLE_PAUSE_SECONDS = DbgapParams.DEFAULT_UNREACHABLE_PAUSE_SECONDS;
     /**
      * 3.5 hours: ~600 studies one at a time at ~13 s a call plus spacing take ~2.5 h when dbGaP is
      * healthy. Plus the in-flight lookup's retries, inside the runner's 18000 s monitor timeout.
      */
     static final int DEFAULT_DEADLINE_SECONDS = 12600;
-    static final int MAX_CONCURRENCY = 16;
+    static final int MAX_CONCURRENCY = DbgapParams.MAX_CONCURRENCY;
 
     private final ManagedInputsService managedInputsService;
     private final ConsentRepository consents;
@@ -157,88 +147,34 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
     @Override
     public JobExpectations expectations() {
-        DbgapStudyClient.Config d = DbgapStudyClient.Config.defaults();
-        return JobExpectations.of(
-                List.of(
-                        ParamSpec.optional("load-counts",
-                                "A run's participants loaded per consent group: a CSV with columns "
-                                        + "study_id,consent_code,participants_loaded[,source] (local path or s3:// URI; "
-                                        + "participants_migration_consent_counts.csv and migration_consent_counts.csv "
-                                        + "qualify; other columns are ignored). Studies it does not list, and groups with "
-                                        + "a blank participants_loaded (not loaded this run), are compared DB vs dbGaP "
-                                        + "only. Blank skips the load-report check.",
-                                "s3://bucket/etl-runner/reports/migration-pipeline/<tag>/migration-report/migration_consent_counts.csv"),
-                        ParamSpec.optional("studies",
-                                "The study versions to check, instead of the managed inputs' ready studies: "
-                                        + "comma-, semicolon- or space-separated phsNNNNNN.vN (a .pN suffix is ignored). "
-                                        + "When given, the managed inputs are not read and --study-filter must be blank",
-                                "phs000956.v6,phs001412.v4"),
-                        ParamSpec.optional("study-filter",
-                                "With the managed inputs: comma-separated study ids to check; blank checks every "
-                                        + "ready study", "phs000200,phs001412"),
-                        ParamSpec.optional("concurrency",
-                                "Studies looked up in dbGaP at once (1-" + MAX_CONCURRENCY + "; default "
-                                        + DEFAULT_CONCURRENCY + "; dbGaP answers 502 when busy)", "1"),
-                        ParamSpec.optional("dbgap-base-url",
-                                "dbGaP SSTR study endpoint (default " + d.baseUrl() + ")", d.baseUrl()),
-                        ParamSpec.optional("dbgap-max-attempts",
-                                "Requests per study, retries included (1-20; default " + d.maxAttempts() + ")", "3"),
-                        ParamSpec.optional("dbgap-initial-backoff-seconds",
-                                "Wait after the first failed request, doubling per retry (0-600; default "
-                                        + d.initialBackoff().toSeconds() + ")", "60"),
-                        ParamSpec.optional("dbgap-max-backoff-seconds",
-                                "Longest wait between retries (1-3600; default " + d.maxBackoff().toSeconds()
-                                        + "); a Retry-After header is honoured instead, up to "
-                                        + DbgapStudyClient.MAX_RETRY_AFTER.toMinutes() + " minutes", "120"),
-                        ParamSpec.optional("dbgap-timeout-seconds",
-                                "Per-request timeout (1-600; default " + d.requestTimeout().toSeconds() + ")", "60"),
-                        ParamSpec.optional("dbgap-give-up-after",
-                                "Stop asking dbGaP once this many studies in a row got no usable answer "
-                                        + "(1-1000; default " + DEFAULT_GIVE_UP_AFTER + "): an outage then ends the lookups, "
-                                        + "the rest UNVERIFIED, instead of retrying every study", "20"),
-                        ParamSpec.optional("dbgap-request-spacing-seconds",
-                                "Least gap between dbGaP requests, from the previous one's start and end (0-600; "
-                                        + "default " + d.requestSpacing().toSeconds() + "; 0: none). Doubles, up to "
-                                        + RequestPacer.MAX_SPACING.toSeconds() + " s, while dbGaP answers overloaded "
-                                        + "(429, 502, 503, 504, a timeout) and narrows back as it answers", "2"),
-                        ParamSpec.optional("dbgap-unreachable-pause-seconds",
-                                "After a study fails because dbGaP could not be connected to (connection error or "
-                                        + "connect timeout, after its retries), wait this long before starting the next "
-                                        + "study's lookup (0-3600; default " + DEFAULT_UNREACHABLE_PAUSE_SECONDS + ")",
-                                "120"),
-                        ParamSpec.optional("dbgap-deadline-seconds",
-                                "No dbGaP lookup starts after this many seconds of lookups (1-86400; default "
-                                        + DEFAULT_DEADLINE_SECONDS + "), so the run ends, with its report, inside the "
-                                        + "runner's monitor timeout; studies not looked up by then are UNVERIFIED", "12600")),
+        List<ParamSpec> params = new ArrayList<>(List.of(
+                ParamSpec.optional("load-counts",
+                        "A run's participants loaded per consent group: a CSV with columns "
+                                + "study_id,consent_code,participants_loaded[,source] (local path or s3:// URI; "
+                                + "participants_migration_consent_counts.csv and migration_consent_counts.csv "
+                                + "qualify; other columns are ignored). Studies it does not list, and groups with "
+                                + "a blank participants_loaded (not loaded this run), are compared DB vs dbGaP "
+                                + "only. Blank skips the load-report check.",
+                        "s3://bucket/etl-runner/reports/migration-pipeline/<tag>/migration-report/migration_consent_counts.csv"),
+                ParamSpec.optional("studies",
+                        "The study versions to check, instead of the managed inputs' ready studies: "
+                                + "comma-, semicolon- or space-separated phsNNNNNN.vN (a .pN suffix is ignored). "
+                                + "When given, the managed inputs are not read and --study-filter must be blank",
+                        "phs000956.v6,phs001412.v4"),
+                ParamSpec.optional("study-filter",
+                        "With the managed inputs: comma-separated study ids to check; blank checks every "
+                                + "ready study", "phs000200,phs001412")));
+        params.addAll(DbgapParams.specs(DEFAULT_CONCURRENCY, DEFAULT_DEADLINE_SECONDS));
+        return JobExpectations.of(params,
                 List.of(COUNTS_FILE + " and " + DISCREPANCIES_FILE + " in the reports directory; a WARNING issue "
                         + "per discrepancy or study dbGaP could not answer for; exit 4 when dbGaP answered for no study"));
     }
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
-        intParam(ctx, report, "concurrency", 1, MAX_CONCURRENCY);
-        intParam(ctx, report, "dbgap-max-attempts", 1, 20);
-        intParam(ctx, report, "dbgap-initial-backoff-seconds", 0, 600);
-        intParam(ctx, report, "dbgap-max-backoff-seconds", 1, 3600);
-        intParam(ctx, report, "dbgap-timeout-seconds", 1, 600);
-        intParam(ctx, report, "dbgap-give-up-after", 1, 1000);
-        intParam(ctx, report, "dbgap-unreachable-pause-seconds", 0, 3600);
-        intParam(ctx, report, "dbgap-request-spacing-seconds", 0, 600);
-        intParam(ctx, report, "dbgap-deadline-seconds", 1, 86400);
-        ctx.get("dbgap-base-url").ifPresent(url -> {
-            if (!isHttpUrl(url.trim())) {
-                report.error("BAD_DBGAP_BASE_URL", "dbgap-base-url must be an http(s) URL, got: " + url,
-                        "--dbgap-base-url");
-            }
-        });
+        DbgapParams.validate(ctx, report);
         if (report.hasErrors()) {
             return;
-        }
-        DbgapStudyClient.Config config = clientConfig(ctx);
-        if (config.maxBackoff().compareTo(config.initialBackoff()) < 0) {
-            report.error("BAD_BACKOFF", "dbgap-max-backoff-seconds (" + config.maxBackoff().toSeconds()
-                    + ") is less than dbgap-initial-backoff-seconds (" + config.initialBackoff().toSeconds() + ")",
-                    "--dbgap-max-backoff-seconds");
         }
         ctx.get("load-counts").ifPresent(uri -> {
             if (!io.exists(uri.trim())) {
@@ -288,10 +224,9 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
             inputs.add(new StudyInput(sid, t.abv(), ConsentCountComparison.normalizeVersion(t.version()),
                     t.version(), db.getOrDefault(sid, Map.of()), load.counts().get(sid), load.sources().get(sid)));
         }
-        Map<String, DbgapLookup> lookups = lookUp(inputs, clientConfig(ctx), intValue(ctx, "concurrency", DEFAULT_CONCURRENCY),
-                intValue(ctx, "dbgap-give-up-after", DEFAULT_GIVE_UP_AFTER),
-                Duration.ofSeconds(intValue(ctx, "dbgap-unreachable-pause-seconds", DEFAULT_UNREACHABLE_PAUSE_SECONDS)),
-                Duration.ofSeconds(intValue(ctx, "dbgap-deadline-seconds", DEFAULT_DEADLINE_SECONDS)));
+        Map<String, DbgapLookup> lookups = lookUp(inputs, DbgapParams.clientConfig(ctx),
+                DbgapParams.concurrency(ctx, DEFAULT_CONCURRENCY), DbgapParams.giveUpAfter(ctx),
+                DbgapParams.unreachablePause(ctx), DbgapParams.deadline(ctx, DEFAULT_DEADLINE_SECONDS));
 
         List<StudyResult> results = new ArrayList<>();
         for (StudyInput in : inputs) {
@@ -471,122 +406,16 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
     /* ---- dbGaP ---- */
 
-    private static DbgapStudyClient.Config clientConfig(JobContext ctx) {
-        DbgapStudyClient.Config d = DbgapStudyClient.Config.defaults();
-        return new DbgapStudyClient.Config(
-                ctx.get("dbgap-base-url", d.baseUrl()).trim(),
-                intValue(ctx, "dbgap-max-attempts", d.maxAttempts()),
-                Duration.ofSeconds(intValue(ctx, "dbgap-initial-backoff-seconds", (int) d.initialBackoff().toSeconds())),
-                Duration.ofSeconds(intValue(ctx, "dbgap-max-backoff-seconds", (int) d.maxBackoff().toSeconds())),
-                Duration.ofSeconds(intValue(ctx, "dbgap-timeout-seconds", (int) d.requestTimeout().toSeconds())),
-                Duration.ofSeconds(intValue(ctx, "dbgap-request-spacing-seconds", (int) d.requestSpacing().toSeconds())));
-    }
-
-    /**
-     * Looks every study with a usable version up in dbGaP, {@code concurrency} at a time (each call
-     * takes ~10 s). A study without a version is not looked up and has no entry.
-     *
-     * <p>An outage must end the run with its report, not run into the runner's monitor
-     * timeout (exit 124, nothing written): with requests timing out, every study would take ~6 minutes
-     * of retries. So no lookup starts once {@code giveUpAfter} studies in a row got no usable answer
-     * (any answer, a NOT_FOUND included, resets the count), or once {@code deadline} has passed since
-     * the first; the studies not asked are FAILED with 0 attempts, i.e. UNVERIFIED.
-     *
-     * <p>To give an unreachable dbGaP (or our route to it) room to recover, a study that failed
-     * because dbGaP could not be connected to holds back every lookup not yet started for
-     * {@code unreachablePause}; lookups already in flight carry on.
-     */
+    /** Looks every study with a usable version up in dbGaP (see {@link DbgapBatchLookup}). */
     private Map<String, DbgapLookup> lookUp(List<StudyInput> inputs, DbgapStudyClient.Config config, int concurrency,
                                             int giveUpAfter, Duration unreachablePause, Duration deadline) {
-        List<StudyInput> toAsk = inputs.stream().filter(i -> i.version() != null).toList();
-        Map<String, DbgapLookup> lookups = new LinkedHashMap<>();
+        List<DbgapBatchLookup.Request> toAsk = inputs.stream().filter(i -> i.version() != null)
+                .map(i -> new DbgapBatchLookup.Request(i.studyId(), i.version())).toList();
         if (toAsk.isEmpty()) {
-            return lookups;
+            return new LinkedHashMap<>();
         }
-        log.info("Looking up {} study version(s) in dbGaP at {} ({} at a time)", toAsk.size(), config.baseUrl(),
-                Math.min(concurrency, toAsk.size()));
-        AtomicInteger threads = new AtomicInteger();
-        AtomicInteger failedInARow = new AtomicInteger();
-        long stopAt = System.nanoTime() + deadline.toNanos();
-        AtomicLong pausedUntil = new AtomicLong(System.nanoTime());
-        Map<String, String> mdc = MDC.getCopyOfContextMap();
-        ExecutorService pool = Executors.newFixedThreadPool(Math.min(concurrency, toAsk.size()), r -> {
-            Thread t = new Thread(r, "dbgap-" + threads.incrementAndGet());
-            t.setDaemon(true);
-            return t;
-        });
-        try (DbgapStudySource source = sourceFactory.apply(config)) {
-            Map<String, Future<DbgapLookup>> futures = new LinkedHashMap<>();
-            for (StudyInput in : toAsk) {
-                futures.put(in.studyId(), pool.submit(() -> {
-                    if (mdc != null) {
-                        MDC.setContextMap(mdc);
-                    }
-                    try {
-                        long pause = pausedUntil.get() - System.nanoTime();
-                        if (pause > 0) {
-                            log.info("dbGaP {}.{}: waiting {} s after dbGaP could not be connected to", in.studyId(),
-                                    in.version(), TimeUnit.NANOSECONDS.toSeconds(pause) + 1);
-                            try {
-                                while ((pause = pausedUntil.get() - System.nanoTime()) > 0) {
-                                    TimeUnit.NANOSECONDS.sleep(pause);
-                                }
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                return DbgapLookup.failed("not asked: interrupted while waiting for dbGaP to recover", 0);
-                            }
-                        }
-                        if (failedInARow.get() >= giveUpAfter) {
-                            return DbgapLookup.failed("not asked: dbGaP gave no usable answer for the last "
-                                    + failedInARow.get() + " studies in a row, so the run stopped asking", 0);
-                        }
-                        if (System.nanoTime() - stopAt > 0) {
-                            return DbgapLookup.failed("not asked: the " + deadline.toSeconds()
-                                    + " s lookup deadline (--dbgap-deadline-seconds) had passed", 0);
-                        }
-                        DbgapLookup lookup;
-                        try {
-                            lookup = source.fetch(in.studyId(), in.version());
-                        } catch (RuntimeException e) {
-                            failedInARow.incrementAndGet();
-                            throw e;
-                        }
-                        if (lookup != null && lookup.outcome() != DbgapLookup.Outcome.FAILED) {
-                            failedInARow.set(0);
-                        } else {
-                            failedInARow.incrementAndGet();
-                        }
-                        if (lookup != null && lookup.unreachable() && !unreachablePause.isZero()) {
-                            long until = System.nanoTime() + unreachablePause.toNanos();
-                            pausedUntil.accumulateAndGet(until, Math::max);
-                            log.warn("dbGaP could not be connected to for {}.{}; no new lookup starts for {} s",
-                                    in.studyId(), in.version(), unreachablePause.toSeconds());
-                        }
-                        return lookup;
-                    } finally {
-                        MDC.clear();
-                    }
-                }));
-            }
-            for (Map.Entry<String, Future<DbgapLookup>> e : futures.entrySet()) {
-                DbgapLookup lookup;
-                try {
-                    lookup = e.getValue().get();
-                } catch (ExecutionException ex) {
-                    // A source is not meant to throw; if one does, that study is unverified, not the run lost.
-                    Throwable cause = ex.getCause() == null ? ex : ex.getCause();
-                    log.error("dbGaP lookup of {} threw", e.getKey(), cause);
-                    lookup = DbgapLookup.failed(cause.getClass().getSimpleName() + ": " + cause.getMessage(), 1);
-                }
-                lookups.put(e.getKey(), lookup == null ? DbgapLookup.failed("no answer", 0) : lookup);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new InfrastructureException("Interrupted while looking studies up in dbGaP", e);
-        } finally {
-            pool.shutdownNow();
-        }
-        return lookups;
+        return DbgapBatchLookup.lookUp(toAsk, sourceFactory.apply(config), config.baseUrl(), concurrency,
+                giveUpAfter, unreachablePause, deadline, null);
     }
 
     /* ---- Output ---- */
@@ -735,32 +564,6 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         m.put("studiesWithLoadCounts", output.studiesWithLoadCounts());
         m.put("reportFiles", List.of(COUNTS_FILE, DISCREPANCIES_FILE));
         return m;
-    }
-
-    /* ---- Parameters ---- */
-
-    /** A whole-number parameter, trimmed as {@link #intParam} validated it. */
-    private static int intValue(JobContext ctx, String name, int defaultValue) {
-        return ctx.get(name).map(v -> Integer.parseInt(v.trim())).orElse(defaultValue);
-    }
-
-    private static void intParam(JobContext ctx, ValidationReport report, String name, int min, int max) {
-        ctx.get(name).ifPresent(raw -> {
-            String v = raw.trim();
-            if (!v.matches("-?\\d{1,9}") || Integer.parseInt(v) < min || Integer.parseInt(v) > max) {
-                report.error("BAD_PARAM", name + " must be a whole number from " + min + " to " + max + ", got: "
-                        + raw, "--" + name);
-            }
-        });
-    }
-
-    private static boolean isHttpUrl(String url) {
-        try {
-            URI u = URI.create(url);
-            return u.getHost() != null && Arrays.asList("http", "https").contains(u.getScheme());
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
     }
 
     /**

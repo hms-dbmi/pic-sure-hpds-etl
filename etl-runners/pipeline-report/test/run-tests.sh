@@ -27,7 +27,7 @@ if [ "${UPDATE:-}" = 1 ]; then
   cp "$TMP"/report/pipeline* "$HERE/expected/"
   echo "  expected/ updated"
 fi
-for f in pipeline-report.json pipeline-report.md pipeline_study_outcomes.csv; do
+for f in pipeline-report.json pipeline-report.md pipeline_study_outcomes.csv pipeline_consent_counts.csv; do
   if diff -u "$HERE/expected/$f" "$TMP/report/$f" >"$TMP/$f.diff"; then
     pass "$f matches expected"
   else

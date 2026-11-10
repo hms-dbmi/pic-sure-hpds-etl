@@ -1,0 +1,31 @@
+{
+  "accver": {
+    "accession": "phs004477",
+    "version": 1,
+    "participant_set": 1
+  },
+  "name": "Hemochromatosis and Iron Overload Screening Study (HEIRS-BioLINCC)",
+  "bioproject_ids": [
+    {
+      "id": "PRJNA1403592",
+      "type": "admin"
+    },
+    {
+      "id": "PRJNA1403593",
+      "type": "data"
+    }
+  ],
+  "consent_groups": [
+    {
+      "code": 1,
+      "short_name": "DS-HH-MDS-RD",
+      "name": "Disease-Specific (Hemochromatosis, MDS, RD)",
+      "subject_count": 102689,
+      "sample_count": 102689
+    }
+  ],
+  "repository": "BioLINCC_HEIRS",
+  "handle": "BioLINCC_HEIRS",
+  "admin_ic": "NHLBI",
+  "study_status": "Awaiting GPA&#39;s Approval"
+}

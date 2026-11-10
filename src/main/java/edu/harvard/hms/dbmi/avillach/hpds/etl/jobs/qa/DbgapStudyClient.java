@@ -143,7 +143,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
             }
             switch (result.kind) {
                 case FOUND:
-                    return DbgapLookup.found(result.summary, attempt);
+                    return DbgapLookup.found(result.summary, result.study, attempt);
                 case NOT_FOUND:
                     return DbgapLookup.notFound(result.message, attempt);
                 case FATAL:
@@ -236,7 +236,7 @@ public final class DbgapStudyClient implements DbgapStudySource {
             if (study == null || !study.isObject()) {
                 return Attempt.retry("HTTP 200 without a 'study' object: " + excerpt(body), null);
             }
-            return Attempt.found(DbgapStudySummary.from(study));
+            return Attempt.found(DbgapStudySummary.from(study), study);
         }
         if (retryable(status)) {
             Attempt retry = Attempt.retry("HTTP " + status + (body.isBlank() ? "" : ": " + excerpt(body)),
@@ -293,32 +293,32 @@ public final class DbgapStudyClient implements DbgapStudySource {
 
     private enum Kind { FOUND, NOT_FOUND, RETRY, FATAL }
 
-    private record Attempt(Kind kind, DbgapStudySummary summary, String message, Duration retryAfter,
-                           boolean unreachable, boolean overloaded) {
-        static Attempt found(DbgapStudySummary summary) {
-            return new Attempt(Kind.FOUND, summary, null, null, false, false);
+    private record Attempt(Kind kind, DbgapStudySummary summary, JsonNode study, String message,
+                           Duration retryAfter, boolean unreachable, boolean overloaded) {
+        static Attempt found(DbgapStudySummary summary, JsonNode study) {
+            return new Attempt(Kind.FOUND, summary, study, null, null, false, false);
         }
 
         static Attempt notFound(String message) {
-            return new Attempt(Kind.NOT_FOUND, null, message, null, false, false);
+            return new Attempt(Kind.NOT_FOUND, null, null, message, null, false, false);
         }
 
         static Attempt retry(String message, Duration retryAfter) {
-            return new Attempt(Kind.RETRY, null, message, retryAfter, false, false);
+            return new Attempt(Kind.RETRY, null, null, message, retryAfter, false, false);
         }
 
         /** Retried like any other failure, but dbGaP was not reached at all. */
         static Attempt unreachable(String message) {
-            return new Attempt(Kind.RETRY, null, message, null, true, false);
+            return new Attempt(Kind.RETRY, null, null, message, null, true, false);
         }
 
         static Attempt fatal(String message) {
-            return new Attempt(Kind.FATAL, null, message, null, false, false);
+            return new Attempt(Kind.FATAL, null, null, message, null, false, false);
         }
 
         /** The same failure, read as dbGaP being too busy (see {@link RequestPacer}). */
         Attempt asOverload() {
-            return new Attempt(kind, summary, message, retryAfter, unreachable, true);
+            return new Attempt(kind, summary, study, message, retryAfter, unreachable, true);
         }
     }
 }

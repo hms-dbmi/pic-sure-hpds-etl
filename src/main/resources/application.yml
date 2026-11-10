@@ -67,6 +67,13 @@ etl:
     qa-consent-counts:
       enabled: ${ETL_JOB_QA_CONSENT_COUNTS_ENABLED:true}
 
+    # PERMANENT QA, the last step of both pipelines: every ready study's counts per consent group
+    # (participant DB, and the run's job and final reports) vs its dbGaP study summary, read from
+    # {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json or fetched (and cached there).
+    # Needs HTTPS egress to www.ncbi.nlm.nih.gov for summaries not yet cached.
+    qa-pipeline-counts:
+      enabled: ${ETL_JOB_QA_PIPELINE_COUNTS_ENABLED:true}
+
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:
       enabled: ${ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED:true}

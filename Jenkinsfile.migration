@@ -5,6 +5,11 @@
 // /Jenkinsfile so that scheduling, retention, notification, and the decision to delete
 // stay independent between the two.
 //
+// End of the run: after the migration report and the DB backup, QA pipeline counts
+// (etl-runners/qa-pipeline-counts/, a PERMANENT job that stays) compares every ready study's counts per
+// consent group -- the DB, and this run's participants-migration, split and migration-report counts --
+// with its dbGaP summary; findings make the build UNSTABLE.
+//
 // When the migration is complete, delete:
 //   - this file
 //   - etl-runners/participants-migration/                (runner, Terraform, validation)
@@ -107,6 +112,8 @@ pipeline {
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
+        string(name: 'QA_PIPELINE_COUNTS_JOB', defaultValue: 'qa-pipeline-counts',
+               description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile at the end of the run (after the migration report and the DB backup): every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov. Blank skips it.')
         booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
                description: 'Replace the participant database before this run with DB_RESTORE_FROM (blank = the latest clean backup), whether or not one is up. A running database is saved to participant_db_pre_overwrite.tar first.')
         string(name: 'DB_RESTORE_FROM', defaultValue: '',
@@ -177,8 +184,9 @@ pipeline {
                 sh 'make -C etl-runners/participant-db test'
                 // The Split AllConcepts stage scripts (stubbed aws).
                 sh 'make -C etl-runners/split-allconcepts test'
-                // The migration report.
+                // The migration report, and the QA pipeline counts runner's scripts.
                 sh 'make -C etl-runners/migration-report test'
+                sh 'make -C etl-runners/qa-pipeline-counts test'
             }
             post {
                 always {
@@ -482,6 +490,16 @@ pipeline {
                 writeMigrationReport()
                 backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
                 stopRunnerPool()
+                // Last: it reads the migration report, and only reads the DB, so it never affects the backup.
+                if (params.QA_PIPELINE_COUNTS_JOB?.trim()) {
+                    try {
+                        timeout(time: 6, unit: 'HOURS') {
+                            runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim())
+                        }
+                    } catch (err) {
+                        unstable("QA pipeline counts did not finish (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own.")
+                    }
+                }
                 removeRunnerImage()
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
@@ -501,6 +519,102 @@ pipeline {
             echo 'Migration pipeline completed. Every migration stage passed its own output validation.'
         }
     }
+}
+
+// The last step, in post { always } after the migration report and the DB backup: every study marked
+// ready in MANAGED_INPUTS -- excluded ones and those this run did not process included, as a
+// regression check -- compared with its dbGaP summary (cached under DATA_ROOT, else fetched and
+// cached), against the participant DB and this run's per-consent counts (participants-migration, the
+// split and the migration report; qaRunCounts). Read-only but for the cached summaries. Skipped for a
+// pre-flight run, when the DB never started, or when the run failed (its counts would be partial).
+// Findings, and QA failing to run, make the build UNSTABLE, never FAILED. Its reports land in
+// downstream-artifacts/qa-pipeline-counts/ and beside the migration report in S3. Mirrors
+// runQaPipelineCounts in etl-runners/common/orchestrator.groovy, which this file does not load.
+def runQaPipelineCounts(String job) {
+    if (params.PREFLIGHT_ONLY) {
+        return
+    }
+    if (env.DB_STARTED != 'true') {
+        echo 'QA pipeline counts skipped: the participant database was never started.'
+        return
+    }
+    if (!(currentBuild.currentResult in ['SUCCESS', 'UNSTABLE'])) {
+        echo "QA pipeline counts skipped: the run ended ${currentBuild.currentResult}, so its counts are partial. " +
+             "Run ${job} on its own once it has been re-run."
+        return
+    }
+    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
+    def reportPrefix = "s3://${params.DATA_ROOT.trim().substring('s3://'.length()).split('/')[0]}" +
+                       "/etl-runner/reports/migration-pipeline/${tag}"
+    def downstream = build(job: job, wait: true, propagate: false, parameters: [
+        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS.trim()),
+        string(name: 'DATA_ROOT', value: params.DATA_ROOT.trim()),
+        string(name: 'RUN_COUNTS', value: qaRunCounts("${reportPrefix}/qa_run_counts.csv")),
+        string(name: 'PIPELINE', value: 'migration'),
+        string(name: 'STUDY_FILTER', value: ''),
+        string(name: 'CACHE_CONCURRENCY', value: '8'),
+        booleanParam(name: 'CACHE_SUMMARIES', value: true),
+        // One dbGaP request at a time, 2 s apart (widening while dbGaP is overloaded), 3 attempts
+        // each (60 s then 120 s apart), none started after 90 minutes: an outage is waited out that
+        // long, then the studies still without a summary are UNVERIFIED and a later run fetches them.
+        string(name: 'CONCURRENCY', value: '1'),
+        string(name: 'DBGAP_REQUEST_SPACING_SECONDS', value: '2'),
+        string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
+        string(name: 'DBGAP_MAX_ATTEMPTS', value: '3'),
+        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '60'),
+        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
+        string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
+        string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
+        string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', value: '120'),
+        string(name: 'DBGAP_DEADLINE_SECONDS', value: '5400'),
+        string(name: 'RUN_ID', value: "${tag}-qa-pipeline-counts"),
+        string(name: 'INSTANCE_TYPE', value: 't3.medium'),
+        string(name: 'JOB_TIMEOUT_SECONDS', value: '9000'),
+        string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
+        booleanParam(name: 'SKIP_TESTS', value: true),
+        booleanParam(name: 'RETRY_ON_INFRA', value: true),
+        string(name: 'ENV', value: params.ENV),
+    ])
+    try {
+        copyArtifacts(projectName: job, selector: specific("${downstream.number}"),
+                      target: 'downstream-artifacts/qa-pipeline-counts', optional: true)
+    } catch (err) {
+        rethrowIfInterrupted(err)
+        echo "Could not copy artifacts of ${job} #${downstream.number} (${err.message}); they remain on that build."
+    }
+    withEnv(["QA_DEST=${reportPrefix}/qa-pipeline-counts/"]) {
+        sh(returnStatus: true, script: '''
+            [ -d downstream-artifacts/qa-pipeline-counts ] || exit 0
+            aws s3 cp downstream-artifacts/qa-pipeline-counts "$QA_DEST" --recursive --no-progress --only-show-errors \
+              && echo "QA report uploaded to $QA_DEST"
+        ''')
+    }
+    if (downstream.result == 'UNSTABLE') {
+        unstable("${job} #${downstream.number}: consent counts disagree with dbGaP, or some studies have no summary " +
+                 'yet; downstream-artifacts/qa-pipeline-counts/**/qa-pipeline-report.md lists each')
+    } else if (downstream.result != 'SUCCESS') {
+        unstable("${job} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the consent " +
+                 "counts were not checked against dbGaP. Run ${job} on its own (a dbGaP outage, exit 4, is retryable).")
+    }
+}
+
+// This run's per-consent counts from participants-migration, the split and the migration report
+// (etl-runners/qa-pipeline-counts/collect-run-counts.py), uploaded to dest for the runner to read.
+// '' (every study DB vs dbGaP only) when they cannot be collected or uploaded.
+def qaRunCounts(String dest) {
+    def local = 'downstream-artifacts/qa-pipeline-counts-input/qa_run_counts.csv'
+    int rc
+    withEnv(["QA_LOCAL=${local}", "QA_DEST=${dest}"]) {
+        rc = sh(returnStatus: true, script: '''
+            python3 etl-runners/qa-pipeline-counts/collect-run-counts.py migration downstream-artifacts "$QA_LOCAL" &&
+              aws s3 cp "$QA_LOCAL" "$QA_DEST" --only-show-errors
+        ''')
+    }
+    if (rc != 0) {
+        echo "WARNING: could not collect or upload this run's counts (rc=${rc}); QA compares the DB with dbGaP only."
+        return ''
+    }
+    return dest
 }
 
 // The run's final report (etl-runners/migration-report/migration-report.py), written whatever stage

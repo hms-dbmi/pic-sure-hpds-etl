@@ -7,6 +7,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 
@@ -84,6 +85,35 @@ public class SampleRepository {
                             rs.getString("sample_source")));
         } catch (DataAccessException e) {
             throw new InfrastructureException("Query samples by study_id failed", e);
+        }
+    }
+
+    /** Distinct samples in one consent group of a study. */
+    public record ConsentGroupSamples(String studyId, String consentCode, long samples) {
+    }
+
+    /**
+     * Distinct {@code source_sample_id}s of one {@code sample_source} per (study, consent code) for the
+     * given studies, one query for all of them: each study's own samples, grouped by the consent its
+     * participant has in that study. A study with no such samples has no rows.
+     */
+    public List<ConsentGroupSamples> countSamplesByConsent(Collection<String> studyIds, String sampleSource) {
+        if (studyIds.isEmpty()) {
+            return List.of();
+        }
+        try {
+            return jdbc.query("""
+                            SELECT c.study_id, c.consent_code, COUNT(DISTINCT s.source_sample_id) AS samples
+                            FROM samples s
+                            JOIN consents c ON c.hpds_id = s.hpds_id AND c.study_id = s.study_id
+                            WHERE s.study_id IN (:studyIds) AND s.sample_source = :source
+                            GROUP BY c.study_id, c.consent_code ORDER BY c.study_id, c.consent_code""",
+                    new MapSqlParameterSource().addValue("studyIds", List.copyOf(studyIds))
+                            .addValue("source", sampleSource),
+                    (rs, n) -> new ConsentGroupSamples(rs.getString("study_id"), rs.getString("consent_code"),
+                            rs.getLong("samples")));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Count of samples per consent group failed", e);
         }
     }
 

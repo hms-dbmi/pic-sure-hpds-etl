@@ -40,6 +40,7 @@ etl-runners/
 ├── merge-allconcepts/                  PERMANENT (JobType.PERMANENT), no DB
 ├── generate-allconcepts-manifest/      PERMANENT (JobType.PERMANENT), no DB, after the merge in both orchestrators
 ├── qa-consent-counts/                  PERMANENT (JobType.PERMANENT), reads the DB and calls dbGaP, standalone (in neither orchestrator)
+├── qa-pipeline-counts/                 PERMANENT (JobType.PERMANENT), reads the DB, caches dbGaP summaries under DATA_ROOT; last in both orchestrators
 ├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT), per study from /Jenkinsfile
 └── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone, no DB
 ```
@@ -82,7 +83,7 @@ generated EC2 user-data never has to quote a command line.
 
 Seven runners read or write the participant DB: `sstr-populate-rds-participants`,
 `participants-migration`, `split-allconcepts`, `generate-global-all-concepts`,
-`create-vcf-indexes`, `all-concepts-data-generator`, `qa-consent-counts`. Their module call sets
+`create-vcf-indexes`, `all-concepts-data-generator`, `qa-consent-counts`, `qa-pipeline-counts`. Their module call sets
 `uses_participant_db = true` and `environment = var.environment`, and their `Provision, run and
 monitor` stage calls `common/require-db.sh` first. At boot the runner reads the credentials from
 the SSM SecureString `/hpds-etl/<ENV>/participant-db/app-credentials`, which
@@ -170,6 +171,7 @@ Terraform reads `TF_VAR_*` natively, so job parameters never appear on a command
 | `generate-global-all-concepts`      | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_allow_empty`     |
 | `create-vcf-indexes`                | `TF_VAR_output_uri`, `TF_VAR_managed_inputs_uri`, `TF_VAR_include_processed` |
 | `qa-consent-counts`                 | `TF_VAR_managed_inputs_uri` or `TF_VAR_studies` (one of the two), `TF_VAR_load_counts_uri`, `TF_VAR_study_filter`, `TF_VAR_concurrency`, `TF_VAR_dbgap_base_url`, `TF_VAR_dbgap_max_attempts`, `TF_VAR_dbgap_initial_backoff_seconds`, `TF_VAR_dbgap_max_backoff_seconds`, `TF_VAR_dbgap_timeout_seconds`, `TF_VAR_dbgap_give_up_after`, `TF_VAR_dbgap_unreachable_pause_seconds`, `TF_VAR_dbgap_request_spacing_seconds`, `TF_VAR_dbgap_deadline_seconds` (blank = the job's default) |
+| `qa-pipeline-counts`                | `TF_VAR_managed_inputs_uri`, `TF_VAR_data_root_uri` (both required), `TF_VAR_run_counts_uri`, `TF_VAR_pipeline`, `TF_VAR_study_filter`, `TF_VAR_cache_concurrency`, `TF_VAR_cache_summaries`, `TF_VAR_concurrency`, `TF_VAR_dbgap_*` as for `qa-consent-counts` (blank = the job's default) |
 | `generate-identity-consent-mapping` | `TF_VAR_base_uri`, `TF_VAR_dataset_prefix`, `TF_VAR_input_role_arn`, `TF_VAR_output_uri`, `TF_VAR_per_study` |
 
 Every runner also takes `TF_VAR_instance_type`, from its Jenkins `INSTANCE_TYPE` parameter.
@@ -223,7 +225,7 @@ block so `make` picks it up automatically; the orchestrators pass it to every jo
    | `iam_role_name`          | Instance profile role (and the agent's role) in that account         |
    | `iam_instance_profile_name` | Existing instance profile wrapping that role; blank creates one per run |
    | `vpc_id` / `subnet_id`   | Target VPC; blank `subnet_id` uses its lowest-id subnet — pin it     |
-   | `vpc_security_group_ids` | Runner security group(s); the only sources allowed to reach the DB. Must allow HTTPS egress to `www.ncbi.nlm.nih.gov` for `qa-consent-counts` (see [docs/JENKINS.md](../docs/JENKINS.md#qa-consent-counts-network-egress)) |
+   | `vpc_security_group_ids` | Runner security group(s); the only sources allowed to reach the DB. Must allow HTTPS egress to `www.ncbi.nlm.nih.gov` for `qa-consent-counts` and `qa-pipeline-counts` (see [docs/JENKINS.md](../docs/JENKINS.md#qa-consent-counts-network-egress)) |
    | `ami_owner_id` / `ami_name_pattern` | AMI: the SRCE RHEL9 golden image (bootstraps assume podman and RHEL9 module streams) |
 
    Also check the bucket in each `terraform/*.backend.tfvars`, the backup bucket/prefix in

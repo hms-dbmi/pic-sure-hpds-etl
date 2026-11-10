@@ -7,7 +7,7 @@ import java.util.List;
 
 /**
  * The parts of a dbGaP SSTR study summary ({@code GET /study/{phs}.{v}/summary}) the consent count
- * QA uses: which study version answered, and each consent group's subject count.
+ * QA uses: which study version answered, and each consent group's subject and sample counts.
  *
  * <p>The published schema (dbgap_study.v1.schema.json) marks no field required, so every field is
  * read defensively: an absent or null value becomes null here, and a consent group without a
@@ -28,8 +28,28 @@ public record DbgapStudySummary(String accession, Integer version, List<ConsentG
      * @param code         the consent code as text ("0", "1", ...), matching how the DB stores it
      * @param shortName    e.g. "HMB-IRB-NPU"; null if absent
      * @param subjectCount {@code subject_count}; null if absent or not a number
+     * @param sampleCount  {@code sample_count}; null if absent or not a number
      */
-    public record ConsentGroup(String code, String shortName, Long subjectCount) {
+    public record ConsentGroup(String code, String shortName, Long subjectCount, Long sampleCount) {
+
+        /** Without a sample count. */
+        public ConsentGroup(String code, String shortName, Long subjectCount) {
+            this(code, shortName, subjectCount, null);
+        }
+    }
+
+    /**
+     * Reads a summary document: the API's whole response ({@code {"study": {...}, ...}}) or just its
+     * {@code study} object (how {@code {study}_{version}_summary.json} files are stored).
+     */
+    public static DbgapStudySummary fromDocument(JsonNode document) {
+        return from(studyObject(document));
+    }
+
+    /** The {@code study} object of a summary document, whichever of the two shapes it has. */
+    public static JsonNode studyObject(JsonNode document) {
+        JsonNode study = document.path("study");
+        return study.isObject() ? study : document;
     }
 
     /** Reads the {@code study} object of a summary response. */
@@ -48,7 +68,7 @@ public record DbgapStudySummary(String accession, Integer version, List<ConsentG
                     continue;
                 }
                 groups.add(new ConsentGroup(String.valueOf(code), text(g.path("short_name")),
-                        number(g.path("subject_count"))));
+                        number(g.path("subject_count")), number(g.path("sample_count"))));
             }
         }
         return new DbgapStudySummary(accession, version == null ? null : version.intValue(), List.copyOf(groups),

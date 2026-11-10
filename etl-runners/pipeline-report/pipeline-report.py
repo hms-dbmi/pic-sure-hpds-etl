@@ -32,6 +32,11 @@ Writes, under <out-dir>:
                                 consent groups held back for bad data with the previously published
                                 files deleted for them (heldBackVcfGroups) (reportVersion 1)
   pipeline-report.md            for people: the summary, stages, studies needing follow-up, all studies
+  pipeline_consent_counts.csv   one row per (loaded study, consent code): the participants this run
+        study_id,abv,consent_code,participants_loaded,participants_written
+        loaded into the participant DB (the SSTR load's countsByConsentGroup) and wrote to that
+        consent group's allConcepts file (the generator's participantsPerConsent); blank where the
+        stage did not report it. What qa-pipeline-counts compares with dbGaP as the final report.
 
 Study status (most severe wins):
   FAILED                  a stage failed for it (the child's reason is in `reasons`)
@@ -148,6 +153,16 @@ def as_int(v):
         return None
 
 
+def consent_code(code):
+    """'c1', 'C01', ' 1 ' -> '1'; anything else as given, trimmed."""
+    m = re.fullmatch(r"[cC]?(\d{1,18})", str(code).strip())
+    return str(int(m.group(1))) if m else str(code).strip()
+
+
+def consent_sort_key(code):
+    return (0, int(code), "") if code.isdigit() else (1, 0, code)
+
+
 def one_line(text):
     return " ".join(str(text or "").split())
 
@@ -186,6 +201,9 @@ def main(argv):
         if s["plan"] == "excluded":
             row = next(r for r in plan if r["study_id"] == sid)
             review(sid, "resolve-studies", "EXCLUDED", "MISSING_INPUTS", row.get("reason"))
+
+    # Per study and normalized consent code: {"loaded": n, "written": n}, for pipeline_consent_counts.csv.
+    consent_counts = OrderedDict()
 
     # Per-study stages: the orchestrator's outcome (result, child reason), then the child's report.
     for key, stage, pattern in PER_STUDY_STAGES:
@@ -226,6 +244,11 @@ def main(argv):
             else:
                 s["metrics"]["consentGroups"] = m.get("consentGroups")
                 s["metrics"]["rowsProcessed"] = m.get("rowsProcessed")
+            per_consent = m.get("countsByConsentGroup" if key == "sstr" else "participantsPerConsent")
+            if isinstance(per_consent, dict):
+                field = "loaded" if key == "sstr" else "written"
+                for code, n in per_consent.items():
+                    consent_counts.setdefault(sid, OrderedDict()).setdefault(consent_code(code), {})[field] = n
 
     # Run-wide stages: their summary, and any ERROR/WARNING attributed to a study in this run.
     stages = []
@@ -365,6 +388,11 @@ def main(argv):
           len(s["review"]),
           "; ".join(f"{r['stage']}: {r['code']}: {r['detail']}" for r in s["review"])]
          for sid, s in studies.items()]))
+    write("pipeline_consent_counts.csv", csv_text(
+        ["study_id", "abv", "consent_code", "participants_loaded", "participants_written"],
+        [[sid, studies[sid]["abv"], code, c.get("loaded"), c.get("written")]
+         for sid, by_code in consent_counts.items()
+         for code, c in sorted(by_code.items(), key=lambda kv: consent_sort_key(kv[0]))]))
     write("pipeline-report.md", markdown(report, studies))
 
     print("================ Pipeline report ================")

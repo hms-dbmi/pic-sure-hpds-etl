@@ -27,7 +27,11 @@
   },
   "metrics": {
     "distinctParticipants": 120,
-    "participantsInserted": 120
+    "participantsInserted": 120,
+    "countsByConsentGroup": {
+      "2": 3,
+      "1": 7
+    }
   },
   "errorMessage": null
 }

@@ -66,6 +66,7 @@ they resolve to siblings inside the same folder.
 | `merge-allconcepts`                           | `etl-runners/merge-allconcepts/Jenkinsfile`                 |
 | `generate-allconcepts-manifest`               | `etl-runners/generate-allconcepts-manifest/Jenkinsfile`     |
 | `qa-consent-counts`                           | `etl-runners/qa-consent-counts/Jenkinsfile`                 |
+| `qa-pipeline-counts`                          | `etl-runners/qa-pipeline-counts/Jenkinsfile`                |
 | `all-concepts-data-generator`                 | `etl-runners/all-concepts-data-generator/Jenkinsfile`       |
 | `generate-identity-consent-mapping`           | `etl-runners/generate-identity-consent-mapping/Jenkinsfile` |
 
@@ -74,7 +75,70 @@ orchestrator's `Generate per-study AllConcepts` stage, and can also be run by ha
 `generate-identity-consent-mapping` is standalone — no orchestrator triggers it; run it when a
 new DMC harmonization drop lands (ALS-12727).
 `qa-consent-counts` is standalone too: run it to check the participant DB's consent counts against
-dbGaP (see [below](#qa-consent-counts-standalone)).
+dbGaP (see [below](#qa-consent-counts-standalone)). `qa-pipeline-counts` is the last step of both
+orchestrators (see [below](#qa-pipeline-counts-end-of-both-pipelines)), and can also be run by hand.
+
+### `qa-pipeline-counts` (end of both pipelines)
+
+**Job:** `qa-pipeline-counts` ([`etl-runners/qa-pipeline-counts/`](../etl-runners/qa-pipeline-counts/))
+**Class:** [`QaPipelineCountsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/qa/QaPipelineCountsJob.java)
+**Runs:** last in both orchestrators' `post { always }`, after the final report and the participant
+DB backup, when the run succeeded (or is UNSTABLE) and was not a pre-flight; also on its own.
+`QA_PIPELINE_COUNTS_JOB` (blank skips it) names the job in both orchestrators.
+
+For **every study marked ready** in `MANAGED_INPUTS` -- the original file, so excluded studies and
+those the run did not process are checked too, as a regression test -- it compares each consent
+group's counts with that study version's dbGaP summary:
+
+| Measure | Covers | Compared with |
+|---|---|---|
+| `db:participants` | every study | `subject_count` |
+| `db:samples` (the study's own `DBGap` samples) | every study | `sample_count` |
+| `participants-migration`, `split-allconcepts`, `migration-report:loaded`, `migration-report:split` | migration: the studies the run processed | `subject_count` |
+| `sstr-load`, `all-concepts-data-generator`, `pipeline-report:loaded`, `pipeline-report:written` | permanent: the studies the run processed | `subject_count` |
+
+The run's counts are collected from `downstream-artifacts/` by
+[`collect-run-counts.py`](../etl-runners/qa-pipeline-counts/collect-run-counts.py) (failed runs and
+blank counts skipped) and passed as `RUN_COUNTS`; the DB counts, the run counts and the cached
+summaries are read in parallel.
+
+**Summaries.** Read from `{DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json` (e.g.
+`.../phs004477/rawData/phs004477_v1_summary.json`; the file holds the summary's `study` object; the
+API's whole response is read too). Only a summary not there (or unreadable) is asked of the dbGaP
+SSTR API, and each answer is written there at once (`CACHE_SUMMARIES`), so each study version is
+fetched once, ever. dbGaP is volatile, so it is asked gently: one study at a time, 2 s apart (the
+gap doubling, up to 60 s, while it answers overloaded), 3 attempts per study (60 s then 120 s
+apart, `Retry-After` honoured), 2 minutes' pause after it cannot be connected to, no more lookups
+after 20 studies in a row get no answer, and none started after **90 minutes**
+(`DBGAP_DEADLINE_SECONDS`). A study still without a summary is `UNVERIFIED` (a
+`DBGAP_UNAVAILABLE` warning): the build is UNSTABLE and a later run fetches it. An answer for
+another study version than requested is `VERSION_MISMATCH` and is not cached.
+
+**Findings** (statuses; each is a WARNING per study and kind, and makes the build UNSTABLE):
+`COUNT_MISMATCH`, `MISSING` (dbGaP lists the group; the source has none of it), `NOT_IN_DBGAP`,
+`DBGAP_COUNT_MISSING`, `NO_VERSION`, `VERSION_NOT_FOUND`, `VERSION_MISMATCH`, `DBGAP_UNAVAILABLE`.
+`NOT_LOADED_BY_DESIGN` -- dbGaP's consent 0 (not consented) with no participants loaded -- and
+`MATCH` are not findings. The orchestrator also only marks itself UNSTABLE, never FAILED, when QA
+cannot run: the ETL already succeeded. Exit 4 only when no study has a summary at all (none
+cached, dbGaP answering for none); `RETRY_ON_INFRA` reruns it once.
+
+**Outputs** (archived on the QA build, copied to the orchestrator's
+`downstream-artifacts/qa-pipeline-counts/`, and uploaded beside the run's report under
+`s3://<DATA_ROOT bucket>/etl-runner/reports/<permanent|migration>-pipeline/<build-tag>/qa-pipeline-counts/`):
+
+| File | What it is |
+|---|---|
+| `qa-pipeline-report.md` | to read: the result and totals, then, per study with discrepancies, a table of its consent groups (rows) by dbGaP's counts and every measure (columns), differing counts in bold with dbGaP's beside them; then version problems, studies not checked, and every study |
+| `qa_pipeline_counts.csv` | one row per study, consent group and measure: `study_id, version, in_run, consent_code, consent_short_name, measure, compared_to, dbgap_count, count, status, note` |
+| `qa_pipeline_discrepancies.csv` | its rows needing follow-up (every status but `MATCH` and `NOT_LOADED_BY_DESIGN`) |
+| `qa_pipeline_studies.csv` | one row per study: `study_id, abv, version, in_run, summary_source, status, consent_groups, discrepancies, note` |
+| `qa-pipeline-counts-<run-id>.json` | the report: `studiesChecked`, `studiesInRun`, `studiesVerified`, `countsCompared`, `countsMatching`, `discrepancies`, `discrepanciesByType`, `discrepanciesByMeasure`, `studiesWithDiscrepancies`, `unverifiedStudies`, `summariesFromCache`, `summariesFromApi`, `summariesCached`, `summaryCacheFailures`, `unusableCachedSummaries`, `apiLookups`, `apiAttempts`, `apiRetries`, `runCounts`, `runCountSources` |
+
+**Run it on its own** (say, after a failed run is re-run, or to re-check every study): give
+`MANAGED_INPUTS` and `DATA_ROOT`, and optionally `RUN_COUNTS` (blank: every study DB vs dbGaP
+only). The participant DB must be up (`participant-db-start`). Its runner needs HTTPS egress to
+`www.ncbi.nlm.nih.gov` (see [network egress](#qa-consent-counts-network-egress)) only for summaries
+not yet cached, and write access under `DATA_ROOT` for caching them.
 
 ### `qa-consent-counts` (standalone)
 
@@ -567,7 +631,8 @@ the Jenkins host's security group must allow TCP 5432 from the runners' group
 
 #### QA consent counts: network egress
 
-`qa-consent-counts` calls the dbGaP SSTR API from its runner, so **the runner security group
+`qa-consent-counts`, and `qa-pipeline-counts` for summaries not yet cached, call the dbGaP SSTR API
+from their runner, so **the runner security group
 (`sg-0932143f21f7c533b`) and the subnet's route must allow outbound HTTPS (TCP 443) to
 `www.ncbi.nlm.nih.gov`** (a public endpoint: it needs a NAT or other internet route; an S3 gateway endpoint does not reach it), besides the
 participant DB and S3. Without it every lookup times out, each study's rows are `UNVERIFIED`, and
@@ -635,9 +700,9 @@ reload.
 
 A DB-backed runner job (`sstr-populate-rds-participants`, `participants-migration`,
 `split-allconcepts`, `generate-global-all-concepts`, `create-vcf-indexes`,
-`all-concepts-data-generator`, `qa-consent-counts`) run on its own needs the participant DB up: run
-`participant-db-start` first (it leaves the database up; run `participant-db-backup` afterwards
-to save the runner's writes; `qa-consent-counts` writes nothing). Without it, `require-db.sh`
+`all-concepts-data-generator`, `qa-consent-counts`, `qa-pipeline-counts`) run on its own needs the
+participant DB up: run `participant-db-start` first (it leaves the database up; run
+`participant-db-backup` afterwards to save the runner's writes; the QA jobs write nothing to it). Without it, `require-db.sh`
 fails the build before provisioning. For a manual single-study SSTR load, the per-study checks are
 job parameters on `sstr-populate-rds-participants`: `EXPECTED_CONSENT_CODES`,
 `EXPECTED_MIN_PARTICIPANTS`, and `INSTANCE_TYPE`.
@@ -683,6 +748,7 @@ an environment may run.
 | `merge-allconcepts`                             | `true`  | `ETL_JOB_MERGE_ALLCONCEPTS_ENABLED`                             |
 | `generate-allconcepts-manifest`                 | `true`  | `ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED`                 |
 | `qa-consent-counts`                             | `true`  | `ETL_JOB_QA_CONSENT_COUNTS_ENABLED`                             |
+| `qa-pipeline-counts`                            | `true`  | `ETL_JOB_QA_PIPELINE_COUNTS_ENABLED`                            |
 | `generate-identity-consent-mapping`             | `true`  | `ETL_JOB_GENERATE_IDENTITY_CONSENT_MAPPING_ENABLED`             |
 | `participants-migration`                        | `true`  | `ETL_JOB_PARTICIPANTS_MIGRATION_ENABLED`                        |
 | `split-allconcepts`                             | `true`  | `ETL_JOB_SPLIT_ALLCONCEPTS_ENABLED`                             |
@@ -785,6 +851,8 @@ etl-runners/
 ├─ merge-allconcepts/                 PERMANENT (no DB)
 ├─ generate-allconcepts-manifest/     PERMANENT (no DB), after the merge in both orchestrators
 ├─ qa-consent-counts/                 PERMANENT QA, standalone (reads the DB, calls dbGaP; + test/)
+├─ qa-pipeline-counts/                PERMANENT QA, last in both orchestrators (reads the DB, caches dbGaP
+│                                     summaries under DATA_ROOT; collect-run-counts.py; + test/)
 ├─ all-concepts-data-generator/       PERMANENT (per study, from the permanent orchestrator)
 └─ generate-identity-consent-mapping/ PERMANENT, standalone (no DB)
    each runner: Jenkinsfile  Makefile  preflight.sh  validate.sh  terraform/

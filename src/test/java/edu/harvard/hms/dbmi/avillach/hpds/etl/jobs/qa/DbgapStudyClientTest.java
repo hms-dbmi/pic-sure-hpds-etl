@@ -75,9 +75,9 @@ class DbgapStudyClientTest {
         assertThat(lookup.summary().accession()).isEqualTo("phs001412");
         assertThat(lookup.summary().version()).isEqualTo(4);
         assertThat(lookup.summary().consentGroups()).containsExactly(
-                new DbgapStudySummary.ConsentGroup("0", "NRUP", 576L),
-                new DbgapStudySummary.ConsentGroup("1", "HMB-IRB-NPU", 402L),
-                new DbgapStudySummary.ConsentGroup("2", "DS-DHD-IRB-NPU", 3L));
+                new DbgapStudySummary.ConsentGroup("0", "NRUP", 576L, 0L),
+                new DbgapStudySummary.ConsentGroup("1", "HMB-IRB-NPU", 402L, 400L),
+                new DbgapStudySummary.ConsentGroup("2", "DS-DHD-IRB-NPU", 3L, 3L));
         assertThat(s.requests()).containsExactly("/study/phs001412.v4/summary");
         assertThat(waits).isEmpty();
     }
