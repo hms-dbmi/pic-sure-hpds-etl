@@ -126,7 +126,9 @@ pipeline {
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
         string(name: 'QA_PIPELINE_COUNTS_JOB', defaultValue: 'qa-pipeline-counts',
-               description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile at the end of the run (after the report and the DB backup): every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov. Blank skips it.')
+               description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile at the end of the run (after the report and the DB backup): every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov when QA_FETCH_MISSING_SUMMARIES is checked. Blank skips it.')
+        booleanParam(name: 'QA_FETCH_MISSING_SUMMARIES', defaultValue: false,
+               description: 'QA pipeline counts: fetch each summary missing under DATA_ROOT from dbGaP\'s API (and cache it). Unchecked, a study with no summary file fails QA (SUMMARY_MISSING) and dbGaP is not asked.')
         booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
                description: 'Replace the participant database before this run with DB_RESTORE_FROM (blank = the latest clean backup), whether or not one is up. A running database is saved to participant_db_pre_overwrite.tar first.')
         string(name: 'DB_RESTORE_FROM', defaultValue: '',

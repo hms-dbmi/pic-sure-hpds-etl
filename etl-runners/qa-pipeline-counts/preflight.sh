@@ -8,6 +8,7 @@
 #   TF_VAR_data_root_uri        required   s3:// root of the per-study folders (the summary cache)
 #   TF_VAR_run_counts_uri       optional   this run's counts per consent group (blank: DB vs dbGaP only)
 #   TF_VAR_pipeline             optional   migration or permanent
+#   TF_VAR_fetch_missing_summaries optional true: fetch summaries with no file from dbGaP (blank: false)
 #   TF_VAR_dbgap_base_url       optional   dbGaP SSTR study endpoint (blank: the job's default)
 #   AWS_REGION                  optional   default us-east-1
 #
@@ -25,13 +26,15 @@ RUN_COUNTS="$(trim "${TF_VAR_run_counts_uri:-}")"
 PIPELINE="$(trim "${TF_VAR_pipeline:-}")"
 DBGAP="$(trim "${TF_VAR_dbgap_base_url:-}")"
 DBGAP="${DBGAP:-https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study}"
+FETCH="$(trim "${TF_VAR_fetch_missing_summaries:-}")"
+FETCH="${FETCH:-false}"
 
 echo "Pre-flight: qa-pipeline-counts"
 echo "  managed inputs: ${MANAGED_INPUTS:-<none>}"
 echo "  data root:      ${DATA_ROOT:-<none>}"
 echo "  run counts:     ${RUN_COUNTS:-<none: DB vs dbGaP only>}"
 echo "  pipeline:       ${PIPELINE:-<none>}"
-echo "  dbGaP:          $DBGAP"
+echo "  fetch missing:  $FETCH$([[ "$FETCH" == true ]] && echo " (from $DBGAP)" || echo " (a study with no summary file fails QA)")"
 echo ""
 
 exists() {   # <uri>: an s3:// object or a local file
@@ -59,7 +62,10 @@ if [[ -n "$PIPELINE" ]]; then
   check "PIPELINE is migration or permanent ($PIPELINE)" test "$PIPELINE" = migration -o "$PIPELINE" = permanent
 fi
 
-if [[ "$DBGAP" != http://* && "$DBGAP" != https://* ]]; then
+check "FETCH_MISSING_SUMMARIES is true or false ($FETCH)" test "$FETCH" = true -o "$FETCH" = false
+if [[ "$FETCH" != true ]]; then
+  note "dbGaP is not asked: fetching missing summaries is off"
+elif [[ "$DBGAP" != http://* && "$DBGAP" != https://* ]]; then
   fail "DBGAP_BASE_URL must be an http(s) URL, got: $DBGAP"
 elif command -v curl >/dev/null 2>&1; then
   # Any HTTP answer (an unknown study is a 400) shows the API is up. Only summaries not yet cached

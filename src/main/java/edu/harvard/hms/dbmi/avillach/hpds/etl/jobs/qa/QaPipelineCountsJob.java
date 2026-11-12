@@ -62,18 +62,24 @@ import java.util.stream.Stream;
  * </ul>
  *
  * <p>Summaries are read from {@code {data-root}/{study_id}/rawData/{study_id}_{version}_summary.json}
- * when there (see {@link SummaryCache}). Only the rest are asked of dbGaP's SSTR API -- one at a time by
- * default, paced and retried gently (see {@link DbgapBatchLookup}), until {@code --dbgap-deadline-seconds}
- * -- and each answer is stored there at once ({@code --cache-summaries}), so a later run does not ask
- * again. The DB counts, the run counts and the cache are read in parallel.
+ * (see {@link SummaryCache}). What to do about a study with no usable summary file is
+ * {@code --fetch-missing-summaries}:
+ * <ul>
+ *   <li>false (the default): nothing is asked of dbGaP, and each such study fails QA (SUMMARY_MISSING);</li>
+ *   <li>true: they are asked of dbGaP's SSTR API -- one at a time by default, paced and retried gently
+ *       (see {@link DbgapBatchLookup}), until {@code --dbgap-deadline-seconds} -- and each answer is stored
+ *       there at once ({@code --cache-summaries}), so a later run does not ask again.</li>
+ * </ul>
+ * The DB counts, the run counts and the summary files are read in parallel.
  *
  * <p>Read-only, apart from the cached summaries. Outcomes:
  * <ul>
  *   <li>every count matches: exit 0;</li>
- *   <li>any discrepancy (see {@link Status}), or a study with no summary (UNVERIFIED): a WARNING per
- *       study and finding, SUCCESS_WITH_WARNINGS (validate.sh exits 10: the build is UNSTABLE);</li>
- *   <li>no study with a usable version has a summary at all (none cached, and dbGaP answered for none):
- *       exit 4, with the report files still written.</li>
+ *   <li>any discrepancy (see {@link Status}), a study failed for having no summary file (SUMMARY_MISSING),
+ *       or one dbGaP gave no summary for (UNVERIFIED): a WARNING per study and finding,
+ *       SUCCESS_WITH_WARNINGS (validate.sh exits 10: the build is UNSTABLE);</li>
+ *   <li>fetching from dbGaP, and no study with a usable version has a summary at all (none cached, and
+ *       dbGaP answered for none): exit 4, with the report files still written.</li>
  * </ul>
  *
  * <p>Writes into the reports directory, beside the JSON report: {@value PipelineCountsReport#COUNTS_FILE},
@@ -162,14 +168,19 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
                 ParamSpec.optional("cache-concurrency",
                         "Cached summaries read at once (1-" + MAX_CACHE_CONCURRENCY + "; default "
                                 + DEFAULT_CACHE_CONCURRENCY + ")", "8"),
+                ParamSpec.optional("fetch-missing-summaries",
+                        "true: ask dbGaP's SSTR API for each study with no usable summary file (and cache the "
+                                + "answer). false (the default): fail each such study's QA (SUMMARY_MISSING)",
+                        "false"),
                 ParamSpec.optional("cache-summaries",
                         "Store each summary fetched from dbGaP in the cache (default true)", "true")));
         params.addAll(DbgapParams.specs(DEFAULT_CONCURRENCY, DEFAULT_DEADLINE_SECONDS));
         return JobExpectations.of(params, List.of(
                 PipelineCountsReport.COUNTS_FILE + ", " + PipelineCountsReport.DISCREPANCIES_FILE + ", "
                         + PipelineCountsReport.STUDIES_FILE + " and " + PipelineCountsReport.MARKDOWN_FILE
-                        + " in the reports directory; summaries fetched from dbGaP cached under data-root; a WARNING "
-                        + "per study and finding; exit 4 when no study has a summary"));
+                        + " in the reports directory; summaries fetched from dbGaP (--fetch-missing-summaries) cached "
+                        + "under data-root; a WARNING per study and finding; exit 4 when fetching and no study has a "
+                        + "summary"));
     }
 
     @Override
@@ -177,6 +188,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         DbgapParams.validate(ctx, report);
         DbgapParams.intParam(ctx, report, "cache-concurrency", 1, MAX_CACHE_CONCURRENCY);
         validateBooleanParam(ctx, report, "cache-summaries");
+        validateBooleanParam(ctx, report, "fetch-missing-summaries");
         String pipeline = Strings.trimToNull(ctx.get("pipeline", ""));
         if (pipeline != null && !List.of("migration", "permanent").contains(pipeline.toLowerCase(Locale.ROOT))) {
             report.error("BAD_PARAM", "pipeline must be migration or permanent, got: " + pipeline, "--pipeline");
@@ -263,8 +275,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
                 dbParticipants.size(), runCounts.size(), cached.values().stream().filter(SummaryCache.Entry::found).count(),
                 cached.size());
 
-        // Only what is not cached is asked of dbGaP, and each answer is cached as it arrives.
-        List<DbgapBatchLookup.Request> toAsk = new ArrayList<>();
+        boolean fetchMissing = ctx.getBoolean("fetch-missing-summaries", false);
+        List<DbgapBatchLookup.Request> missing = new ArrayList<>();
         Map<String, String> cacheErrors = new LinkedHashMap<>();
         for (ManagedInputRow s : studies) {
             SummaryCache.Entry entry = cached.get(s.studyId());
@@ -273,22 +285,19 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             }
             if (entry.error() != null) {
                 cacheErrors.put(s.studyId(), entry.uri() + ": " + entry.error());
-                log.warn("Cached summary {} is unusable ({}); asking dbGaP", entry.uri(), entry.error());
+                log.warn("Summary file {} is unusable ({})", entry.uri(), entry.error());
             }
-            toAsk.add(new DbgapBatchLookup.Request(s.studyId(), ConsentCountComparison.normalizeVersion(s.version())));
+            missing.add(new DbgapBatchLookup.Request(s.studyId(), ConsentCountComparison.normalizeVersion(s.version())));
         }
         Map<String, String> uploaded = new ConcurrentHashMap<>();
         Map<String, String> uploadFailures = new ConcurrentHashMap<>();
-        DbgapStudyClient.Config config = DbgapParams.clientConfig(ctx);
-        Map<String, DbgapLookup> lookups = toAsk.isEmpty() ? Map.of()
-                : DbgapBatchLookup.lookUp(toAsk, sourceFactory.apply(config), config.baseUrl(),
-                        DbgapParams.concurrency(ctx, DEFAULT_CONCURRENCY), DbgapParams.giveUpAfter(ctx),
-                        DbgapParams.unreachablePause(ctx), DbgapParams.deadline(ctx, DEFAULT_DEADLINE_SECONDS),
-                        (request, lookup) -> {
-                            if (cacheSummaries) {
-                                cacheAnswer(cache, request, lookup, uploaded, uploadFailures);
-                            }
-                        });
+        Map<String, DbgapLookup> lookups = Map.of();
+        if (fetchMissing && !missing.isEmpty()) {
+            lookups = fetchMissingSummaries(ctx, missing, cache, cacheSummaries, uploaded, uploadFailures);
+        } else if (!missing.isEmpty()) {
+            log.warn("{} study/studies have no usable summary file, and --fetch-missing-summaries is off: "
+                    + "they fail QA (SUMMARY_MISSING)", missing.size());
+        }
 
         List<StudyResult> results = new ArrayList<>();
         for (ManagedInputRow s : studies) {
@@ -299,17 +308,18 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             counts.putAll(runCounts.getOrDefault(sid, Map.of()));
             StudyInput in = new StudyInput(sid, s.abv(), ConsentCountComparison.normalizeVersion(s.version()),
                     s.version(), counts, dbAbbreviations.getOrDefault(sid, Map.of()));
-            results.add(PipelineCountComparison.compare(in, outcome(cached.get(sid), lookups.get(sid))));
+            results.add(PipelineCountComparison.compare(in, outcome(cached.get(sid), lookups.get(sid), fetchMissing)));
         }
 
         String pipeline = Strings.trimToNull(ctx.get("pipeline", ""));
         Output output = new Output(results, pipeline == null ? null : pipeline.toLowerCase(Locale.ROOT), runCountsUri,
-                runCounts.size(), lookups, Map.copyOf(uploaded), Map.copyOf(uploadFailures), cacheErrors);
+                runCounts.size(), fetchMissing, lookups, Map.copyOf(uploaded), Map.copyOf(uploadFailures), cacheErrors);
         PipelineCountsReport.write(ctx.reportsDir(), ctx.runId(), output);
 
         List<String> unverified = output.unverifiedStudies();
         long withVersion = results.stream().filter(r -> r.input().version() != null).count();
-        if (withVersion > 0 && output.studiesWithSummary() == 0) {
+        // Only when dbGaP was asked: with fetching off, each study without a file has failed already.
+        if (fetchMissing && withVersion > 0 && output.studiesWithSummary() == 0) {
             ValidationReport partial = new ValidationReport("output");
             addIssues(output, partial);
             throw new InfrastructureException("No study has a dbGaP summary: none of the " + withVersion
@@ -405,6 +415,26 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
 
     /* ---- Summaries ---- */
 
+    /**
+     * The fallback for studies with no usable summary file ({@code --fetch-missing-summaries}): asks
+     * dbGaP's SSTR API for each, and caches each answer as it arrives when {@code cacheSummaries}.
+     */
+    private Map<String, DbgapLookup> fetchMissingSummaries(JobContext ctx, List<DbgapBatchLookup.Request> missing,
+                                                           SummaryCache cache, boolean cacheSummaries,
+                                                           Map<String, String> uploaded,
+                                                           Map<String, String> uploadFailures) {
+        log.info("Fetching {} missing summary/summaries from dbGaP", missing.size());
+        DbgapStudyClient.Config config = DbgapParams.clientConfig(ctx);
+        return DbgapBatchLookup.lookUp(missing, sourceFactory.apply(config), config.baseUrl(),
+                DbgapParams.concurrency(ctx, DEFAULT_CONCURRENCY), DbgapParams.giveUpAfter(ctx),
+                DbgapParams.unreachablePause(ctx), DbgapParams.deadline(ctx, DEFAULT_DEADLINE_SECONDS),
+                (request, lookup) -> {
+                    if (cacheSummaries) {
+                        cacheAnswer(cache, request, lookup, uploaded, uploadFailures);
+                    }
+                });
+    }
+
     /** Caches a summary dbGaP answered with, unless it describes another study version than requested. */
     private void cacheAnswer(SummaryCache cache, DbgapBatchLookup.Request request, DbgapLookup lookup,
                              Map<String, String> uploaded, Map<String, String> uploadFailures) {
@@ -431,9 +461,14 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
     }
 
     /** The study's summary: the cached one, else dbGaP's answer, else why there is none. */
-    private static SummaryOutcome outcome(SummaryCache.Entry cached, DbgapLookup lookup) {
+    private static SummaryOutcome outcome(SummaryCache.Entry cached, DbgapLookup lookup, boolean fetchMissing) {
         if (cached != null && cached.found()) {
             return SummaryOutcome.of(DbgapStudySummary.fromDocument(cached.document()), SummarySource.CACHE);
+        }
+        if (cached != null && !fetchMissing) {
+            return SummaryOutcome.none(Status.SUMMARY_MISSING, (cached.error() == null
+                    ? "no summary file at " + cached.uri() : "summary file " + cached.uri() + " is unusable ("
+                    + cached.error() + ")") + ", and fetching missing summaries from dbGaP is off");
         }
         if (lookup == null) {
             // No usable version: compare() reports NO_VERSION.
@@ -540,6 +575,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("pipeline", output.pipeline());
+        m.put("fetchMissingSummaries", output.fetchMissingSummaries());
         m.put("studiesChecked", output.results().size());
         m.put("studiesInRun", output.results().stream().filter(r -> r.input().inRun()).count());
         m.put("studiesVerified", output.results().stream().filter(StudyResult::verified).count());
@@ -572,13 +608,14 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
      * @param pipeline           "migration", "permanent", or null
      * @param runCountsUri       the --run-counts given, or null
      * @param studiesInRunCounts studies the run counts list
-     * @param lookups            dbGaP's answer per study asked (those without a cached summary)
+     * @param fetchMissingSummaries whether studies with no usable summary file were asked of dbGaP
+     * @param lookups            dbGaP's answer per study asked (none when fetchMissingSummaries is off)
      * @param uploaded           study id to the URI its fetched summary was cached at
      * @param uploadFailures     study id to why its fetched summary could not be cached
      * @param cacheErrors        study id to why its cached summary could not be used
      */
     public record Output(List<StudyResult> results, String pipeline, String runCountsUri, int studiesInRunCounts,
-                         Map<String, DbgapLookup> lookups, Map<String, String> uploaded,
+                         boolean fetchMissingSummaries, Map<String, DbgapLookup> lookups, Map<String, String> uploaded,
                          Map<String, String> uploadFailures, Map<String, String> cacheErrors) {
 
         List<String> unverifiedStudies() {

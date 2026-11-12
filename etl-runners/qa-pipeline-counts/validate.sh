@@ -9,8 +9,9 @@
 #   qa-pipeline-report.md               the same, to read
 #
 # Prints every discrepancy, so the console names what to look at. Discrepancies are warnings
-# (exit 10: the build goes UNSTABLE), and so are studies with no summary (none cached, dbGaP did
-# not answer), as long as some study had one; none having one is a failure.
+# (exit 10: the build goes UNSTABLE), among them a study with no summary file when fetching missing
+# summaries is off (SUMMARY_MISSING). So are studies dbGaP did not answer for when it is on, as long
+# as some study had a summary; none having one is then a failure.
 #
 # Usage: validate.sh <reports-dir> <run-id>
 # Exit:  0 clean | 10 clean but with warnings | 1 failed | 64 usage
@@ -55,6 +56,7 @@ note "pipeline $(jq -r '.metrics.pipeline // "none"' "$REPORT"): studies checked
      "($(metric studiesInRun) in this run), verified $(metric studiesVerified); counts compared" \
      "$(metric countsCompared), matching $(metric countsMatching)"
 note "discrepancies $(metric discrepancies): $(jq -r '(.metrics.discrepanciesByType // {}) | to_entries | map("\(.key) \(.value)") | join(", ") | if . == "" then "none" else . end' "$REPORT")"
+note "fetching missing summaries from dbGaP: $(jq -r '.metrics.fetchMissingSummaries // false' "$REPORT")"
 note "summaries: $(metric summariesFromCache) cached, $(metric summariesFromApi) fetched ($(metric summariesCached) newly cached;" \
      "$(metric apiAttempts) dbGaP requests, $(metric apiRetries) retries)"
 note "run counts: $(jq -r '.metrics.runCounts // "none"' "$REPORT") -- sources: $(jq -r '(.metrics.runCountSources // []) | join(", ") | if . == "" then "none" else . end' "$REPORT")"

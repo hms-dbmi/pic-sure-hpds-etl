@@ -113,15 +113,18 @@ expect_rc "a missing report fails" 1 "$TMP/none"
 [ $? -eq 64 ] && pass "usage error exits 64" || fail "usage error did not exit 64"
 
 echo "preflight.sh"
-preflight_rc() {   # <label> <want> <managed inputs> <data root> [pipeline]
+preflight_rc() {   # <label> <want> <managed inputs> <data root> [pipeline] [fetch missing summaries]
   # A closed local port: the dbGaP probe fails at once (a soft warning) and no network is used.
   TF_VAR_managed_inputs_uri="$3" TF_VAR_data_root_uri="$4" TF_VAR_pipeline="${5:-}" \
+    TF_VAR_fetch_missing_summaries="${6:-}" \
     TF_VAR_dbgap_base_url=http://127.0.0.1:9/study "$RUNNER/preflight.sh" >"$TMP/p.log" 2>&1
   local rc=$?
   [ "$rc" -eq "$2" ] && pass "$1 (exit $rc)" || { fail "$1: exit $rc, want $2"; cat "$TMP/p.log"; }
 }
 printf 'x\n' > "$TMP/managed.csv"
-preflight_rc "managed inputs and an s3:// data root pass (dbGaP unreachable: a warning)" 10 "$TMP/managed.csv" s3://b/root permanent
+preflight_rc "managed inputs and an s3:// data root pass (dbGaP not asked: fetching is off by default)" 0 "$TMP/managed.csv" s3://b/root permanent
+preflight_rc "fetching missing summaries, dbGaP unreachable is a warning" 10 "$TMP/managed.csv" s3://b/root migration true
+preflight_rc "fetch missing summaries must be true or false" 1 "$TMP/managed.csv" s3://b/root permanent maybe
 preflight_rc "no managed inputs fails" 1 "" s3://b/root
 preflight_rc "a missing managed inputs file fails" 1 "$TMP/absent.csv" s3://b/root
 preflight_rc "no data root fails" 1 "$TMP/managed.csv" ""

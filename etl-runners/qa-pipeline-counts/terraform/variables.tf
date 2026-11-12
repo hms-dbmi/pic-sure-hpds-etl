@@ -131,6 +131,12 @@ variable "cache_concurrency" {
   description = "--cache-concurrency: cached summaries read at once (1-64). Blank: 8."
 }
 
+variable "fetch_missing_summaries" {
+  type        = string
+  default     = ""
+  description = "--fetch-missing-summaries: true asks dbGaP for each study with no summary file; false fails each such study's QA. Blank: false."
+}
+
 variable "cache_summaries" {
   type        = string
   default     = ""

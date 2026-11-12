@@ -5,7 +5,7 @@
 #   TF_VAR_managed_inputs_uri   required  managed inputs CSV; every ready study is checked
 #   TF_VAR_data_root_uri        required  per-study folders; summaries cached under {root}/{study}/rawData/
 #   TF_VAR_run_counts_uri       optional  this run's counts per consent group (collect-run-counts.py)
-#   TF_VAR_pipeline, TF_VAR_study_filter, TF_VAR_cache_*, TF_VAR_concurrency, TF_VAR_dbgap_*
+#   TF_VAR_pipeline, TF_VAR_study_filter, TF_VAR_fetch_missing_summaries, TF_VAR_cache_*, TF_VAR_concurrency, TF_VAR_dbgap_*
 #                               optional, see terraform/variables.tf
 #
 # Run locally:

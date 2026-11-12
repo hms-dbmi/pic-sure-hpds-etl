@@ -104,9 +104,15 @@ summaries are read in parallel.
 
 **Summaries.** Read from `{DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json` (e.g.
 `.../phs004477/rawData/phs004477_v1_summary.json`; the file holds the summary's `study` object; the
-API's whole response is read too). Only a summary not there (or unreadable) is asked of the dbGaP
-SSTR API, and each answer is written there at once (`CACHE_SUMMARIES`), so each study version is
-fetched once, ever. dbGaP is volatile, so it is asked gently: one study at a time, 2 s apart (the
+API's whole response is read too). A study whose summary is not there (or unreadable) depends on
+`FETCH_MISSING_SUMMARIES`, which the orchestrators set from their own `QA_FETCH_MISSING_SUMMARIES`
+(**unchecked by default in the permanent pipeline, checked in the migration pipeline**):
+
+- **off:** dbGaP is not asked. The study fails QA: `SUMMARY_MISSING`, a warning like any other finding.
+- **on:** the summary is asked of the dbGaP SSTR API, and each answer is written there at once
+  (`CACHE_SUMMARIES`), so each study version is fetched once, ever.
+
+When fetching, dbGaP is volatile, so it is asked gently: one study at a time, 2 s apart (the
 gap doubling, up to 60 s, while it answers overloaded), 3 attempts per study (60 s then 120 s
 apart, `Retry-After` honoured), 2 minutes' pause after it cannot be connected to, no more lookups
 after 20 studies in a row get no answer, and none started after **6 hours**
@@ -116,11 +122,13 @@ another study version than requested is `VERSION_MISMATCH` and is not cached.
 
 **Findings** (statuses; each is a WARNING per study and kind, and makes the build UNSTABLE):
 `COUNT_MISMATCH`, `MISSING` (dbGaP lists the group; the source has none of it), `NOT_IN_DBGAP`,
-`DBGAP_COUNT_MISSING`, `NO_VERSION`, `VERSION_NOT_FOUND`, `VERSION_MISMATCH`, `DBGAP_UNAVAILABLE`.
+`DBGAP_COUNT_MISSING`, `NO_VERSION`, `VERSION_NOT_FOUND`, `VERSION_MISMATCH`, `SUMMARY_MISSING`,
+`DBGAP_UNAVAILABLE`.
 `NOT_LOADED_BY_DESIGN` -- dbGaP's consent 0 (not consented) with no participants loaded -- and
 `MATCH` are not findings. The orchestrator also only marks itself UNSTABLE, never FAILED, when QA
-cannot run: the ETL already succeeded. Exit 4 only when no study has a summary at all (none
-cached, dbGaP answering for none); `RETRY_ON_INFRA` reruns it once.
+cannot run: the ETL already succeeded. Exit 4 only when fetching and no study has a summary at all
+(none cached, dbGaP answering for none); `RETRY_ON_INFRA` reruns it once. With fetching off, studies
+without a summary file each fail QA instead, and the run is not retried.
 
 **Outputs** (archived on the QA build, copied to the orchestrator's
 `downstream-artifacts/qa-pipeline-counts/`, and uploaded beside the run's report under
@@ -132,13 +140,14 @@ cached, dbGaP answering for none); `RETRY_ON_INFRA` reruns it once.
 | `qa_pipeline_counts.csv` | one row per study, consent group and measure: `study_id, version, in_run, consent_code, consent_short_name, measure, compared_to, dbgap_count, count, status, note` |
 | `qa_pipeline_discrepancies.csv` | its rows needing follow-up (every status but `MATCH` and `NOT_LOADED_BY_DESIGN`) |
 | `qa_pipeline_studies.csv` | one row per study: `study_id, abv, version, in_run, summary_source, status, consent_groups, discrepancies, note` |
-| `qa-pipeline-counts-<run-id>.json` | the report: `studiesChecked`, `studiesInRun`, `studiesVerified`, `countsCompared`, `countsMatching`, `discrepancies`, `discrepanciesByType`, `discrepanciesByMeasure`, `studiesWithDiscrepancies`, `unverifiedStudies`, `summariesFromCache`, `summariesFromApi`, `summariesCached`, `summaryCacheFailures`, `unusableCachedSummaries`, `apiLookups`, `apiAttempts`, `apiRetries`, `runCounts`, `runCountSources` |
+| `qa-pipeline-counts-<run-id>.json` | the report: `fetchMissingSummaries`, `studiesChecked`, `studiesInRun`, `studiesVerified`, `countsCompared`, `countsMatching`, `discrepancies`, `discrepanciesByType`, `discrepanciesByMeasure`, `studiesWithDiscrepancies`, `unverifiedStudies`, `summariesFromCache`, `summariesFromApi`, `summariesCached`, `summaryCacheFailures`, `unusableCachedSummaries`, `apiLookups`, `apiAttempts`, `apiRetries`, `runCounts`, `runCountSources` |
 
 **Run it on its own** (say, after a failed run is re-run, or to re-check every study): give
 `MANAGED_INPUTS` and `DATA_ROOT`, and optionally `RUN_COUNTS` (blank: every study DB vs dbGaP
 only). The participant DB must be up (`participant-db-start`). Its runner needs HTTPS egress to
-`www.ncbi.nlm.nih.gov` (see [network egress](#qa-consent-counts-network-egress)) only for summaries
-not yet cached, and write access under `DATA_ROOT` for caching them.
+`www.ncbi.nlm.nih.gov` (see [network egress](#qa-consent-counts-network-egress)) and write access
+under `DATA_ROOT` only when `FETCH_MISSING_SUMMARIES` is checked (it is unchecked by default), to
+fetch and cache summaries not yet there.
 
 ### `qa-consent-counts` (standalone)
 

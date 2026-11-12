@@ -148,6 +148,13 @@ class QaPipelineCountsJobTest {
         return executor.run(job(), params, "t");
     }
 
+    /** A run with the dbGaP fallback on: summaries with no usable file are fetched. */
+    private JobResult fetching(Map<String, String> extra) {
+        Map<String, String> params = new HashMap<>(extra);
+        params.put("fetch-missing-summaries", "true");
+        return run(params);
+    }
+
     private List<String> file(String name) throws IOException {
         return Files.readAllLines(reportsDir.resolve(name), StandardCharsets.UTF_8);
     }
@@ -211,7 +218,7 @@ class QaPipelineCountsJobTest {
         dbParticipants("phs000001", "1", 10);
         dbSamples("phs000001", "1", 8);
 
-        JobResult result = run(Map.of());
+        JobResult result = fetching(Map.of());
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(asked).containsExactly("phs000001.v1");
@@ -228,7 +235,7 @@ class QaPipelineCountsJobTest {
         dbParticipants("phs000001", "1", 10);
         dbSamples("phs000001", "1", 8);
 
-        run(Map.of("cache-summaries", "false"));
+        fetching(Map.of("cache-summaries", "false"));
 
         assertThat(cacheFile("phs000001", "v1")).doesNotExist();
     }
@@ -243,7 +250,7 @@ class QaPipelineCountsJobTest {
         dbParticipants("phs000001", "1", 10);
         dbSamples("phs000001", "1", 8);
 
-        JobResult result = run(Map.of());
+        JobResult result = fetching(Map.of());
 
         assertThat(asked).containsExactly("phs000001.v1");
         assertThat(mapper.readTree(cacheFile("phs000001", "v1").toFile())).isEqualTo(study);
@@ -257,7 +264,7 @@ class QaPipelineCountsJobTest {
         answer("phs000001", "v2", studyJson("phs000001", 1, 1, 10, 8));
         dbParticipants("phs000001", "1", 10);
 
-        JobResult result = run(Map.of());
+        JobResult result = fetching(Map.of());
 
         assertThat(cacheFile("phs000001", "v2")).doesNotExist();
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
@@ -269,7 +276,7 @@ class QaPipelineCountsJobTest {
         managedInputs(study("ONE", "phs000001", "", true), study("TWO", "phs000002", "v1", true));
         answers.put("phs000002.v1", DbgapLookup.notFound("Invalid or non-existent study", 1));
 
-        JobResult result = run(Map.of());
+        JobResult result = fetching(Map.of());
 
         assertThat(asked).containsExactly("phs000002.v1");
         assertThat(codes(result)).contains("WARNING:NO_VERSION", "WARNING:VERSION_NOT_FOUND");
@@ -357,7 +364,7 @@ class QaPipelineCountsJobTest {
         cached("phs000001", "v1", studyJson("phs000001", 1, 1, 10, 0));
         dbParticipants("phs000001", "1", 10, "phs000002", "1", 5);
 
-        JobResult result = run(Map.of());
+        JobResult result = fetching(Map.of());
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(codes(result)).containsExactly("WARNING:DBGAP_UNAVAILABLE");
@@ -371,11 +378,73 @@ class QaPipelineCountsJobTest {
         managedInputs(study("ONE", "phs000001", "v1", true));
         dbParticipants("phs000001", "1", 10);
 
-        JobResult result = run(Map.of());
+        JobResult result = fetching(Map.of());
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
         assertThat(result.getMetrics()).containsEntry("unverifiedStudies", List.of("phs000001"));
         assertThat(file(PipelineCountsReport.COUNTS_FILE)).hasSize(2);
+    }
+
+    /* ---- Fetching missing summaries off (the default) ---- */
+
+    @Test
+    void without_fetching_a_study_with_no_summary_file_fails_and_dbgap_is_not_asked() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true), study("TWO", "phs000002", "v1", true));
+        cached("phs000001", "v1", studyJson("phs000001", 1, 1, 10, 0));
+        answer("phs000002", "v1", studyJson("phs000002", 1, 1, 5, 0));
+        dbParticipants("phs000001", "1", 10, "phs000002", "1", 5);
+
+        JobResult result = run(Map.of());
+
+        assertThat(asked).isEmpty();
+        assertThat(cacheFile("phs000002", "v1")).doesNotExist();
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(codes(result)).containsExactly("WARNING:SUMMARY_MISSING");
+        assertThat(result.getMetrics())
+                .containsEntry("fetchMissingSummaries", false)
+                .containsEntry("summariesFromCache", 1L)
+                .containsEntry("apiLookups", 0)
+                .containsEntry("discrepanciesByType", Map.of("SUMMARY_MISSING", 1L))
+                .containsEntry("unverifiedStudies", List.of());
+        assertThat(file(PipelineCountsReport.STUDIES_FILE)).anyMatch(l -> l.startsWith("phs000002,TWO,v1,false,NONE,SUMMARY_MISSING,"));
+        assertThat(String.join("\n", file(PipelineCountsReport.MARKDOWN_FILE)))
+                .contains("SUMMARY_MISSING", "fetching missing summaries from dbGaP is off");
+    }
+
+    @Test
+    void without_fetching_an_unusable_summary_file_fails_the_study() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        Files.createDirectories(cacheFile("phs000001", "v1").getParent());
+        Files.writeString(cacheFile("phs000001", "v1"), "<html>502 Bad Gateway</html>");
+        dbParticipants("phs000001", "1", 10);
+
+        JobResult result = run(Map.of("fetch-missing-summaries", "false"));
+
+        assertThat(asked).isEmpty();
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getOutputValidation().getIssues()).singleElement()
+                .satisfies(i -> assertThat(i.message()).contains("is unusable", "fetching missing summaries"));
+    }
+
+    /** Not retryable when nothing was asked of dbGaP: each study has failed on its own. */
+    @Test
+    void without_fetching_no_summary_file_at_all_fails_every_study_not_the_run() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true), study("TWO", "phs000002", "v1", true));
+        dbParticipants("phs000001", "1", 10);
+
+        JobResult result = run(Map.of());
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(codes(result)).containsExactly("WARNING:SUMMARY_MISSING", "WARNING:SUMMARY_MISSING");
+    }
+
+    @Test
+    void rejects_a_fetch_missing_summaries_that_is_not_a_boolean() {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+
+        JobResult result = run(Map.of("fetch-missing-summaries", "sometimes"));
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
     }
 
     /* ---- Inputs ---- */

@@ -10,16 +10,19 @@
 //   - RUN_COUNTS, the studies the run processed: every per-consent count its job reports and final
 //     report give (etl-runners/qa-pipeline-counts/collect-run-counts.py), vs subject_count.
 //
-// Summaries: read from {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json when there.
-// Only the rest are asked of dbGaP's SSTR API (GET {DBGAP_BASE_URL}/{phs}.{v}/summary) -- one at a
-// time, at least DBGAP_REQUEST_SPACING_SECONDS apart (widening while dbGaP answers overloaded),
-// retried gently, and none started after DBGAP_DEADLINE_SECONDS (default 6 hours) -- and each
-// answer is cached there at once (CACHE_SUMMARIES), so dbGaP is asked for a study version once.
-// A study still without a summary is UNVERIFIED (a warning: a later run fetches it).
+// Summaries: read from {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json. A study with no
+// usable summary file depends on FETCH_MISSING_SUMMARIES:
+//   false (the default; the permanent pipeline): dbGaP is not asked, and the study fails QA
+//     (SUMMARY_MISSING, a warning like any other finding);
+//   true (the migration pipeline): it is asked of dbGaP's SSTR API (GET {DBGAP_BASE_URL}/{phs}.{v}/summary)
+//     -- one at a time, at least DBGAP_REQUEST_SPACING_SECONDS apart (widening while dbGaP answers
+//     overloaded), retried gently, and none started after DBGAP_DEADLINE_SECONDS (default 6 hours) --
+//     and each answer is cached there at once (CACHE_SUMMARIES), so dbGaP is asked for a study version
+//     once. A study still without a summary is UNVERIFIED (a warning: a later run fetches it).
 //
 // Findings (each a WARNING; the build is UNSTABLE): COUNT_MISMATCH, MISSING (dbGaP lists the group,
 // the source has none of it), NOT_IN_DBGAP, DBGAP_COUNT_MISSING, NO_VERSION, VERSION_NOT_FOUND,
-// VERSION_MISMATCH, DBGAP_UNAVAILABLE (UNVERIFIED). Consent 0 not loaded is by design, not a finding.
+// VERSION_MISMATCH, SUMMARY_MISSING, DBGAP_UNAVAILABLE (UNVERIFIED). Consent 0 not loaded is by design, not a finding.
 //
 // Network: the runner's security group must allow HTTPS (443) egress to www.ncbi.nlm.nih.gov,
 // besides the participant DB and S3 (read and write under DATA_ROOT, for the summary cache).
@@ -73,6 +76,8 @@ pipeline {
                description: '--study-filter: comma-separated study ids to check. Blank checks every ready study.')
         string(name: 'CACHE_CONCURRENCY', defaultValue: '8',
                description: '--cache-concurrency: cached summaries read from S3 at once, 1-64.')
+        booleanParam(name: 'FETCH_MISSING_SUMMARIES', defaultValue: false,
+               description: '--fetch-missing-summaries: checked, a study with no summary file under DATA_ROOT has it fetched from dbGaP\'s API (the DBGAP_* settings below) and cached. Unchecked, dbGaP is not asked and each such study fails QA (SUMMARY_MISSING). The permanent pipeline passes false, the migration pipeline true.')
         booleanParam(name: 'CACHE_SUMMARIES', defaultValue: true,
                description: '--cache-summaries: store each summary fetched from dbGaP under DATA_ROOT, so it is never asked for again.')
         string(name: 'CONCURRENCY', defaultValue: '1',
@@ -123,6 +128,7 @@ pipeline {
         TF_VAR_pipeline                      = "${params.PIPELINE ?: ''}"
         TF_VAR_study_filter                  = "${params.STUDY_FILTER.trim()}"
         TF_VAR_cache_concurrency             = "${params.CACHE_CONCURRENCY.trim()}"
+        TF_VAR_fetch_missing_summaries       = "${params.FETCH_MISSING_SUMMARIES}"
         TF_VAR_cache_summaries               = "${params.CACHE_SUMMARIES}"
         TF_VAR_concurrency                   = "${params.CONCURRENCY.trim()}"
         TF_VAR_dbgap_base_url                = "${params.DBGAP_BASE_URL.trim()}"
@@ -371,7 +377,7 @@ pipeline {
         }
         unstable {
             echo 'qa-pipeline-counts completed WITH WARNINGS: consent counts disagree with dbGaP, or some studies have ' +
-                 'no summary yet. qa-pipeline-report.md (archived) lists each one.'
+                 'no summary. qa-pipeline-report.md (archived) lists each one.'
         }
         success {
             echo "qa-pipeline-counts: every consent count matches (run ${env.EFFECTIVE_RUN_ID})."

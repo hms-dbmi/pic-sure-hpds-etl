@@ -627,8 +627,8 @@ def writePipelineReport() {
 
 // The last step of the run, in post { always } after the final report and the DB backup: every study
 // marked ready in MANAGED_INPUTS -- excluded ones and those this run did not process included, as a
-// regression check -- compared with its dbGaP summary (cached under DATA_ROOT, else fetched and
-// cached), against the participant DB and this run's per-consent counts (qaRunCounts). Read-only but
+// regression check -- compared with its dbGaP summary (cached under DATA_ROOT; one missing there is
+// fetched and cached when QA_FETCH_MISSING_SUMMARIES, else the study fails QA), against the participant DB and this run's per-consent counts (qaRunCounts). Read-only but
 // for the cached summaries, so it never affects the backup. Skipped for a pre-flight run, when the DB
 // never started, or when the run failed (its counts would be partial; run qa-pipeline-counts on its
 // own after a re-run). Findings, and QA failing to run, make the build UNSTABLE, never FAILED: the
@@ -656,6 +656,8 @@ def runQaPipelineCounts(String job, String pipeline) {
         string(name: 'PIPELINE', value: pipeline),
         string(name: 'STUDY_FILTER', value: ''),
         string(name: 'CACHE_CONCURRENCY', value: '8'),
+        // Off unless the run asks: a study with no summary file then fails QA instead of asking dbGaP.
+        booleanParam(name: 'FETCH_MISSING_SUMMARIES', value: params.QA_FETCH_MISSING_SUMMARIES == true),
         booleanParam(name: 'CACHE_SUMMARIES', value: true),
         // One dbGaP request at a time, 2 s apart (widening while dbGaP is overloaded), 3 attempts
         // each (60 s then 120 s apart), none started after 6 hours: an outage is waited out that

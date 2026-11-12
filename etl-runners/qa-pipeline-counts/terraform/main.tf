@@ -43,6 +43,7 @@ module "etl_runner" {
     pipeline                        = var.pipeline
     study_filter                    = var.study_filter
     cache_concurrency               = var.cache_concurrency
+    fetch_missing_summaries         = var.fetch_missing_summaries
     cache_summaries                 = var.cache_summaries
     concurrency                     = var.concurrency
     dbgap_base_url                  = var.dbgap_base_url

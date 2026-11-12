@@ -69,7 +69,9 @@ final class PipelineCountComparison {
         /** The summary is for another accession or version than the one requested. */
         VERSION_MISMATCH(true, true),
         /** No summary: none cached, and dbGaP gave no usable answer in this run. */
-        UNVERIFIED(false, true);
+        UNVERIFIED(false, true),
+        /** No usable summary file, and fetching missing summaries from dbGaP is off: the study fails QA. */
+        SUMMARY_MISSING(true, true);
 
         private final boolean discrepancy;
         private final boolean studyLevel;
