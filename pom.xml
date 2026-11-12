@@ -62,10 +62,10 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
+        <!-- Compile scope: GlobalAllConceptsRepository streams with the driver's COPY API. -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
         </dependency>
 
         <!-- JSON + delimited (CSV/TSV) parsing. Versions managed by the Boot jackson BOM. -->
