@@ -184,7 +184,7 @@ public class MultiPopulateRdsParticipantsJob extends AbstractJob<MultiPopulateRd
         codes.forEach(c -> byCode.put(c, ""));
 
         if (dataDict == null) {
-            issues.add(ValidationIssue.warning("NO_DATA_DICT", "No Subject.data_dict.xml; consent abbreviations "
+            issues.add(ValidationIssue.warning("NO_DATA_DICT", "No Subject data dictionary; consent abbreviations "
                     + "left blank for code(s) " + codes, Map.of("file", "", "count", (long) codes.size(),
                     "examples", List.copyOf(codes))));
             return byCode;

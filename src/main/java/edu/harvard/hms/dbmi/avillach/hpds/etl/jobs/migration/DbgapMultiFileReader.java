@@ -35,7 +35,7 @@ import java.util.stream.Stream;
  *   <li>{@code {studyid}*Sample.MULTI.txt} (optional): one row per sample;
  *       {@code dbGaP_Subject_ID}, {@code dbGaP_Sample_ID}, and usually the submitted
  *       {@code SAMPLE_ID}.</li>
- *   <li>{@code {studyid}*Subject*data_dict*.xml} (optional): decodes the numeric consent codes
+ *   <li>{@code {studyid}*Subject.data_dict*.xml} (optional): decodes the numeric consent codes
  *       into labels such as {@code General Research Use (GRU)}.</li>
  * </ul>
  *

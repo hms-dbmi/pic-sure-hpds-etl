@@ -126,7 +126,8 @@ note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- no
 #         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
-#         {base}/{studyId}/rawData/{studyid}*Subject*data_dict*.xml      (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict*.xml      (optional, fallback only;
+#                                         else {studyid}*Subject*data_dict*.xml)
 # A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 # Probing is two S3 round trips per study (~3s), and done one study at a time it took 28 minutes
@@ -155,7 +156,8 @@ probe_study() {
   # Only presence matters here; when several match, the job picks the newest and reports it.
   subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
   sample_multi=$(grep -iE "^${sid}.*sample\.multi\.txt$" <<<"$listing" | head -1 || true)
-  data_dict=$(grep -iE "^${sid}.*subject.*data_dict.*\.xml$" <<<"$listing" | head -1 || true)
+  data_dict=$(grep -iE "^${sid}.*subject\.data_dict.*\.xml$" <<<"$listing" | head -1 || true)
+  [[ -n "$data_dict" ]] || data_dict=$(grep -iE "^${sid}.*subject.*data_dict.*\.xml$" <<<"$listing" | head -1 || true)
   uri_exists "$mapping" && mapping_ok=1 || mapping_ok=0
 
   # Written whole, then renamed, so a probe that dies midway leaves no record at all.
@@ -175,7 +177,8 @@ fi
 #         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
-#         {base}/{studyId}/rawData/{studyid}*Subject*data_dict*.xml      (optional, fallback only)
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict*.xml      (optional, fallback only;
+#                                         else {studyid}*Subject*data_dict*.xml)
 # A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 echo ""
@@ -207,7 +210,7 @@ while IFS=$'\t' read -r abv sid state; do
     route="multi"
     note "$sid ($abv): no SSTR; will load from '$subject_multi'"
     [[ -z "$sample_multi" ]] && note "$sid ($abv): no Sample.MULTI file -- no samples will be loaded"
-    [[ -z "$data_dict" ]] && note "$sid ($abv): no Subject.data_dict.xml -- consent abbreviations will be blank"
+    [[ -z "$data_dict" ]] && warn "$sid ($abv): no Subject data dictionary -- consent abbreviations will be blank"
   else
     NO_SOURCE_STUDIES=$((NO_SOURCE_STUDIES + 1))
     route="none"

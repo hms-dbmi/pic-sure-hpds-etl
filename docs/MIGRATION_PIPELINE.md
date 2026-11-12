@@ -122,7 +122,7 @@ prefix itself):
     │   └── data/{ABV}_PatientMapping.v2.csv                   participants-migration input
     ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (preferred source)
     ├── rawData/{study_id}*Subject.MULTI.txt                   MULTI fallback (+ *Sample.MULTI.txt,
-    │                                                          *Subject*data_dict*.xml, optional)
+    │                                                          *Subject.data_dict*.xml, optional)
     ├── mappings/<build-tag>/
     │   └── {study_id}_hpds_id_mapping.csv                     participants-migration → split
     └── allConcepts/c{code}/
@@ -183,7 +183,7 @@ dump of the legacy RDS database must be placed.
 | `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
 | `{studyid}*Subject.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP subject table: the fallback source when there is no SSTR, or the SSTR is malformed. `#` preamble, then tab-delimited; `dbGaP_Subject_ID` (or the older `dbGaP SubjID`) plus a numeric consent column named `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code` or `consent_group` (any case, preferred in that order) |
 | `{studyid}*Sample.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP sample table (optional, fallback only): `dbGaP_Subject_ID`, `dbGaP_Sample_ID`, usually `SAMPLE_ID` (older releases: `dbGaP SubjID`, `dbGaP SampID`, `SAMPID`) |
-| `{studyid}*Subject*data_dict*.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes |
+| `{studyid}*Subject.data_dict*.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes. When there is none, `{studyid}*Subject*data_dict*.xml` is used. Without a usable dictionary the study still loads, with blank consent abbreviations and a warning |
 
 All rawData names are matched case-insensitively. When several MULTI files or dictionaries match,
 the newest release (highest version numbers) is used and the others are reported; a dictionary
