@@ -14,7 +14,8 @@ case "$1 $2" in
   "ec2 terminate-instances")
     if [[ -f "$S/terminate_error" ]]; then cat "$S/terminate_error" >&2; exit 254; fi
     echo '{"TerminatingInstances": []}' ;;
-  "s3 rm") [[ -f "$S/rm_error" ]] && { echo "delete failed: $3 An error occurred (AccessDenied)" >&2; exit 1; }; rm -f "$(path "$3")" ;;
+  "s3 rm") [[ -f "$S/rm_error" ]] && { echo "delete failed: $3 An error occurred (AccessDenied)" >&2; exit 1; }
+    if [[ " $* " == *" --recursive "* ]]; then rm -rf "$(path "$3")"; else rm -f "$(path "$3")"; fi ;;
   "s3 cp")
     if [[ "$3" == - ]]; then
       [[ -f "$S/put_error" ]] && { echo "upload failed: - to $4 An error occurred (AccessDenied)" >&2; exit 1; }

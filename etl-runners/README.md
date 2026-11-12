@@ -116,7 +116,7 @@ Defined in `common.mk` unless noted.
 | `init`          | `terraform init -reconfigure` with the backend config and `STATE_KEY`     |
 | `validate-tf`   | `terraform validate`                                                      |
 | `plan`          | `terraform plan`                                                          |
-| `apply`         | `terraform apply --auto-approve`; creates the ephemeral instance          |
+| `apply`         | clears the run's S3 report prefix (`etl-runner/reports/<name>/<run id>/`, not when resuming from it), then `terraform apply --auto-approve`; creates the ephemeral instance |
 | `monitor`       | Wait for the run to finish                                                |
 | `run`           | `apply` + `monitor`                                                       |
 | `fetch-reports` | `aws s3 sync` the run's reports into `$(REPORTS_DIR)`                     |
