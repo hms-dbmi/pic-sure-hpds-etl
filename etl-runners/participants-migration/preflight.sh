@@ -123,7 +123,8 @@ note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- no
 
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source; or
+#                                         {studyid}*telemetry_report.tsv)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
 #         {base}/{studyId}/rawData/{studyid}*Subject.data_dict*.xml      (optional, fallback only;
@@ -147,11 +148,14 @@ probe_study() {
   mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
 
   listing=$(uri_ls "$DATA_FOLDER/${sid}/rawData" 2>/dev/null || true)
-  # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
-  # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
-  # case-insensitively, preferring the canonical name -- mirrors the job's discovery.
-  sstr_file=$(grep -iF "$sid" <<<"$listing" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
-              | awk '{ key = (tolower($0) ~ /^sstr_[^_]/) ? 0 : 1; print key "\t" $0 }' | sort | head -1 | cut -f2- || true)
+  # Four naming families, all the same NHLBI artifact (canonical sstr_*, the alternative
+  # {sid}*telemetry_report.tsv, legacy SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened
+  # copies); match case-insensitively, preferring the canonical name, then the telemetry report --
+  # mirrors the job's discovery.
+  sstr_file=$( { grep -iF "$sid" <<<"$listing" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$";
+                 grep -iE "^${sid}.*telemetry_report\.tsv$" <<<"$listing"; } \
+              | awk '{ l = tolower($0); key = (l ~ /^sstr_[^_]/) ? 0 : (l ~ /telemetry_report\.tsv$/ ? 1 : 2); print key "\t" $0 }' \
+              | sort | head -1 | cut -f2- || true)
   # ParticipantsMigrationJob.isSubjectMultiFileFor / isSampleMultiFileFor / isSubjectDataDictFor.
   # Only presence matters here; when several match, the job picks the newest and reports it.
   subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
@@ -174,7 +178,8 @@ fi
 
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source; or
+#                                         {studyid}*telemetry_report.tsv)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
 #         {base}/{studyId}/rawData/{studyid}*Subject.data_dict*.xml      (optional, fallback only;

@@ -542,6 +542,22 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void an_sstr_named_as_a_telemetry_report_is_loaded_like_one() {
+        String telemetry = STUDY + ".v33_telemetry_report.tsv";
+        JobResult result = runOneStudy(Map.of(
+                telemetry, SSTR,
+                SUBJECT_MULTI_NAME, SUBJECT_MULTI), "1001,FHS,9001\n");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("sstrStudyIds", List.of(STUDY));
+        assertThat(store.consentsFor(STUDY)).containsExactly(
+                new Consent(store.hpdsId("DBGap", "1001"), STUDY, "1", "HMB-IRB-MDS"));
+        assertThat(sourcesRow(STUDY))
+                .containsEntry("sstr_file", telemetry)
+                .containsEntry("sstr_status", "used");
+    }
+
+    @Test
     void falls_back_to_multi_when_there_is_no_sstr() throws IOException {
         JobResult result = runOneStudy(Map.of(
                 SUBJECT_MULTI_NAME, SUBJECT_MULTI,
@@ -896,6 +912,24 @@ class ParticipantsMigrationJobTest {
         assertThat(ParticipantsMigrationJob.isSstrFileFor("sstr_phs000200.v13.txt", "phs000999")).isFalse();
         assertThat(ParticipantsMigrationJob.isSstrFileFor("sstr_phs000200.v13.csv", "phs000200")).isFalse();
         assertThat(ParticipantsMigrationJob.isSstrFileFor("notes_phs000200.txt", "phs000200")).isFalse();
+    }
+
+    @Test
+    void sstr_discovery_accepts_a_telemetry_report_named_for_the_study() {
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("phs000200.v13_telemetry_report.tsv", "phs000200")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("PHS000200_Telemetry_Report.TSV", "phs000200")).isTrue();
+        // must start with the study id, and be the .tsv
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("x_phs000200_telemetry_report.tsv", "phs000200")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("phs000200_telemetry_report.tsv", "phs000999")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("phs000200_telemetry_report.txt", "phs000200")).isFalse();
+    }
+
+    @Test
+    void the_canonical_sstr_is_preferred_then_the_telemetry_report_then_flattened_copies() {
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("sstr_phs000200.v13.txt")).isEqualTo(0);
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("phs000200.v13_telemetry_report.tsv")).isEqualTo(1);
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("SSTR__sstr_phs000200.v13.txt")).isEqualTo(2);
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("BDC-ingestion-only__sstr_phs000200.v13.txt")).isEqualTo(2);
     }
 
     @Test

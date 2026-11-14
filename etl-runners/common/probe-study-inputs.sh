@@ -17,8 +17,8 @@
 #
 #   study_id  sstr_candidates  csv_count  csv_bytes  mapping_found  probe_error
 #
-#   sstr_candidates  every *.txt name in {study}/rawData/, '/'-separated (the orchestrator picks
-#                    the SSTR from them by the participants-migration rule)
+#   sstr_candidates  every *.txt and *.tsv name in {study}/rawData/, '/'-separated (the
+#                    orchestrator picks the SSTR from them by the participants-migration rule)
 #   csv_count/bytes  *.csv objects directly in the decoded data folder, and their total size
 #   mapping_found    1 when the mapping object exists, else 0
 #   probe_error      empty, or why S3 could not be listed (credentials, throttling, a typo in
@@ -73,7 +73,7 @@ probe_study() {
   err="$PROBES/$n.err"
 
   if listing=$(s3_ls "$base/rawData/" "$err"); then
-    sstr=$(names <<<"$listing" | grep -i '\.txt$' | paste -sd/ - || true)
+    sstr=$(names <<<"$listing" | grep -iE '\.(txt|tsv)$' | paste -sd/ - || true)
   else
     why="rawData/: $(head -c 300 "$err")"
   fi

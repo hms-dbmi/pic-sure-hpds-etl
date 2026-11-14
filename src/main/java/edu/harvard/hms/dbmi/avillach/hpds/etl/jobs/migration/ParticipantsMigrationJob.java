@@ -72,9 +72,9 @@ import java.util.stream.Stream;
  *       study id, hold per-study data. Every rawData file is matched case-insensitively:
  *       <ul>
  *         <li>{@code {base}/{studyId}/rawData/sstr_{studyId}.{v}.txt}: the dbGaP SSTR export
- *             (tab-delimited; the legacy folder-flattened {@code SSTR__sstr_*} and
- *             {@code BDC-ingestion-only__sstr_*} names are accepted, the canonical lowercase name
- *             preferred)</li>
+ *             (tab-delimited; the alternative {@code {studyId}*telemetry_report.tsv} and the legacy
+ *             folder-flattened {@code SSTR__sstr_*} and {@code BDC-ingestion-only__sstr_*} names are
+ *             accepted, the canonical lowercase name preferred, then the telemetry report)</li>
  *         <li>{@code {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt}, and optionally
  *             {@code {studyid}*Sample.MULTI.txt} and {@code {studyid}*Subject.data_dict*.xml}: the
  *             dbGaP phenotype tables, the fallback when there is no usable SSTR</li>
@@ -230,7 +230,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 List.of(
                         ParamSpec.required("data-folder",
                                 "Base URI whose subfolders, one per study id, hold per-study data: "
-                                        + "{base}/{studyId}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
+                                        + "{base}/{studyId}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; {studyId}*telemetry_report.tsv and legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
                                         + "or as a fallback {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt "
                                         + "(+ optional *Sample.MULTI.txt and *Subject.data_dict*.xml), "
                                         + "{base}/{studyId}/legacy/data/{ABV_UPPER}_PatientMapping.v2.csv "
@@ -573,15 +573,16 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         String rawDataDir = joinPath(studyBase, "rawData");
         List<String> rawDataFiles = io.listFileNames(rawDataDir);
-        // Staged SSTRs arrive under three naming families, all the same NHLBI artifact:
-        // the canonical 'sstr_{phs}.{v}.txt' filename, plus legacy folder-flattened copies
-        // 'SSTR__sstr_*' and 'BDC-ingestion-only__sstr_*' (an S3 sync collapsed the source
-        // folder into the basename). Match all three, case-insensitively; when a study has
-        // several, prefer the canonical name -- it is the freshest staging convention.
+        // Staged SSTRs arrive under four naming families, all the same NHLBI artifact:
+        // the canonical 'sstr_{phs}.{v}.txt' filename, the alternative '{phs}*telemetry_report.tsv',
+        // plus legacy folder-flattened copies 'SSTR__sstr_*' and 'BDC-ingestion-only__sstr_*' (an
+        // S3 sync collapsed the source folder into the basename). Match all of them,
+        // case-insensitively; when a study has several, prefer the canonical name -- it is the
+        // freshest staging convention -- then the telemetry report.
         List<String> sstrCandidates = rawDataFiles.stream()
                 .filter(name -> isSstrFileFor(name, studyId))
                 .sorted(Comparator
-                        .comparing((String name) -> !isCanonicalSstrName(name))
+                        .comparing((String name) -> sstrNamePreference(name))
                         .thenComparing(name -> name))
                 .toList();
         String sstrFileName = sstrCandidates.isEmpty() ? null : sstrCandidates.get(0);
@@ -1084,9 +1085,23 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     static boolean isSstrFileFor(String fileName, String studyId) {
         String lower = fileName.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".txt")
+        return (lower.endsWith(".txt")
                 && lower.contains(studyId.toLowerCase(Locale.ROOT))
-                && (lower.startsWith("sstr_") || lower.startsWith("bdc-ingestion-only__sstr_"));
+                && (lower.startsWith("sstr_") || lower.startsWith("bdc-ingestion-only__sstr_")))
+                || isTelemetryReportFor(fileName, studyId);
+    }
+
+    /** {@code {studyid}*telemetry_report.tsv}, case-insensitively: the SSTR under its alternative name. */
+    static boolean isTelemetryReportFor(String fileName, String studyId) {
+        return startsWithStudy(fileName, studyId) && fileName.toLowerCase(Locale.ROOT).endsWith("telemetry_report.tsv");
+    }
+
+    /** Which SSTR to use when a study has several: canonical (0), telemetry report (1), folder-flattened (2). */
+    static int sstrNamePreference(String fileName) {
+        if (isCanonicalSstrName(fileName)) {
+            return 0;
+        }
+        return fileName.toLowerCase(Locale.ROOT).endsWith("telemetry_report.tsv") ? 1 : 2;
     }
 
     /** The canonical NHLBI filename shape {@code sstr_{phs}.{v}.txt} — not a

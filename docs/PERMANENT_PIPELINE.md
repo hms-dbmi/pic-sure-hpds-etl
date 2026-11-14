@@ -192,8 +192,9 @@ rule `participants-migration` uses:
 
 - a `.txt` whose name contains the study id and starts with `sstr_` or
   `bdc-ingestion-only__sstr_` (case-insensitive);
-- the canonical `sstr_{phs}.{v}.txt` is preferred over folder-flattened copies
-  (`SSTR__sstr_*`).
+- or a `{phs}*telemetry_report.tsv` (the same file under its alternative name);
+- the canonical `sstr_{phs}.{v}.txt` is preferred, then the telemetry report, then folder-flattened
+  copies (`SSTR__sstr_*`).
 
 ### Per-Study AllConcepts Inputs
 
@@ -730,8 +731,8 @@ version's dbGaP summary: the participant DB for every study (distinct participan
 processed, its SSTR loads (`countsByConsentGroup`), the per-study allConcepts generator (`participantsPerConsent`) and the pipeline report's `pipeline_consent_counts.csv` (vs `subject_count`), collected from `downstream-artifacts/` by
 `etl-runners/qa-pipeline-counts/collect-run-counts.py`.
 
-Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json` when
-there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
+Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json`, or else
+from a `{study_id}*study_summary.json` there for the study's version, when there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
 none started after 6 hours), and cached there at once. A study still without one is
 `UNVERIFIED` and is fetched by a later run.
 

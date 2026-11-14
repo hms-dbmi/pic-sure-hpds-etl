@@ -10,7 +10,8 @@
 //   - RUN_COUNTS, the studies the run processed: every per-consent count its job reports and final
 //     report give (etl-runners/qa-pipeline-counts/collect-run-counts.py), vs subject_count.
 //
-// Summaries: read from {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json. A study with no
+// Summaries: read from {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json, else from a
+// {study}*study_summary.json there (the one for the study's version). A study with no
 // usable summary file depends on FETCH_MISSING_SUMMARIES:
 //   false (the default; the permanent pipeline): dbGaP is not asked, and the study fails QA
 //     (SUMMARY_MISSING, a warning like any other finding);

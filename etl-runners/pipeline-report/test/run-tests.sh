@@ -123,7 +123,7 @@ cat > "$TMP/bin/aws" <<'STUB'
 uri="$3"
 case "$uri" in
   s3://b/r/phs000001/rawData/)
-    printf '2026-01-01 00:00:00        100 sstr_phs000001.v1.txt\n2026-01-01 00:00:00        100 BDC-ingestion-only__sstr_phs000001.v1.txt\n                           PRE old/\n2026-01-01 00:00:00         10 notes.md\n' ;;
+    printf '2026-01-01 00:00:00        100 sstr_phs000001.v1.txt\n2026-01-01 00:00:00        100 BDC-ingestion-only__sstr_phs000001.v1.txt\n2026-01-01 00:00:00        100 phs000001_telemetry_report.tsv\n                           PRE old/\n2026-01-01 00:00:00         10 notes.md\n' ;;
   s3://b/r/phs000001/decoded_data/)
     printf '2026-01-01 00:00:00       1000 a.csv\n2026-01-01 00:00:00       2000 b with space.CSV\n2026-01-01 00:00:00          5 readme.txt\n' ;;
   s3://b/r/phs000001/mappings/mapping2.csv)
@@ -148,7 +148,7 @@ expect() {
   got=$(awk -F'\t' -v s="$sid" '$1 == s { print $2 "|" $3 "|" $4 "|" $5 "|" ($6 != "" ? "ERR" : "") }' "$TMP/probe.tsv")
   [ "$got" = "$want" ] && pass "$sid: $want" || fail "$sid: want '$want', got '$got'"
 }
-expect phs000001 'sstr_phs000001.v1.txt/BDC-ingestion-only__sstr_phs000001.v1.txt|2|3000|1|'
+expect phs000001 'sstr_phs000001.v1.txt/BDC-ingestion-only__sstr_phs000001.v1.txt/phs000001_telemetry_report.tsv|2|3000|1|'
 expect phs000002 '|0|0|0|'
 expect phs000003 '|0|0|0|ERR'
 [ "$(head -1 "$TMP/probe.tsv")" = $'study_id\tsstr_candidates\tcsv_count\tcsv_bytes\tmapping_found\tprobe_error' ] \

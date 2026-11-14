@@ -201,13 +201,13 @@ def probeInputs(List studies, boolean single) {
         def studyBase = "${dataRoot}/${s.studyId}"
         def reasons = []
         if (!s.input) {
-            // Staged files keep NHLBI's own name (sstr_phs######.v#.txt), so the SSTR cannot be
+            // Staged files keep NHLBI's own name (sstr_phs######.v#.txt, or phs######*telemetry_report.tsv), so the SSTR cannot be
             // derived from the study id alone: picked the way participants-migration does.
             def file = pickSstr(p.sstr_candidates.split('/') as List, s.studyId)
             if (file) {
                 s.input = "${studyBase}/rawData/${file}"
             } else {
-                reasons << "no sstr_${s.studyId}.*.txt in ${studyBase}/rawData/"
+                reasons << "no sstr_${s.studyId}.*.txt or ${s.studyId}*telemetry_report.tsv in ${studyBase}/rawData/"
             }
         }
         // The generator's inputs, checked here so a missing one is caught before anything is
@@ -824,19 +824,25 @@ static List largestFirst(List studies) {
 }
 
 // Picks a study's SSTR from the file names in its rawData folder, by the same rule as
-// ParticipantsMigrationJob.isSstrFileFor / isCanonicalSstrName: a .txt naming the study, starting
-// sstr_ or bdc-ingestion-only__sstr_ (case-insensitive), the canonical sstr_{phs}.{v}.txt preferred
-// over folder-flattened copies. Null when there is none.
+// ParticipantsMigrationJob.isSstrFileFor / sstrNamePreference: a .txt naming the study, starting
+// sstr_ or bdc-ingestion-only__sstr_, or a {phs}*telemetry_report.tsv (case-insensitive). The
+// canonical sstr_{phs}.{v}.txt is preferred, then the telemetry report, then folder-flattened
+// copies. Null when there is none.
 @NonCPS
 static String pickSstr(List names, String studyId) {
     def sid = studyId.toLowerCase()
+    def telemetry = { String l -> l.startsWith(sid) && l.endsWith('telemetry_report.tsv') }
     def matches = names.collect { "${it}".trim() }.findAll { n ->
         def l = n.toLowerCase()
-        l.endsWith('.txt') && l.contains(sid) && (l.startsWith('sstr_') || l.startsWith('bdc-ingestion-only__sstr_'))
+        (l.endsWith('.txt') && l.contains(sid) && (l.startsWith('sstr_') || l.startsWith('bdc-ingestion-only__sstr_'))) ||
+            telemetry(l)
     }
     if (!matches) return null
-    def canonical = { String n -> def l = n.toLowerCase(); l.startsWith('sstr_') && !l.startsWith('sstr__') }
-    return matches.sort { a, b -> (canonical(a) == canonical(b)) ? a <=> b : (canonical(a) ? -1 : 1) }[0]
+    def rank = { String n ->
+        def l = n.toLowerCase()
+        (l.startsWith('sstr_') && !l.startsWith('sstr__')) ? 0 : (telemetry(l) ? 1 : 2)
+    }
+    return matches.sort { a, b -> rank(a) <=> rank(b) ?: a <=> b }[0]
 }
 
 return this

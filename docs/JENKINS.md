@@ -104,7 +104,8 @@ summaries are read in parallel.
 
 **Summaries.** Read from `{DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json` (e.g.
 `.../phs004477/rawData/phs004477_v1_summary.json`; the file holds the summary's `study` object; the
-API's whole response is read too). A study whose summary is not there (or unreadable) depends on
+API's whole response is read too). Without that file, a `{study}*study_summary.json` in the same folder
+is read instead (the one for the study's version). A study whose summary is not there (or unreadable) depends on
 `FETCH_MISSING_SUMMARIES`, which the orchestrators set from their own `QA_FETCH_MISSING_SUMMARIES`
 (**unchecked by default in the permanent pipeline, checked in the migration pipeline**):
 
@@ -682,7 +683,8 @@ Run `hpds-etl-pipeline` with `STUDY_ID` blank and `MANAGED_INPUTS` set. Every st
 the SSTR loads sequentially (or `STUDY_CONCURRENCY` at once with `PARALLEL_STUDY_LOADS`), the
 per-study allConcepts always `STUDY_CONCURRENCY` at once, largest study first, with a timeout
 scaled to its decoded data. Each study's SSTR is discovered under `{DATA_ROOT}/{study_id}/rawData/` as
-`sstr_{study_id}.{v}.txt` (case-insensitive; `BDC-ingestion-only__sstr_*` also accepted) — the
+`sstr_{study_id}.{v}.txt` (case-insensitive; `{study_id}*telemetry_report.tsv` and
+`BDC-ingestion-only__sstr_*` also accepted) — the
 same rule `participants-migration` uses. Its per-study allConcepts inputs are
 `{DATA_ROOT}/{study_id}/decoded_data/` and `{DATA_ROOT}/{study_id}/mappings/mapping2.csv`
 (`DECODED_DATA_DIR` / `CONCEPT_MAPPING_FILE`). All three are probed in parallel before anything is

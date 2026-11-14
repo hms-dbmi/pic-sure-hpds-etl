@@ -107,7 +107,7 @@ variable "data_folder_uri" {
   type        = string
   description = <<-EOT
     --data-folder: root of the per-study folders. Per study: {study_id}/rawData/sstr_{study_id}.{v}.txt
-    or, as a fallback, {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt and
+    (or {study_id}*telemetry_report.tsv) or, as a fallback, {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt and
     *Subject.data_dict*.xml); and {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv. Local path or s3:// URI.
   EOT
 }

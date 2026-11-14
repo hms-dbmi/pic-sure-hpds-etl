@@ -120,7 +120,8 @@ prefix itself):
     ├── legacy/
     │   ├── allConcepts/{study_id}_allConcepts_new_search_with_data_analyzer.csv   split input
     │   └── data/{ABV}_PatientMapping.v2.csv                   participants-migration input
-    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (preferred source)
+    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (preferred source; or
+    │                                                          {study_id}*telemetry_report.tsv)
     ├── rawData/{study_id}*Subject.MULTI.txt                   MULTI fallback (+ *Sample.MULTI.txt,
     │                                                          *Subject.data_dict*.xml, optional)
     ├── mappings/<build-tag>/
@@ -180,7 +181,7 @@ dump of the legacy RDS database must be placed.
 |------|----------|-------------|
 | Managed inputs CSV | `--managed-inputs` | Study master list with readiness flags |
 | `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{study_id}/legacy/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id). Required |
-| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
+| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; the alternative `{study_id}*telemetry_report.tsv` and legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted; canonical preferred, then the telemetry report |
 | `{studyid}*Subject.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP subject table: the fallback source when there is no SSTR, or the SSTR is malformed. `#` preamble, then tab-delimited; `dbGaP_Subject_ID` (or the older `dbGaP SubjID`) plus a numeric consent column named `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code` or `consent_group` (any case, preferred in that order) |
 | `{studyid}*Sample.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP sample table (optional, fallback only): `dbGaP_Subject_ID`, `dbGaP_Sample_ID`, usually `SAMPLE_ID` (older releases: `dbGaP SubjID`, `dbGaP SampID`, `SAMPID`) |
 | `{studyid}*Subject.data_dict*.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes. When there is none, `{studyid}*Subject*data_dict*.xml` is used. Without a usable dictionary the study still loads, with blank consent abbreviations and a warning |
@@ -614,8 +615,8 @@ version's dbGaP summary: the participant DB for every study (distinct participan
 processed, what `participants-migration` loaded, the split's `participantsPerConsent`, and the migration report's `participants_loaded` and `participants_split` (vs `subject_count`), collected from `downstream-artifacts/` by
 `etl-runners/qa-pipeline-counts/collect-run-counts.py`.
 
-Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json` when
-there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
+Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json`, or else
+from a `{study_id}*study_summary.json` there for the study's version, when there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
 none started after 6 hours), and cached there at once. A study still without one is
 `UNVERIFIED` and is fetched by a later run.
 

@@ -210,6 +210,55 @@ class QaPipelineCountsJobTest {
                 "phs004477,v1,false,1,DS-HH-MDS-RD,db:samples,sample_count,102689,102689,MATCH,");
     }
 
+    private void stagedAs(String studyId, String fileName, JsonNode study) throws IOException {
+        Path p = dataRoot.resolve(studyId).resolve("rawData").resolve(fileName);
+        Files.createDirectories(p.getParent());
+        Files.writeString(p, mapper.writeValueAsString(study));
+    }
+
+    @Test
+    void a_summary_named_study_summary_is_read_when_the_canonical_file_is_absent() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        stagedAs("phs000001", "phs000001.v1.p1_study_summary.json", studyJson("phs000001", 1, 1, 10, 8));
+        dbParticipants("phs000001", "1", 10);
+        dbSamples("phs000001", "1", 8);
+
+        JobResult result = run(Map.of());
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(asked).isEmpty();
+        assertThat(result.getMetrics()).containsEntry("summariesFromCache", 1L).containsEntry("countsMatching", 2L);
+    }
+
+    @Test
+    void of_several_study_summary_files_the_one_for_the_managed_version_is_used() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v2", true));
+        // Sorts first by name, but is the old version: skipped.
+        stagedAs("phs000001", "phs000001_a_study_summary.json", studyJson("phs000001", 1, 1, 99, 99));
+        stagedAs("phs000001", "phs000001_b_study_summary.json", studyJson("phs000001", 2, 1, 10, 8));
+        dbParticipants("phs000001", "1", 10);
+        dbSamples("phs000001", "1", 8);
+
+        JobResult result = run(Map.of());
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("countsMatching", 2L).containsEntry("discrepancies", 0L);
+    }
+
+    @Test
+    void a_study_summary_file_for_another_version_only_is_unusable() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v2", true));
+        stagedAs("phs000001", "phs000001_study_summary.json", studyJson("phs000001", 1, 1, 10, 8));
+        dbParticipants("phs000001", "1", 10);
+
+        JobResult result = run(Map.of());
+
+        assertThat(asked).isEmpty();
+        assertThat(String.join("\n", file(PipelineCountsReport.STUDIES_FILE)))
+                .contains("SUMMARY_MISSING")
+                .contains("phs000001_study_summary.json is unusable (describes phs000001.v1");
+    }
+
     @Test
     void a_summary_not_cached_is_fetched_once_and_cached_as_its_study_object() throws IOException {
         managedInputs(study("ONE", "phs000001", "v1", true));

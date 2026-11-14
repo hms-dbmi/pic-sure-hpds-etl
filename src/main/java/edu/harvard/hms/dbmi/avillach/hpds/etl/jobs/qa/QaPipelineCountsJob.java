@@ -61,8 +61,8 @@ import java.util.stream.Stream;
  *       give ({@code --run-counts}, collected by the orchestrator), against {@code subject_count}.</li>
  * </ul>
  *
- * <p>Summaries are read from {@code {data-root}/{study_id}/rawData/{study_id}_{version}_summary.json}
- * (see {@link SummaryCache}). What to do about a study with no usable summary file is
+ * <p>Summaries are read from {@code {data-root}/{study_id}/rawData/{study_id}_{version}_summary.json},
+ * else from a {@code {study_id}*study_summary.json} there (see {@link SummaryCache}). What to do about a study with no usable summary file is
  * {@code --fetch-missing-summaries}:
  * <ul>
  *   <li>false (the default): nothing is asked of dbGaP, and each such study fails QA (SUMMARY_MISSING);</li>
@@ -153,7 +153,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         List<ParamSpec> params = new ArrayList<>(List.of(
                 ParamSpec.required("data-root",
                         "Root of the per-study folders: summaries are cached at "
-                                + "{data-root}/{study_id}/rawData/{study_id}_{version}_summary.json",
+                                + "{data-root}/{study_id}/rawData/{study_id}_{version}_summary.json (also read: "
+                                + "{study_id}*study_summary.json)",
                         "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing"),
                 ParamSpec.optional("run-counts",
                         "This run's counts per consent group from its job reports and final report: a CSV with "
