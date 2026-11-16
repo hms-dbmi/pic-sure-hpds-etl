@@ -276,9 +276,12 @@ build's own reason for a failure, is printed in the stage summary and recorded i
 
 A dbGaP SSTR subject/sample mapping file (tab-delimited) with columns:
 - `dbgap_subject_id`
-- `dbgap_sample_id`
 - `CONSENT` or `consent_code`, in any case (consent group code; `CONSENT` wins if both are present)
 - `consent_abbreviation`
+- `dbgap_sample_id`, optional. Without it no dbGaP sample rows load: the job reports
+  `NO_SAMPLE_ID_COLUMN`, a **warning** for a genomic study (managed-inputs `Data Type` includes `G`,
+  as in `P/G`, or no `Data Type` column) and **info** otherwise. The orchestrator passes this to the
+  job as `GENOMIC` / `--genomic true|false`; preflight checks it the same way.
 
 ### Flow
 
@@ -311,7 +314,8 @@ Populated participant database tables: `participants`, `consents`, `samples`. A 
 with row/insert counts: `rowsRead`, `distinctParticipants`, `participantsInserted`,
 `consentsWritten`, `samplesSeen` (input rows with a non-blank `dbgap_sample_id`),
 `samplesInserted` (fewer than `samplesSeen` when the file repeats a sample: samples are
-inserted with `ON CONFLICT DO NOTHING`), `submittedSamplesInserted`, `countsByConsentGroup`.
+inserted with `ON CONFLICT DO NOTHING`), `submittedSamplesInserted`, `sampleIdColumn` (false when
+the input has no `dbgap_sample_id` column), `countsByConsentGroup`.
 
 ---
 

@@ -106,7 +106,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         long genomicCount = rows.stream()
                 .filter(ManagedInputRow::isReady)
                 .filter(r -> includeProcessed || !r.isProcessed())
-                .filter(r -> isGenomic(r))
+                .filter(ManagedInputRow::isGenomic)
                 .count();
         if (genomicCount == 0) {
             // An empty workload is a legitimate state (e.g. a phenotype-only sweep or a
@@ -128,7 +128,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         List<ManagedInputRow> genomicStudies = allRows.stream()
                 .filter(ManagedInputRow::isReady)
                 .filter(r -> includeProcessed || !r.isProcessed())
-                .filter(r -> isGenomic(r))
+                .filter(ManagedInputRow::isGenomic)
                 .toList();
 
         List<PlannedGroup> planned = new ArrayList<>();
@@ -368,18 +368,6 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
 
     private String normalizeOutputBase(String output) {
         return output.endsWith("/") ? output : output + "/";
-    }
-
-    private static boolean isGenomic(ManagedInputRow row) {
-        if (row.dataType() == null || row.dataType().isBlank()) {
-            return false;
-        }
-        for (String part : row.dataType().split("/")) {
-            if (part.trim().equalsIgnoreCase("G")) {
-                return true;
-            }
-        }
-        return false;
     }
 
     @Override

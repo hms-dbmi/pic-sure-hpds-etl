@@ -30,6 +30,19 @@ public record ManagedInputRow(
         boolean isReady,
         boolean isProcessed) {
 
+    /** Whether the study has genomic data: its Data Type includes {@code G}, as in {@code P/G}. */
+    public boolean isGenomic() {
+        if (dataType == null || dataType.isBlank()) {
+            return false;
+        }
+        for (String part : dataType.split("/")) {
+            if (part.trim().equalsIgnoreCase("G")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Convenience factory for tests that only care about abv, studyId, and isReady. */
     public static ManagedInputRow of(String abv, String studyId, boolean isReady) {
         return new ManagedInputRow(abv, studyId, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", isReady, false);

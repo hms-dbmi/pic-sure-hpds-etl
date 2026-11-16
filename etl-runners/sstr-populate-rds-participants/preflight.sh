@@ -10,6 +10,7 @@
 # Environment:
 #   TF_VAR_study_id   required   phs######
 #   TF_VAR_input_uri  required   the SSTR TSV
+#   TF_VAR_genomic    optional   true/false: the study's Data Type includes G (P/G); blank: unknown
 #   AWS_REGION        optional   default us-east-1
 #
 # Exit: 0 clean | 10 clean but with warnings | 1 problems found
@@ -23,11 +24,13 @@ STUDY_ID="${TF_VAR_study_id:?TF_VAR_study_id is required}"
 STUDY_ID="$(trim "$STUDY_ID")"
 INPUT="${TF_VAR_input_uri:?TF_VAR_input_uri is required}"
 INPUT="$(trim "$INPUT")"
+GENOMIC="$(trim "${TF_VAR_genomic:-}")"
 REGION="${AWS_REGION:-us-east-1}"
 
 echo "Pre-flight: sstr-populate-rds-participants"
 echo "  study-id: $STUDY_ID"
 echo "  input:    $INPUT"
+echo "  genomic:  ${GENOMIC:-unknown}"
 echo ""
 
 # Mirrors SstrPopulateRdsParticipantsJob.STUDY_ID_PATTERN.
@@ -84,21 +87,25 @@ fi
 
 # Exactly the columns requireColumns() asserts on, case-sensitively -- except the consent, which
 # is CONSENT or consent_code in any case.
-for col in dbgap_subject_id consent_abbreviation dbgap_sample_id; do
+for col in dbgap_subject_id consent_abbreviation; do
   check "header has '$col'" \
     awk -F'\t' -v c="$col" 'NR==1 { for (i=1;i<=NF;i++) if ($i==c) found=1 } END { exit !found }' "$HEAD_FILE"
 done
 check "header has 'CONSENT' or 'consent_code'" \
   awk -F'\t' 'NR==1 { for (i=1;i<=NF;i++) { h=tolower($i); if (h=="consent" || h=="consent_code") found=1 } } END { exit !found }' "$HEAD_FILE"
 
+# dbgap_sample_id is optional: without it no dbGaP sample rows load, which only matters for a
+# genomic study (the job reports NO_SAMPLE_ID_COLUMN the same way).
+if ! awk -F'\t' 'NR==1 { for (i=1;i<=NF;i++) if ($i=="dbgap_sample_id") found=1 } END { exit !found }' "$HEAD_FILE"; then
+  if [[ "$GENOMIC" == "false" ]]; then
+    note "no 'dbgap_sample_id' column: no dbGaP sample rows will load (fine: not a genomic study)"
+  else
+    warn "no 'dbgap_sample_id' column: no dbGaP sample rows will load for a $([[ "$GENOMIC" == "true" ]] && echo genomic || echo 'possibly genomic (Data Type unknown)') study"
+  fi
+fi
+
 DATA_ROWS=$(tail -n +2 "$HEAD_FILE" | grep -c . || true)
 check "input has data rows after the header" test "$DATA_ROWS" -gt 0
-
-# SUBJECT_ID is not required by this job, but ParticipantsMigrationJob needs it to resolve legacy
-# ids against the same file.
-if ! awk -F'\t' 'NR==1 { for (i=1;i<=NF;i++) if ($i=="SUBJECT_ID") found=1 } END { exit !found }' "$HEAD_FILE"; then
-  note "no SUBJECT_ID column: fine for this job, but the migration cannot use this file to resolve legacy ids"
-fi
 
 echo ""
 note "header: $(tr '\t' '|' <<<"$HEADER")"

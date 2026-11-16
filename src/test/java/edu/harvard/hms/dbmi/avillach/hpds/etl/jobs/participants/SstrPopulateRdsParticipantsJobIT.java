@@ -3,14 +3,18 @@ package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.Severity;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.AbstractIntegrationTest;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.JobTestSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -230,14 +234,65 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     @Test
     void fails_on_missing_required_column() {
         String input = JobTestSupport.tempFile("sstr.tsv", """
-            SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id
-            SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1
+            SUBJECT_ID\tSAMPLE_ID\tCONSENT\tdbgap_subject_id\tdbgap_sample_id
+            SUBJ1\tSAMP1\t1\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
             """
         );
 
         JobResult result = run(executor, job, input, "it-missing-col");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("consent_abbreviation");
+        assertThat(participants.count()).isEqualTo(0);
+    }
+
+    private static final String NO_SAMPLE_ID_COLUMN = """
+            SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id
+            SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1
+            """;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"true", ""})
+    void a_missing_dbgap_sample_id_column_is_a_warning_for_a_genomic_or_unknown_study(String genomic) {
+        String input = JobTestSupport.tempFile("sstr.tsv", NO_SAMPLE_ID_COLUMN);
+        Map<String, String> params = new HashMap<>(Map.of("input", input, "study-id", STUDY_ID));
+        if (!genomic.isEmpty()) {
+            params.put("genomic", genomic);
+        }
+
+        JobResult result = executor.run(job, params, "it-no-sample-col");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("NO_SAMPLE_ID_COLUMN"))
+                .singleElement().satisfies(i -> assertThat(i.severity()).isEqualTo(Severity.WARNING));
+        assertThat(result.getMetrics()).containsEntry("sampleIdColumn", false).containsEntry("samplesInserted", 0L);
+        // Everything else still loads, the submitted SAMPLE_ID included.
+        assertThat(consentCountForStudy()).isEqualTo(1);
+        assertThat(result.getMetrics()).containsEntry("submittedSamplesInserted", 1L);
+    }
+
+    @Test
+    void a_missing_dbgap_sample_id_column_is_only_info_for_a_non_genomic_study() {
+        String input = JobTestSupport.tempFile("sstr.tsv", NO_SAMPLE_ID_COLUMN);
+
+        JobResult result = executor.run(job, Map.of("input", input, "study-id", STUDY_ID, "genomic", "false"),
+                "it-no-sample-col-p");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("NO_SAMPLE_ID_COLUMN"))
+                .singleElement().satisfies(i -> assertThat(i.severity()).isEqualTo(Severity.INFO));
+    }
+
+    @Test
+    void rejects_a_genomic_value_other_than_true_or_false() {
+        String input = JobTestSupport.tempFile("sstr.tsv", NO_SAMPLE_ID_COLUMN);
+
+        JobResult result = executor.run(job, Map.of("input", input, "study-id", STUDY_ID, "genomic", "P/G"),
+                "it-bad-genomic");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
         assertThat(participants.count()).isEqualTo(0);
     }
 

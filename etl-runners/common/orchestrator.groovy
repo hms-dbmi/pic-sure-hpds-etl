@@ -67,7 +67,8 @@ def resolveStudies() {
         def sid = params.STUDY_ID.trim()
         def row = studies.find { it.studyId == sid }
         // An explicit reload: the ready/processed flags do not apply.
-        selected = [[studyId: sid, abv: row?.abv ?: '', processed: false, input: params.INPUT?.trim() ?: '']]
+        selected = [[studyId: sid, abv: row?.abv ?: '', genomic: row?.genomic, processed: false,
+                     input: params.INPUT?.trim() ?: '']]
     } else {
         selected = studies.findAll { it.ready }
         if (selected.isEmpty()) {
@@ -730,6 +731,13 @@ def runTag() {
 // id. Throws IllegalArgumentException on a header missing any of `required` (naming what it found)
 // or a ready/processed value that is not Yes/No.
 @NonCPS
+// Whether a managed-inputs Data Type marks a genomic study: it includes G, as in P/G. The same rule
+// as ManagedInputRow.isGenomic.
+@NonCPS
+static boolean isGenomic(String dataType) {
+    return (dataType ?: '').split('/').any { it.trim().equalsIgnoreCase('G') }
+}
+
 static List<Map> parseManagedInputs(String text, List<String> required) {
     List<String> header = null
     def rows = []
@@ -745,10 +753,12 @@ static List<Map> parseManagedInputs(String text, List<String> required) {
             }
             continue
         }
-        def col = { String name -> int i = header.indexOf(name); i < cols.size() ? cols[i].trim() : '' }
+        def col = { String name -> int i = header.indexOf(name); i >= 0 && i < cols.size() ? cols[i].trim() : '' }
         def studyId = col('Study Identifier')
         if (!studyId) continue
-        rows << [studyId  : studyId, abv: col('Study Abbreviated Name'),
+        // 'Data Type' is optional: without it, whether a study is genomic is unknown (null).
+        def genomic = header.contains('Data Type') ? isGenomic(col('Data Type')) : null
+        rows << [studyId  : studyId, abv: col('Study Abbreviated Name'), genomic: genomic,
                  ready    : parseYesNo(col('Data is ready to process'), 'Data is ready to process', studyId),
                  processed: parseYesNo(col('Data Processed'), 'Data Processed', studyId)]
     }

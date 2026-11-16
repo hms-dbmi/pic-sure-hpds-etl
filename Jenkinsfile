@@ -240,6 +240,8 @@ pipeline {
                                 paramsFor: { s -> [
                                     string(name: 'STUDY_ID', value: s.studyId),
                                     string(name: 'INPUT', value: s.input),
+                                    // Blank when the managed inputs have no Data Type column.
+                                    string(name: 'GENOMIC', value: s.genomic == null ? '' : "${s.genomic}"),
                                     string(name: 'BATCH_SIZE', value: params.BATCH_SIZE),
                                     string(name: 'RUN_ID', value: "${env.BUILD_TAG}-${s.studyId}"),
                                     string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),

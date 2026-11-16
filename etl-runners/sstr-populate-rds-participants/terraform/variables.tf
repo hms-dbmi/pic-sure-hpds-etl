@@ -124,6 +124,17 @@ variable "batch_size" {
   description = "--batch-size: rows per batch insert"
 }
 
+variable "genomic" {
+  type        = string
+  default     = ""
+  description = "--genomic: true when the study's Data Type includes G (P/G), false when not; blank (unknown) passes nothing."
+
+  validation {
+    condition     = contains(["", "true", "false"], var.genomic)
+    error_message = "genomic must be true, false or blank."
+  }
+}
+
 variable "image_tar" {
   type        = string
   default     = "hpds-etl-runner.tar.gz"

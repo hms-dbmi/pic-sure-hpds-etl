@@ -218,7 +218,7 @@ For each of them:
         │
         ▼
 Read {ABV}_PatientMapping.v2.csv; join its id against the source's dbGaP subject id
-or the study's own subject id (SSTR SUBJECT_ID / MULTI SUBJECT_ID or SUBJID)
+(only: the study's own subject id is never matched)
         │
         ├─── no row resolves ──▶ study SKIPPED (NEEDS_DATA_REVIEW): a warning, its mapping file is
         │                        header-only, and later stages leave it out as above
@@ -288,15 +288,15 @@ Issue codes in the file issues report:
 | Code | Severity | Meaning |
 |------|----------|---------|
 | `SSTR_MALFORMED` | warning | The SSTR sub-job failed on its data; the study fell back to MULTI |
+| `NO_SAMPLE_ID_COLUMN` | warning (genomic) / info | The SSTR has no `dbgap_sample_id` column; it still loads, without dbGaP sample rows. A warning only for a study whose managed-inputs `Data Type` includes `G` (`P/G`) |
 | `NO_PARTICIPANT_FILES` | warning | No SSTR and no Subject.MULTI at all; the study was skipped (not migrated), and the run and pipeline carried on |
 | `NEEDS_DATA_REVIEW` | warning | The source loaded, but no patient mapping row resolved to a loaded subject (counts given: not in the file, no participant id, consent 0); the study was skipped, its mapping file is header-only, and a resumed run migrates it again |
 | `NO_PARTICIPANT_SOURCE` | error | The SSTR is malformed and there is no Subject.MULTI to fall back to; the study failed |
 | `MULTI_LOAD_FAILED` | error | The MULTI sub-job failed (e.g. no consent column, no consented subject); the study failed |
-| `MULTIPLE_SSTR_CANDIDATES`, `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named |
+| `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named (several SSTRs is not reported: the preferred one is used) |
 | `MULTIPLE_CONSENT_COLUMNS` | warning | Several known consent headers; the first of `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code`, `consent_group` was used |
 | `CONSENT_ZERO_DROPPED` | info | Consent-0 subjects, dropped by design |
 | `BLANK_CONSENT`, `NON_NUMERIC_CONSENT`, `BLANK_DBGAP_SUBJECT_ID`, `CONFLICTING_CONSENT` | warning | Subject rows skipped (or, for a conflict, the first consent kept) |
-| `NO_SUBJECT_ID_COLUMN` | info | No `SUBJECT_ID`/`SUBJID`; patient mapping ids can only match the dbGaP id |
 | `NO_SAMPLE_MULTI` | info | No Sample.MULTI; no samples loaded |
 | `SAMPLE_MULTI_UNREADABLE`, `NO_SAMPLE_ROWS` | warning | Sample.MULTI unusable or empty; no samples loaded |
 | `NO_SUBMITTED_SAMPLE_ID_COLUMN` | info | Only dbGaP sample ids loaded |
@@ -307,8 +307,12 @@ Issue codes in the file issues report:
 | `CONSENT_CODE_NOT_DECODED` | warning | Codes the dictionary doesn't decode; their abbreviations are blank |
 | `CONSENT_LABEL_WITHOUT_ABBREVIATION` | warning | Labels with no trailing `(ABBREV)`; the full label was used |
 | `PATIENT_MAPPING_NOT_CONSENTED` | info | Patient mapping rows naming a consent-0 subject; not mapped |
-| `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped (the log has one summary line per study, with the first few ids) |
 | `REUSED_FROM_PREVIOUS_RUN` | info | Copied from the `--resume-from` run, which migrated it; not loaded again |
+
+Patient mapping rows that match no subject in the source file are not reported as an issue: studies
+sharing an abbreviation shared one patient mapping, and old mappings linger, so they are expected
+(the log has one info line per study, with the first few ids). Only a study none of whose rows
+match is a warning (`NEEDS_DATA_REVIEW`).
 
 The job report's `SUBJECTS_WITHOUT_CONSENT` issue counts a study's patient mapping rows that were
 not migrated (consent 0, or not in the source file). That is often expected, so it is **info**,

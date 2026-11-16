@@ -17,6 +17,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -324,6 +326,29 @@ class ParticipantsMigrationJobTest {
         assertThat(result.getMetrics().get("sstrStudyIds")).isEqualTo(List.of("phs000001", "phs000002"));
     }
 
+    static final String SSTR_WITHOUT_SAMPLE_ID_COLUMN = """
+            SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id
+            S1\tNWD1\t1\tHMB-IRB-MDS\t1001
+            """;
+
+    @ParameterizedTest
+    @CsvSource({"P, INFO, SUCCESS", "P/G, WARNING, SUCCESS_WITH_WARNINGS", "G, WARNING, SUCCESS_WITH_WARNINGS"})
+    void an_sstr_without_dbgap_sample_id_loads_and_is_only_a_warning_for_a_genomic_study(
+            String dataType, Severity severity, ExitCode exitCode) {
+        Map<String, String> files = Map.of(
+                STUDY + "/rawData/" + SSTR_NAME, SSTR_WITHOUT_SAMPLE_ID_COLUMN,
+                STUDY + "/legacy/data/" + ABV + "_PatientMapping.v2.csv", "1001,FHS,9001\n");
+        String managed = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process,Data Type\n"
+                        + ABV + "," + STUDY + ",Yes," + dataType + "\n");
+
+        JobResult result = executor.run(newJob(managed), Map.of("data-folder", baseUri(files)), "unit");
+
+        assertThat(result.getExitCode()).isEqualTo(exitCode);
+        assertThat(sourcesRow(STUDY)).containsEntry("source", "sstr").containsEntry("mapping_rows", "1");
+        assertThat(issueRow(STUDY, "NO_SAMPLE_ID_COLUMN")).containsEntry("severity", severity.name());
+    }
+
     @Test
     void writes_each_study_s_result_as_it_finishes_without_partial_files() throws IOException {
         runOneStudy(Map.of(SSTR_NAME, SSTR), "1001,FHS,2002\n");
@@ -562,7 +587,7 @@ class ParticipantsMigrationJobTest {
         JobResult result = runOneStudy(Map.of(
                 SUBJECT_MULTI_NAME, SUBJECT_MULTI,
                 SAMPLE_MULTI_NAME, SAMPLE_MULTI,
-                DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT), "1001,FHS,9001\nS2,FHS,9002\n");
+                DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT), "1001,FHS,9001\n1002,FHS,9002\n");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics())
@@ -581,7 +606,6 @@ class ParticipantsMigrationJobTest {
                 new Sample(p1, STUDY, "NWD1", "submitted"), new Sample(p2, STUDY, "NWD2", "submitted"));
         assertThat(store.participantIds).doesNotContainKey("DBGap|1003");
 
-        // Patient mapping ids resolve by dbGaP id (1001) or by the study's own SUBJECT_ID (S2).
         assertThat(Files.readString(reportsDir.resolve(STUDY + "_hpds_id_mapping.csv"))).isEqualTo(
                 "old_hpds_id,new_hpds_id,common_dbgap_id\n9001," + p1 + ",1001\n9002," + p2 + ",1002\n");
 
@@ -802,7 +826,7 @@ class ParticipantsMigrationJobTest {
 
     @Test
     void patient_mapping_rows_for_consent_zero_subjects_are_reported_not_mapped() {
-        // 1003 by its dbGaP id, S3 (also subject 1003) by the study's own SUBJECT_ID.
+        // 1003 is consent 0. S3 is 1003's own SUBJECT_ID, which is never matched: only dbGaP ids are.
         JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI),
                 "1001,FHS,9001\n1003,FHS,9003\nS3,FHS,9033\nNOPE,FHS,9999\n");
 
@@ -821,16 +845,16 @@ class ParticipantsMigrationJobTest {
                             .containsEntry("unmatchedConsents", List.of("2"));
                 });
         assertThat(issueRow(STUDY, "PATIENT_MAPPING_NOT_CONSENTED"))
-                .containsEntry("severity", "INFO").containsEntry("count", "2").containsEntry("examples", "9003 9033");
-        assertThat(issueRow(STUDY, "PATIENT_MAPPING_UNRESOLVED"))
-                .containsEntry("severity", "WARNING").containsEntry("count", "1").containsEntry("examples", "9999");
+                .containsEntry("severity", "INFO").containsEntry("count", "1").containsEntry("examples", "9003");
+        // Rows matching no subject in the file are expected (shared or stale mappings): no issue.
+        assertThat(issueCodes(STUDY)).doesNotContain("PATIENT_MAPPING_UNRESOLVED");
         assertThat(sourcesRow(STUDY)).containsEntry("unresolved_mapping_rows", "3");
     }
 
     @Test
     void subjects_without_consent_are_only_info_when_every_consent_matched_a_participant() {
         JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI),
-                "1001,FHS,9001\nS2,FHS,9002\n1003,FHS,9003\nNOPE,FHS,9999\n");
+                "1001,FHS,9001\n1002,FHS,9002\n1003,FHS,9003\nNOPE,FHS,9999\n");
 
         assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 2L);
         assertThat(result.getOutputValidation().getIssues())

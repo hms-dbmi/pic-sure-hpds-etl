@@ -219,7 +219,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.SAMPLE_MULTI_NAME, ParticipantsMigrationJobTest.SAMPLE_MULTI,
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
-                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\nS2,FHS,9002\n"));
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n1002,FHS,9002\n"));
 
         JobResult result = executor.run(job, Map.of("data-folder", base), "it-multi");
 
