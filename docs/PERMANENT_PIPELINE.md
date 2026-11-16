@@ -277,7 +277,7 @@ build's own reason for a failure, is printed in the stage summary and recorded i
 A dbGaP SSTR subject/sample mapping file (tab-delimited) with columns:
 - `dbgap_subject_id`
 - `dbgap_sample_id`
-- `CONSENT` (consent group code)
+- `CONSENT` or `consent_code`, in any case (consent group code; `CONSENT` wins if both are present)
 - `consent_abbreviation`
 
 ### Flow

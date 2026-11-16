@@ -82,11 +82,14 @@ if [[ "$TABS" -le 1 ]] && grep -q ',' <<<"$HEADER"; then
   note "the header contains commas -- this looks like a CSV, but the job requires TSV"
 fi
 
-# Exactly the columns requireColumns() asserts on, case-sensitively.
-for col in dbgap_subject_id CONSENT consent_abbreviation dbgap_sample_id; do
+# Exactly the columns requireColumns() asserts on, case-sensitively -- except the consent, which
+# is CONSENT or consent_code in any case.
+for col in dbgap_subject_id consent_abbreviation dbgap_sample_id; do
   check "header has '$col'" \
     awk -F'\t' -v c="$col" 'NR==1 { for (i=1;i<=NF;i++) if ($i==c) found=1 } END { exit !found }' "$HEAD_FILE"
 done
+check "header has 'CONSENT' or 'consent_code'" \
+  awk -F'\t' 'NR==1 { for (i=1;i<=NF;i++) { h=tolower($i); if (h=="consent" || h=="consent_code") found=1 } } END { exit !found }' "$HEAD_FILE"
 
 DATA_ROWS=$(tail -n +2 "$HEAD_FILE" | grep -c . || true)
 check "input has data rows after the header" test "$DATA_ROWS" -gt 0

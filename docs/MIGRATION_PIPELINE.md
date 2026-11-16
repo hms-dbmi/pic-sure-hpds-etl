@@ -310,6 +310,12 @@ Issue codes in the file issues report:
 | `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped (the log has one summary line per study, with the first few ids) |
 | `REUSED_FROM_PREVIOUS_RUN` | info | Copied from the `--resume-from` run, which migrated it; not loaded again |
 
+The job report's `SUBJECTS_WITHOUT_CONSENT` issue counts a study's patient mapping rows that were
+not migrated (consent 0, or not in the source file). That is often expected, so it is **info**,
+unless a consent group the source file loaded participants for matched none of the patient mapping
+rows: then it is a **warning** naming those consent codes (context `unmatchedConsents`), and the
+run comes back UNSTABLE.
+
 The orchestrator copies the mapping files from the runner's artifacts and uploads them, in one
 recursive copy, to `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot
 see the orchestrator's workspace. The source and issue reports stay with the runner's archived

@@ -200,6 +200,34 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     }
 
     @Test
+    void reads_the_consent_from_a_consent_code_column() {
+        String input = JobTestSupport.tempFile("telemetry_report.tsv",
+                "SUBJECT_ID\tSAMPLE_ID\tconsent_code\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
+                + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"
+                + "SUBJ2\tSAMP2\t2\tHMB\tphs001412.v1.p2.c1\tphs001412.v1.p2.s1\n");
+
+        JobResult result = run(executor, job, input, "it-consent-code");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("consentsWritten", 2L);
+        assertThat(jdbc.queryForList("SELECT consent_code FROM consents WHERE study_id = ? ORDER BY consent_code",
+                String.class, STUDY_ID)).containsExactly("1", "2");
+    }
+
+    @Test
+    void fails_without_a_consent_or_consent_code_column() {
+        String input = JobTestSupport.tempFile("sstr.tsv",
+                "SUBJECT_ID\tSAMPLE_ID\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
+                + "SUBJ1\tSAMP1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+
+        JobResult result = run(executor, job, input, "it-no-consent-col");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("CONSENT (or consent_code)");
+        assertThat(participants.count()).isEqualTo(0);
+    }
+
+    @Test
     void fails_on_missing_required_column() {
         String input = JobTestSupport.tempFile("sstr.tsv", """
             SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id

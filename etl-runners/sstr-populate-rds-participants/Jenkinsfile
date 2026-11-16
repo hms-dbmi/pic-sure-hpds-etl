@@ -272,7 +272,7 @@ pipeline {
                         String meaning = [
                             1  : 'UNKNOWN (unclassified failure)',
                             2  : 'VALIDATION_FAILED (bad --study-id/--batch-size, or empty input)',
-                            3  : 'DATA_ERROR (blank dbgap_subject_id or CONSENT, or a missing column — the study was rolled back, RDS is unchanged)',
+                            3  : 'DATA_ERROR (blank dbgap_subject_id or CONSENT/consent_code, or a missing column — the study was rolled back, RDS is unchanged)',
                             4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
                             5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
                             124: 'TIMEOUT (runner did not finish in time)',

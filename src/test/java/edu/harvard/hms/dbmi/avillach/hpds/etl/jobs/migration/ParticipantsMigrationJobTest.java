@@ -812,15 +812,46 @@ class ParticipantsMigrationJobTest {
                 .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
                 .singleElement()
                 .satisfies(i -> {
-                    assertThat(i.message()).contains("could not be resolved via the multi file");
+                    // Consent 2's only subject (1002) is not in the patient mapping.
+                    assertThat(i.severity()).isEqualTo(Severity.WARNING);
+                    assertThat(i.message()).contains("could not be resolved via the multi file")
+                            .contains("no participant matched consent(s) [2]");
                     assertThat(i.context()).containsEntry("path", "multi")
-                            .containsEntry("firstOldHpdsIds", List.of("9003", "9033", "9999"));
+                            .containsEntry("firstOldHpdsIds", List.of("9003", "9033", "9999"))
+                            .containsEntry("unmatchedConsents", List.of("2"));
                 });
         assertThat(issueRow(STUDY, "PATIENT_MAPPING_NOT_CONSENTED"))
                 .containsEntry("severity", "INFO").containsEntry("count", "2").containsEntry("examples", "9003 9033");
         assertThat(issueRow(STUDY, "PATIENT_MAPPING_UNRESOLVED"))
                 .containsEntry("severity", "WARNING").containsEntry("count", "1").containsEntry("examples", "9999");
         assertThat(sourcesRow(STUDY)).containsEntry("unresolved_mapping_rows", "3");
+    }
+
+    @Test
+    void subjects_without_consent_are_only_info_when_every_consent_matched_a_participant() {
+        JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI),
+                "1001,FHS,9001\nS2,FHS,9002\n1003,FHS,9003\nNOPE,FHS,9999\n");
+
+        assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 2L);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.severity()).isEqualTo(Severity.INFO);
+                    assertThat(i.message()).doesNotContain("no participant matched");
+                    assertThat(i.context()).containsEntry("unmatchedConsents", List.of());
+                });
+    }
+
+    @Test
+    void a_study_record_without_per_consent_matches_reports_every_consent_unmatched() {
+        ParticipantsMigrationJob.SourceUsage usage = new ParticipantsMigrationJob.SourceUsage(null, "used", null, null, null, null, "not attempted", null,
+                Map.of("1", 3L, "2", 0L), null, List.of());
+        assertThat(ParticipantsMigrationJob.unmatchedConsents(usage)).containsExactly("1");
+
+        ParticipantsMigrationJob.SourceUsage matched = new ParticipantsMigrationJob.SourceUsage(null, "used", null, null, null, null, "not attempted", null,
+                Map.of("1", 3L, "3", 2L), Map.of("1", 1L), List.of());
+        assertThat(ParticipantsMigrationJob.unmatchedConsents(matched)).containsExactly("3");
     }
 
     @Test

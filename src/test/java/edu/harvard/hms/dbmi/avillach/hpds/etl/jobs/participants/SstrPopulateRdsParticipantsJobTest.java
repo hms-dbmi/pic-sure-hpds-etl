@@ -20,6 +20,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.nio.file.Files;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -120,5 +121,19 @@ class SstrPopulateRdsParticipantsJobTest {
         assertThat(result.getErrorMessage()).contains("refusing to purge");
         verify(consents, never()).deleteByStudyId(anyString());
         verify(consents, never()).batchUpsert(any());
+    }
+
+    @Test
+    void the_consent_column_is_consent_or_consent_code_in_any_case_consent_first() {
+        assertThat(SstrPopulateRdsParticipantsJob.consentColumn(List.of("SUBJECT_ID", "CONSENT"))).isEqualTo("CONSENT");
+        assertThat(SstrPopulateRdsParticipantsJob.consentColumn(List.of("SUBJECT_ID", "consent"))).isEqualTo("consent");
+        assertThat(SstrPopulateRdsParticipantsJob.consentColumn(List.of("SUBJECT_ID", "consent_code")))
+                .isEqualTo("consent_code");
+        assertThat(SstrPopulateRdsParticipantsJob.consentColumn(List.of("SUBJECT_ID", "CONSENT_CODE")))
+                .isEqualTo("CONSENT_CODE");
+        assertThat(SstrPopulateRdsParticipantsJob.consentColumn(List.of("consent_code", "CONSENT")))
+                .isEqualTo("CONSENT");
+        assertThat(SstrPopulateRdsParticipantsJob.consentColumn(List.of("SUBJECT_ID", "consent_abbreviation")))
+                .isNull();
     }
 }

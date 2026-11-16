@@ -24,6 +24,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -48,6 +49,9 @@ import java.util.stream.Stream;
  * participant shared with another study never picks up that study's samples. Purge + load happen
  * in one transaction: a bad row rolls the whole run back.
  *
+ * <p>The consent column is {@code CONSENT} or, in some files (telemetry reports among them),
+ * {@code consent_code}; either name is matched case-insensitively, {@code CONSENT} first.
+ *
  * <p>Enabled by {@code etl.jobs.sstr-populate-rds-participants.enabled=true}; without it the bean
  * is never created and {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry} does not
  * know the job exists.
@@ -65,6 +69,8 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
     static final String COL_SUBMITTED_SAMPLE_ID = "SAMPLE_ID";
     static final String COL_DBGAP_SAMPLE_ID = "dbgap_sample_id";
     static final String COL_CONSENT = "CONSENT";
+    /** The consent column's other name, used when there is no {@link #COL_CONSENT}. */
+    static final String COL_CONSENT_CODE = "consent_code";
     static final String COL_CONSENT_ABBREVIATION = "consent_abbreviation";
     private static final int DEFAULT_BATCH_SIZE = 1000;
     private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
@@ -148,24 +154,23 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         Map<String, Telemetry> firstRowBySubject = new LinkedHashMap<>();
         List<String[]> samplePairs = new ArrayList<>();
         List<String[]> submittedSamplePairs = new ArrayList<>();
-        boolean headerChecked = false;
+        String consentCol = null;
         long rowsRead = 0;
 
         InputStream in = io.openInput(input);
         try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.TAB)) {
             for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
-                if (!headerChecked) {
-                    requireColumns(row);
-                    headerChecked = true;
+                if (consentCol == null) {
+                    consentCol = requireColumns(row);
                 }
                 rowsRead++;
                 String dbgapSubjectId = Strings.trimToNull(row.get(COL_DBGAP_SUBJECT_ID));
                 if (dbgapSubjectId == null) {
                     throw new DataException("Row " + rowsRead + " has a blank " + COL_DBGAP_SUBJECT_ID);
                 }
-                String consent = Strings.trimToNull(row.get(COL_CONSENT));
+                String consent = Strings.trimToNull(row.get(consentCol));
                 if (consent == null) {
-                    throw new DataException("Row " + rowsRead + " has a blank " + COL_CONSENT);
+                    throw new DataException("Row " + rowsRead + " has a blank " + consentCol);
                 }
                 String consentAbbreviation = row.get(COL_CONSENT_ABBREVIATION);
                 consentAbbreviation = (consentAbbreviation == null || consentAbbreviation.isBlank()) ? "" : consentAbbreviation.trim();
@@ -227,16 +232,34 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 samplePairs.size(), samplesInserted, submittedSamplesInserted, countsByConsentGroup);
     }
 
-    private void requireColumns(Map<String, String> firstRow) {
+    /** Fails unless every required column is present; returns the consent column's header. */
+    private String requireColumns(Map<String, String> firstRow) {
         List<String> missing = new ArrayList<>();
         if (!firstRow.containsKey(COL_DBGAP_SUBJECT_ID)) missing.add(COL_DBGAP_SUBJECT_ID);
-        if (!firstRow.containsKey(COL_CONSENT)) missing.add(COL_CONSENT);
+        String consentCol = consentColumn(firstRow.keySet());
+        if (consentCol == null) missing.add(COL_CONSENT + " (or " + COL_CONSENT_CODE + ")");
         if (!firstRow.containsKey(COL_CONSENT_ABBREVIATION)) missing.add(COL_CONSENT_ABBREVIATION);
         if (!firstRow.containsKey(COL_DBGAP_SAMPLE_ID)) missing.add(COL_DBGAP_SAMPLE_ID);
         if (!missing.isEmpty()) {
             throw new DataException("Input is missing required column(s): " + missing
                     + ". Found: " + firstRow.keySet());
         }
+        return consentCol;
+    }
+
+    /**
+     * The header holding the consent: {@value #COL_CONSENT}, else {@value #COL_CONSENT_CODE}, each
+     * in any case; null when there is neither.
+     */
+    public static String consentColumn(Collection<String> headers) {
+        for (String name : List.of(COL_CONSENT, COL_CONSENT_CODE)) {
+            for (String header : headers) {
+                if (header.equalsIgnoreCase(name)) {
+                    return header;
+                }
+            }
+        }
+        return null;
     }
 
 
