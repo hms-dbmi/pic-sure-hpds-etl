@@ -72,6 +72,12 @@ that Jenkins gates on.
 | `InfrastructureException`      | 4 `INFRASTRUCTURE_ERROR` | DB/S3/network failed (retryable)    |
 | *(anything else)*              | 1 `UNKNOWN`              | unclassified                        |
 
+A thrown exception normally leaves the report with just the error. A job that fails part-way but
+has already established something worth reporting attaches it:
+`throw new InfrastructureException(msg).withPartialResult(metrics, outputValidation)`, and
+`JobExecutor` keeps those metrics and issues in the failed run's report (see `QaConsentCountsJob`,
+which still reports every study it checked when dbGaP answers for none of them).
+
 ## 4. Reuse the Building Blocks
 
 Inject these rather than rolling your own.
