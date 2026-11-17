@@ -53,7 +53,7 @@ Build ▸ Tests
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
-│  Migrate participants    │  (all ready studies, one run)
+│  Migrate participants    │  (ready, unprocessed studies, one run)
 │  participants-migration  │
 └────────────┬────────────┘
              │  produces {studyid}_hpds_id_mapping.csv per study,
@@ -83,7 +83,8 @@ Build ▸ Tests
 │                          │  allConcepts_manifest.csv at the merge input root (versioned)
 └─────────────────────────┘
 
-post { always }:  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+post { always }:  migration-report       (downstream-artifacts/migration-report/)
+                  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
 ```
 
 Stage ordering is strict: each stage runs only if the previous stage succeeded (UNSTABLE
@@ -92,9 +93,13 @@ The global AllConcepts and VCF index stages read the tables populated by
 `participants-migration`. The participant database exists only for the run; see
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
+The per-study stages (participants, split, VCF indexes) run only studies marked **ready** that
+are **not yet marked "Data Processed"** in managed inputs, like the permanent pipeline's loads. The
+global AllConcepts, merge and manifest stages cover every ready study.
+
 `STUDY_FILTER` limits the participants and split stages to the listed studies; the global
-AllConcepts and VCF stages always cover all ready studies from the database, so a filtered
-rerun still ends with complete artifacts.
+AllConcepts stage always covers all ready studies from the database, so a filtered rerun still
+ends with complete artifacts.
 
 The first four jobs can also be run locally via `--pipeline=migrate-all`, which uses the
 in-process `PipelineRunner` defined in `application.yml`.
@@ -113,9 +118,10 @@ prefix itself):
     ├── legacy/
     │   ├── allConcepts/{study_id}_allConcepts_new_search_with_data_analyzer.csv   split input
     │   └── data/{ABV}_PatientMapping.v2.csv                   participants-migration input
-    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (preferred source)
+    ├── rawData/sstr_{study_id}.{v}.txt                        SSTR (preferred source; or
+    │                                                          {study_id}*telemetry_report.tsv)
     ├── rawData/{study_id}*Subject.MULTI.txt                   MULTI fallback (+ *Sample.MULTI.txt,
-    │                                                          *Subject.data_dict.xml, optional)
+    │                                                          *Subject.data_dict*.xml, optional)
     ├── mappings/<build-tag>/
     │   └── {study_id}_hpds_id_mapping.csv                     participants-migration → split
     └── allConcepts/c{code}/
@@ -131,7 +137,8 @@ The global AllConcepts and VCF index outputs are not per-study and keep their ow
 
 Same behaviour as the permanent pipeline: `PREFLIGHT_ONLY=true` starts no database, triggers
 `participants-migration`, `split-allconcepts`, and `create-vcf-indexes` in their pre-flight
-mode, and skips `Generate global AllConcepts` and `Merge AllConcepts`. Mapping URIs are
+mode, and skips `Generate global AllConcepts`, `Merge AllConcepts` and `AllConcepts manifest`.
+Mapping URIs are
 computed but nothing is uploaded, so the split runner's mapping check is a soft warning.
 
 ---
@@ -144,7 +151,8 @@ computed but nothing is uploaded, so the split runner's mapping check is a soft 
 ```
 
 Same gate as the permanent pipeline: the full test suite runs once here, and downstream
-jobs skip tests.
+jobs skip tests. It also runs `make -C etl-runners/participant-db test`,
+`make -C etl-runners/split-allconcepts test` and `make -C etl-runners/migration-report test`.
 
 ---
 
@@ -163,7 +171,7 @@ dump of the legacy RDS database must be placed.
 
 **Job:** `participants-migration`
 **Class:** [`ParticipantsMigrationJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/ParticipantsMigrationJob.java)
-**Runs:** once, processing all ready studies (or `STUDY_FILTER`) internally
+**Runs:** once, processing every ready study not yet marked "Data Processed" (or `STUDY_FILTER`) internally
 
 ### Input
 
@@ -171,10 +179,10 @@ dump of the legacy RDS database must be placed.
 |------|----------|-------------|
 | Managed inputs CSV | `--managed-inputs` | Study master list with readiness flags |
 | `{ABV}_PatientMapping.v2.csv` | `{DATA_FOLDER}/{study_id}/legacy/data/` | Per-study mapping (headerless: id, abv, legacy HPDS id). Required |
-| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted, canonical preferred |
+| `sstr_{studyid}.{v}.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | Per-study SSTR: the preferred participant source. Matched case-insensitively; the alternative `{study_id}*telemetry_report.tsv` and legacy `SSTR__sstr_*` / `BDC-ingestion-only__sstr_*` names accepted; canonical preferred, then the telemetry report |
 | `{studyid}*Subject.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP subject table: the fallback source when there is no SSTR, or the SSTR is malformed. `#` preamble, then tab-delimited; `dbGaP_Subject_ID` (or the older `dbGaP SubjID`) plus a numeric consent column named `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code` or `consent_group` (any case, preferred in that order) |
 | `{studyid}*Sample.MULTI.txt` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP sample table (optional, fallback only): `dbGaP_Subject_ID`, `dbGaP_Sample_ID`, usually `SAMPLE_ID` (older releases: `dbGaP SubjID`, `dbGaP SampID`, `SAMPID`) |
-| `{studyid}*Subject.data_dict.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes |
+| `{studyid}*Subject.data_dict*.xml` | `{DATA_FOLDER}/{study_id}/rawData/` | dbGaP data dictionary (optional, fallback only): decodes the numeric consent codes. When there is none, `{studyid}*Subject*data_dict*.xml` is used. Without a usable dictionary the study still loads, with blank consent abbreviations and a warning |
 
 All rawData names are matched case-insensitively. When several MULTI files or dictionaries match,
 the newest release (highest version numbers) is used and the others are reported; a dictionary
@@ -183,10 +191,10 @@ sharing the Subject.MULTI's table accession (`pht######`) is preferred.
 ### Flow
 
 ```
-Read managed inputs ─▶ filter to ready studies
+Read managed inputs ─▶ filter to ready, unprocessed studies
         │
         ▼
-For each ready study:
+For each of them:
         │
         ├─── SSTR file? ── Yes ──▶ SstrPopulateRdsParticipantsJob (sub-job)
         │                              │
@@ -208,7 +216,7 @@ For each ready study:
         │
         ▼
 Read {ABV}_PatientMapping.v2.csv; join its id against the source's dbGaP subject id
-or the study's own subject id (SSTR SUBJECT_ID / MULTI SUBJECT_ID or SUBJID)
+(only: the study's own subject id is never matched)
         │
         ├─── no row resolves ──▶ study SKIPPED (NEEDS_DATA_REVIEW): a warning, its mapping file is
         │                        header-only, and later stages leave it out as above
@@ -239,7 +247,8 @@ The MULTI sub-job writes the same rows the SSTR job would:
 - from the Sample.MULTI, a `DBGap` sample per `dbGaP_Sample_ID` and a `submitted` sample per
   `SAMPLE_ID`, for loaded subjects only. No Sample.MULTI, or an unreadable one, loads no samples.
 
-Like the SSTR job it purges the study's `consents` first, in the same transaction as the load.
+Like the SSTR job it purges the study's `consents` and `samples` first, in the same transaction
+as the load, and writes the samples under the study's id.
 It is migration-only (`JobType.MIGRATION`); the permanent pipeline never reads MULTI files.
 
 Studies are processed independently. A data failure in one study does not stop the rest. A
@@ -256,7 +265,7 @@ malformed SSTR or its MULTI files had problems.
   - `old_hpds_id` -- the legacy integer HPDS id
   - `new_hpds_id` -- the new integer HPDS id (from `hpds_id_seq`)
   - `common_dbgap_id` -- the dbGaP subject id
-- `participants_migration_sources.csv`: one row per ready study -- outcome, source used
+- `participants_migration_sources.csv`: one row per migrated (ready, unprocessed) study -- outcome, source used
   (`sstr`/`multi`/`none`), the SSTR/MULTI/dictionary files found, whether the SSTR was used or
   malformed, the consent column read, mapping and unresolved row counts, and the error if it failed
 - `participants_migration_file_issues.csv`: every problem found in those files, one row per
@@ -277,15 +286,15 @@ Issue codes in the file issues report:
 | Code | Severity | Meaning |
 |------|----------|---------|
 | `SSTR_MALFORMED` | warning | The SSTR sub-job failed on its data; the study fell back to MULTI |
+| `NO_SAMPLE_ID_COLUMN` | warning (genomic) / info | The SSTR has no `dbgap_sample_id` column; it still loads, without dbGaP sample rows. A warning only for a study whose managed-inputs `Data Type` includes `G` (`P/G`) |
 | `NO_PARTICIPANT_FILES` | warning | No SSTR and no Subject.MULTI at all; the study was skipped (not migrated), and the run and pipeline carried on |
 | `NEEDS_DATA_REVIEW` | warning | The source loaded, but no patient mapping row resolved to a loaded subject (counts given: not in the file, no participant id, consent 0); the study was skipped, its mapping file is header-only, and a resumed run migrates it again |
 | `NO_PARTICIPANT_SOURCE` | error | The SSTR is malformed and there is no Subject.MULTI to fall back to; the study failed |
 | `MULTI_LOAD_FAILED` | error | The MULTI sub-job failed (e.g. no consent column, no consented subject); the study failed |
-| `MULTIPLE_SSTR_CANDIDATES`, `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named |
+| `MULTIPLE_SUBJECT_MULTI_CANDIDATES`, `MULTIPLE_SAMPLE_MULTI_CANDIDATES`, `MULTIPLE_DATA_DICT_CANDIDATES` | warning | Several files matched; the one used is named (several SSTRs is not reported: the preferred one is used) |
 | `MULTIPLE_CONSENT_COLUMNS` | warning | Several known consent headers; the first of `consent`, `consent_1217`, `consentcol`, `gencons`, `consent_code`, `consent_group` was used |
 | `CONSENT_ZERO_DROPPED` | info | Consent-0 subjects, dropped by design |
 | `BLANK_CONSENT`, `NON_NUMERIC_CONSENT`, `BLANK_DBGAP_SUBJECT_ID`, `CONFLICTING_CONSENT` | warning | Subject rows skipped (or, for a conflict, the first consent kept) |
-| `NO_SUBJECT_ID_COLUMN` | info | No `SUBJECT_ID`/`SUBJID`; patient mapping ids can only match the dbGaP id |
 | `NO_SAMPLE_MULTI` | info | No Sample.MULTI; no samples loaded |
 | `SAMPLE_MULTI_UNREADABLE`, `NO_SAMPLE_ROWS` | warning | Sample.MULTI unusable or empty; no samples loaded |
 | `NO_SUBMITTED_SAMPLE_ID_COLUMN` | info | Only dbGaP sample ids loaded |
@@ -296,8 +305,18 @@ Issue codes in the file issues report:
 | `CONSENT_CODE_NOT_DECODED` | warning | Codes the dictionary doesn't decode; their abbreviations are blank |
 | `CONSENT_LABEL_WITHOUT_ABBREVIATION` | warning | Labels with no trailing `(ABBREV)`; the full label was used |
 | `PATIENT_MAPPING_NOT_CONSENTED` | info | Patient mapping rows naming a consent-0 subject; not mapped |
-| `PATIENT_MAPPING_UNRESOLVED` | warning | Patient mapping rows matching no loaded subject; not mapped (the log has one summary line per study, with the first few ids) |
 | `REUSED_FROM_PREVIOUS_RUN` | info | Copied from the `--resume-from` run, which migrated it; not loaded again |
+
+Patient mapping rows that match no subject in the source file are not reported as an issue: studies
+sharing an abbreviation shared one patient mapping, and old mappings linger, so they are expected
+(the log has one info line per study, with the first few ids). Only a study none of whose rows
+match is a warning (`NEEDS_DATA_REVIEW`).
+
+The job report's `SUBJECTS_WITHOUT_CONSENT` issue counts a study's patient mapping rows that were
+not migrated (consent 0, or not in the source file). That is often expected, so it is **info**,
+unless a consent group the source file loaded participants for matched none of the patient mapping
+rows: then it is a **warning** naming those consent codes (context `unmatchedConsents`), and the
+run comes back UNSTABLE.
 
 The orchestrator copies the mapping files from the runner's artifacts and uploads them, in one
 recursive copy, to `{DATA_ROOT}/{study_id}/mappings/<build-tag>/` for the split stage — the split container cannot
@@ -310,7 +329,7 @@ artifacts.
 
 **Job:** `split-allconcepts`
 **Class:** [`SplitAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/SplitAllConceptsJob.java)
-**Runs:** once per ready study. The stage is planned, then run in two lanes in parallel, largest
+**Runs:** once per ready study not yet marked "Data Processed". The stage is planned, then run in two lanes in parallel, largest
 studies first, then consolidated into one report. Every step is a script under
 [`etl-runners/split-allconcepts/`](../etl-runners/split-allconcepts/) with its own tests
 (`make -C etl-runners/split-allconcepts test`, also run in the Tests stage).
@@ -437,6 +456,8 @@ Read legacy allConcepts CSV (streaming)
         │
         ▼
 For each row:
+  ├─ Drop it if its concept path does not start and end with the same µ or \ delimiter
+  ├─ Drop it unless its concept path's first node is the study id (µ{study_id}µ…)
   ├─ Replace the legacy HPDS id with the new hpds_id (via mapping)
   └─ Look up the patient's consent group
         │
@@ -457,10 +478,27 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
 `__migration__/split_allconcepts/`; copy it across if it should be merged.)
 
 - Legacy HPDS ids replaced by new HPDS ids
+- Only the study's own concepts
 - One file per consent group instead of one unified file
 
 ### Error Handling
 
+- Rows whose concept path has no node structure are dropped, with a `MALFORMED_CONCEPT_PATHS`
+  warning: the path must start and end with the same delimiter, `µ` or `\`, with at least one
+  node between them (`µaµ`). Metric `malformedPathRows`; the warning carries up to 10 of the
+  paths. Checked first, so these rows are never counted as other studies' (below). `validate.sh`
+  soft-fails "no malformed concept paths", the split report totals them, and the migration report
+  lists the study for review (`SPLIT_MALFORMED_CONCEPT_PATHS`, `PARTIAL_DATA`)
+- Rows whose concept path's first node does not include the study id are dropped, with a
+  `FOREIGN_CONCEPTS` warning. Some legacy allConcepts files carry other studies' concepts for the
+  participants they share. The first node is the text up to the path's second delimiter. It
+  belongs to the study when it contains the study id (case-sensitive) not followed by another
+  digit: `phs000123`, `phs000123.v1.p1` and `phs000123_v2` are kept, `phs0001234` is not. The job's metrics have
+  `foreignConceptRows` and `foreignFirstNodes` (rows per first node, the 50 largest, the rest under
+  `(other)`); the warning also carries up to 10 of the dropped paths. These rows are not counted as
+  unmapped or without consent. The study's `validate.sh` soft-fails "no concepts from other
+  studies", the split report totals them, and the migration report lists the study for review
+  (`SPLIT_FOREIGN_CONCEPTS`, `PARTIAL_DATA`)
 - Rows with unmapped HPDS ids are logged as warnings and skipped
 - `CONTINUE_ON_STUDY_FAILURE` (default `true`) lets the remaining studies finish when one
   fails; off, no new study is started after a failure (runs already in progress finish), and the
@@ -491,8 +529,8 @@ reused here to generate the global AllConcepts from the newly migrated data. Wri
 
 The same job as the permanent pipeline (see
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-6-create-vcf-indexes)), run with
-`INCLUDE_PROCESSED=true`: the migration regenerates artifacts for studies the legacy system
-already processed, which would otherwise be zero work. Writes
+`INCLUDE_PROCESSED=false`: like the other per-study stages, it covers only ready studies not yet
+marked "Data Processed". Writes
 `{studyId}.c{code}_vcfIndex.tsv` and `{studyId}.c{code}_SampleIds.csv` to
 `VCF_INDEXES_OUTPUT`.
 
@@ -525,7 +563,7 @@ files, and that `global_AllConcepts.csv` under `ALL_CONCEPTS_OUTPUT` exists. The
 versioned `allConcepts_manifest.csv` at the root of `MERGE_ALLCONCEPTS_INPUT` (blank =
 `DATA_ROOT`): `partition, s3_uri, version_id, last_updated, md5`, with a `global` row for the
 global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consent group. If any check fails, no manifest is written and the build fails. See
-[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-9-allconcepts-manifest).
+[`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-10-allconcepts-manifest).
 
 ---
 
@@ -552,6 +590,8 @@ output is missing -- re-run it with `STUDY_FILTER`), `NOT_REACHED` (the pipeline
 `MIGRATED_WITH_GAPS` (migrated, but patients, rows or outputs were dropped -- review before
 sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DATA_MISMATCH`,
 `PARTIAL_DATA`, `PIPELINE_FAILURE`, `OUTPUT_WARNING`.
+
+Tests: `make -C etl-runners/migration-report test`.
 
 ---
 
@@ -611,7 +651,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MANAGED_INPUTS` | `…/__migration__/managed_inputs.csv` | Study list CSV |
 | `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders (see [S3 Layout](#s3-layout)); passed to `participants-migration` as `DATA_FOLDER`, used for the split input, mapping uploads, and split output (must be `s3://`) |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
-| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready |
+| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready, unprocessed |
 | `PARTICIPANTS_PARALLELISM` | `4` | Studies migrated at once (1-8). Each wants about a vCPU on the participants runner, whose size is that job's `INSTANCE_TYPE` |
 | `PARTICIPANTS_RESUME_FROM_RUN_ID` | (blank) | Run id of an earlier participants-migration run over the same `DATA_ROOT` (e.g. `<build-tag>-participants` of one that timed out); studies it migrated are copied, not loaded again |
 | `PARTICIPANTS_TIMEOUT_SECONDS` | `43200` | How long participants-migration waits for its runner. Passed explicitly: a downstream job gets a parameter left out of the build call from its previous build, not its current Jenkinsfile |

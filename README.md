@@ -58,10 +58,9 @@ the Jenkins host; see [`docs/PARTICIPANT_DB.md`](docs/PARTICIPANT_DB.md).
 
 Each orchestrator stage triggers that job's own pipeline under [`etl-runners/`](etl-runners/),
 which provisions a self-terminating EC2 runner with Terraform, runs the JAR in a container,
-publishes the exit code and JSON report to S3, and tears itself down. The permanent pipeline ends
-every run with a consolidated report of each study's outcome
-(`downstream-artifacts/pipeline-report/`, also in S3); see
-[docs/PERMANENT_PIPELINE.md](docs/PERMANENT_PIPELINE.md#end-of-run-report).
+publishes the exit code and JSON report to S3, and tears itself down. Both pipelines end every
+run with a consolidated report (`downstream-artifacts/pipeline-report/` or `migration-report/`,
+also in S3); see [docs/PERMANENT_PIPELINE.md](docs/PERMANENT_PIPELINE.md#end-of-run-report).
 
 The pattern follows [`bdc-etl-curation`](https://github.com/hms-dbmi/bdc-etl-curation) — the same
 `terraform-modules/etl-runner` shape and `s3://<stack>/etl-runner/…` layout — with Java in place
@@ -101,7 +100,12 @@ Every HPDS identity is an integer `hpds_id` drawn from one shared sequence, `hpd
 |----------------|------------------------------------------------------|---------------------------------------------------|
 | `participants` | origin ids (`source_id`, `source`)                   | `(source_id, source)`                             |
 | `consents`     | `study_id` / `consent_code` / `consent_abbreviation` | `(hpds_id, study_id)`                             |
-| `samples`      | `source_sample_id` / `sample_source`                 | `(hpds_id, source_sample_id, sample_source)`      |
+| `samples`      | `study_id` / `source_sample_id` / `sample_source`    | `(hpds_id, study_id, source_sample_id, sample_source)` |
+
+A participant in several studies (one dbGaP subject) has one `hpds_id`, so `samples` records the
+study whose load wrote each sample, and genomic jobs read a study's samples by `study_id`, never
+through the participant's consents (that would hand a study every other study's samples for its
+shared participants).
 
 ## Project Layout
 
@@ -153,6 +157,7 @@ etl-runners/participant-db/       the long-lived Postgres container on the Jenki
                                   Jenkinsfile.start/.backup, start and backup scripts
 etl-runners/common/orchestrator.groovy  the permanent orchestrator's stage logic (loaded)
 etl-runners/pipeline-report/      the permanent pipeline's end-of-run report
+etl-runners/migration-report/     the migration pipeline's end-of-run report (TEMPORARY)
 etl-runners/environments/         per-environment tfvars (development.tfvars)
 docs/JENKINS.md                   architecture, validation, AWS setup, runbook
 docs/PARTICIPANT_DB.md            participant database lifecycle, dumps, seeding

@@ -30,6 +30,7 @@ etl-runners/
 ├── environments/                       Per-environment tfvars (development.tfvars)
 ├── participant-db/                     SHARED: participant DB start/backup; the DB is long-lived (docs/PARTICIPANT_DB.md)
 ├── pipeline-report/                    the permanent pipeline's end-of-run report (not a runner)
+├── migration-report/                   TEMPORARY: the migration pipeline's end-of-run report (not a runner)
 ├── participants-migration/             TEMPORARY (JobType.MIGRATION)
 ├── split-allconcepts/                  TEMPORARY (JobType.MIGRATION)
 ├── runner-pool/                        Long-lived worker instances that run job after job (split stage)
@@ -113,7 +114,7 @@ Defined in `common.mk` unless noted.
 | `init`          | `terraform init -reconfigure` with the backend config and `STATE_KEY`     |
 | `validate-tf`   | `terraform validate`                                                      |
 | `plan`          | `terraform plan`                                                          |
-| `apply`         | `terraform apply --auto-approve`; creates the ephemeral instance          |
+| `apply`         | clears the run's S3 report prefix (`etl-runner/reports/<name>/<run id>/`, not when resuming from it), then `terraform apply --auto-approve`; creates the ephemeral instance |
 | `monitor`       | Wait for the run to finish                                                |
 | `run`           | `apply` + `monitor`                                                       |
 | `fetch-reports` | `aws s3 sync` the run's reports into `$(REPORTS_DIR)`                     |
