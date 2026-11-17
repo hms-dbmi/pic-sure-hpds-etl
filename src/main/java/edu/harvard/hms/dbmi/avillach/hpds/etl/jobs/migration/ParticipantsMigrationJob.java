@@ -659,7 +659,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     + mapping.noParticipant() + " with no participant id, " + mapping.notConsented()
                     + " consent 0); check that the file's subject ids match the legacy patient mapping";
             trace.issue(Severity.WARNING, NEEDS_DATA_REVIEW, identities.file(), reason + "; not migrated",
-                    mapping.unresolvedHpdsIds().stream().limit(MAX_EXAMPLES).toList());
+                    mapping.unresolvedHpdsIds());
             log.warn("Study '{}' needs data review: {}", studyId, reason);
             return StudyResult.needsReview(studyId, row.abv(), trace.source, studyId + " needs data review: " + reason,
                     mapping.unresolvedHpdsIds(), trace.snapshot());

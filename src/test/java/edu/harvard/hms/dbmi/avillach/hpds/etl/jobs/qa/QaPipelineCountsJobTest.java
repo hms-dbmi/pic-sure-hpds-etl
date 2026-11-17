@@ -143,7 +143,7 @@ class QaPipelineCountsJobTest {
     }
 
     private JobResult run(Map<String, String> extra) {
-        Map<String, String> params = new HashMap<>(Map.of("data-root", dataRoot.toString(), "pipeline", "permanent"));
+        Map<String, String> params = new HashMap<>(Map.of("data-root", dataRoot.toString(), "source-pipeline", "permanent"));
         params.putAll(extra);
         return executor.run(job(), params, "t");
     }
@@ -513,7 +513,7 @@ class QaPipelineCountsJobTest {
     void rejects_an_unknown_pipeline_before_running() {
         managedInputs(study("ONE", "phs000001", "v1", true));
 
-        JobResult result = run(Map.of("pipeline", "nightly"));
+        JobResult result = run(Map.of("source-pipeline", "nightly"));
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
     }

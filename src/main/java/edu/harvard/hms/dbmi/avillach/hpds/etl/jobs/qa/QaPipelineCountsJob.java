@@ -162,7 +162,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
                                 + "default, or samples). Studies it does not list are compared DB vs dbGaP only. "
                                 + "Blank: every study DB vs dbGaP only",
                         "s3://bucket/etl-runner/reports/permanent-pipeline/<tag>/qa_run_counts.csv"),
-                ParamSpec.optional("pipeline",
+                ParamSpec.optional("source-pipeline",
                         "Which pipeline ran: migration or permanent (shown in the report)", "permanent"),
                 ParamSpec.optional("study-filter",
                         "Comma-separated study ids to check; blank checks every ready study", "phs000200,phs001412"),
@@ -190,9 +190,9 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         DbgapParams.intParam(ctx, report, "cache-concurrency", 1, MAX_CACHE_CONCURRENCY);
         validateBooleanParam(ctx, report, "cache-summaries");
         validateBooleanParam(ctx, report, "fetch-missing-summaries");
-        String pipeline = Strings.trimToNull(ctx.get("pipeline", ""));
+        String pipeline = Strings.trimToNull(ctx.get("source-pipeline", ""));
         if (pipeline != null && !List.of("migration", "permanent").contains(pipeline.toLowerCase(Locale.ROOT))) {
-            report.error("BAD_PARAM", "pipeline must be migration or permanent, got: " + pipeline, "--pipeline");
+            report.error("BAD_PARAM", "source-pipeline must be migration or permanent, got: " + pipeline, "--source-pipeline");
         }
         if (report.hasErrors()) {
             return;
@@ -312,7 +312,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             results.add(PipelineCountComparison.compare(in, outcome(cached.get(sid), lookups.get(sid), fetchMissing)));
         }
 
-        String pipeline = Strings.trimToNull(ctx.get("pipeline", ""));
+        String pipeline = Strings.trimToNull(ctx.get("source-pipeline", ""));
         Output output = new Output(results, pipeline == null ? null : pipeline.toLowerCase(Locale.ROOT), runCountsUri,
                 runCounts.size(), fetchMissing, lookups, Map.copyOf(uploaded), Map.copyOf(uploadFailures), cacheErrors);
         PipelineCountsReport.write(ctx.reportsDir(), ctx.runId(), output);

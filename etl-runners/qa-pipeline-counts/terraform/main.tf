@@ -40,7 +40,7 @@ module "etl_runner" {
     managed_inputs                  = var.managed_inputs_uri
     data_root                       = var.data_root_uri
     run_counts                      = var.run_counts_uri
-    pipeline                        = var.pipeline
+    source_pipeline                 = var.pipeline
     study_filter                    = var.study_filter
     cache_concurrency               = var.cache_concurrency
     fetch_missing_summaries         = var.fetch_missing_summaries

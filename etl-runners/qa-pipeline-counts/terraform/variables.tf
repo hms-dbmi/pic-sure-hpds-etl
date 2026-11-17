@@ -116,7 +116,7 @@ variable "run_counts_uri" {
 variable "pipeline" {
   type        = string
   default     = ""
-  description = "--pipeline: migration or permanent, shown in the report. Blank: none."
+  description = "--source-pipeline: migration or permanent, shown in the report. Blank: none."
 }
 
 variable "study_filter" {

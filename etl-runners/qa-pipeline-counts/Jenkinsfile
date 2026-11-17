@@ -58,6 +58,8 @@ pipeline {
 
     options {
         timestamps()
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
+        copyArtifactPermission('*')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
         // Two attempts of up to JOB_TIMEOUT_SECONDS (default 7 h) each (RETRY_ON_INFRA), plus provisioning.
@@ -72,7 +74,7 @@ pipeline {
         string(name: 'RUN_COUNTS', defaultValue: '',
                description: '--run-counts: this run\'s counts per consent group, a CSV study_id,consent_code,source,participants[,kind] (s3://), as collect-run-counts.py writes it. Blank compares every study DB vs dbGaP only.')
         choice(name: 'PIPELINE', choices: ['', 'permanent', 'migration'],
-               description: '--pipeline: which pipeline ran, shown in the report. Blank when run on its own.')
+               description: '--source-pipeline: which pipeline ran, shown in the report. Blank when run on its own.')
         string(name: 'STUDY_FILTER', defaultValue: '',
                description: '--study-filter: comma-separated study ids to check. Blank checks every ready study.')
         string(name: 'CACHE_CONCURRENCY', defaultValue: '8',
