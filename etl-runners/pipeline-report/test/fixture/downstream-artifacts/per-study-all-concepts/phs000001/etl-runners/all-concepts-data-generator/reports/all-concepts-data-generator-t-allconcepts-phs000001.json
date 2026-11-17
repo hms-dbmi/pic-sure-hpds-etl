@@ -27,7 +27,11 @@
   },
   "metrics": {
     "consentGroups": 2,
-    "rowsProcessed": 9000
+    "rowsProcessed": 9000,
+    "participantsPerConsent": {
+      "c1": 7,
+      "c2": 2
+    }
   },
   "errorMessage": null
 }

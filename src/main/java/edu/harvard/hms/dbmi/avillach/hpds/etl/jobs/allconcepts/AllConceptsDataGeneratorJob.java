@@ -195,6 +195,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
         }
 
         Map<String, Long> rowsPerConsent = new LinkedHashMap<>();
+        // Distinct participants written to each consent group: what the QA compares with dbGaP's counts.
+        Map<String, Long> participantsPerConsent = new LinkedHashMap<>();
         List<String> outputFiles = new ArrayList<>();
 
         for (Map.Entry<String, AllConceptsCsvBuilder> entry : buildersByConsent.entrySet()) {
@@ -213,6 +215,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             // do not apply.
             io.writeOutput(outputFile, out -> writeCsv(builder, out));
             rowsPerConsent.put(consentLabel, (long) builder.size());
+            participantsPerConsent.put(consentLabel, builder.rows().stream().map(AllConceptsRow::hpdsId).distinct().count());
             outputFiles.add(outputFile);
             log.info("Wrote {} rows to {}", builder.size(), outputFile);
         }
@@ -232,7 +235,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 staleFilesRemoved, staleFilesKept);
 
         return new Output(studyId, consents.size(), participants.size(), mappings.size(),
-                rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, outputFiles,
+                rowsProcessed, rowsSkipped, unmappedPatients.size(), rowsPerConsent, participantsPerConsent, outputFiles,
                 staleFilesRemoved, staleCleanupSkipped, staleFilesKept,
                 parsed.droppedRows(), malformedRows, missingDataFiles);
     }
@@ -549,6 +552,7 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
                 .metric("rowsSkipped", output.rowsSkipped())
                 .metric("unmappedPatients", output.unmappedPatientCount())
                 .metric("rowsPerConsent", output.rowsPerConsent())
+                .metric("participantsPerConsent", output.participantsPerConsent())
                 .metric("outputFiles", output.outputFiles())
                 .metric("staleFilesRemoved", output.staleFilesRemoved())
                 .metric("staleCleanupSkipped", output.staleCleanupSkipped())
@@ -567,6 +571,8 @@ public class AllConceptsDataGeneratorJob extends AbstractJob<AllConceptsDataGene
             long rowsSkipped,
             int unmappedPatientCount,
             Map<String, Long> rowsPerConsent,
+            // distinct participants written per consent group, keyed like rowsPerConsent
+            Map<String, Long> participantsPerConsent,
             List<String> outputFiles,
             List<String> staleFilesRemoved,
             // true when stale removal was skipped for the whole study (a mapped data file is missing)

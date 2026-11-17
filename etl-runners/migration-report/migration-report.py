@@ -46,6 +46,7 @@ Review categories: MISSING_DATA, MALFORMED_DATA, DATA_MISMATCH, PARTIAL_DATA, PI
 OUTPUT_WARNING.
 
 Usage: migration-report.py <artifacts-dir> <run-id> <out-dir> [pipeline-result]
+Set MIGRATION_REPORT_NOW to fix generatedAt (tests).
 Exit:  0 report written | 1 it could not be | 64 usage. Never fails on what the report says: the
        build's result is decided by the stages, this only explains it.
 """
@@ -261,7 +262,13 @@ def main(argv):
             else:
                 for key, code, what in (("unmappedIds", "SPLIT_UNMAPPED_IDS", "allConcepts row(s) with a legacy hpds id not in the mapping"),
                                         ("noConsentRows", "SPLIT_ROWS_WITHOUT_CONSENT", "allConcepts row(s) whose participant has no consent in the DB"),
-                                        ("malformedRows", "SPLIT_MALFORMED_ROWS", "malformed allConcepts row(s)")):
+                                        ("malformedRows", "SPLIT_MALFORMED_ROWS", "malformed allConcepts row(s)"),
+                                        ("malformedPathRows", "SPLIT_MALFORMED_CONCEPT_PATHS",
+                                         "allConcepts row(s) with a concept path not starting and ending with µ or \\"),
+                                        ("foreignConceptRows", "SPLIT_FOREIGN_CONCEPTS",
+                                         "allConcepts row(s) with another study's concept (first node "
+                                         + ", ".join(f"{k}: {v}" for k, v in (m.get("foreignFirstNodes") or {}).items())
+                                         + ")")):
                     if as_int(m.get(key)) > 0:
                         review(sid, "split-allconcepts", "PARTIAL_DATA", code, f"{m.get(key)} {what} were dropped")
 
@@ -319,7 +326,8 @@ def main(argv):
             (cat, sum(1 for r in review_rows if r["category"] == cat)) for cat in ACTIONS))
     report = OrderedDict(
         reportVersion=REPORT_VERSION, runId=run_id, pipelineResult=pipeline_result,
-        generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        generatedAt=os.environ.get("MIGRATION_REPORT_NOW")
+        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         summary=summary, stages=stages, studyIdsByStatus=by_status,
         studies=[dict(s, consents=list(s["consents"].values())) for s in studies.values()],
         consentCounts=consent_rows, review=review_rows)
