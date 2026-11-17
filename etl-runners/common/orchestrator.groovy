@@ -631,6 +631,104 @@ def writePipelineReport() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// QA pipeline counts
+// -----------------------------------------------------------------------------
+
+// The pipeline's last stage: every study
+// marked ready in MANAGED_INPUTS -- excluded ones and those this run did not process included, as a
+// regression check -- compared with its dbGaP summary (cached under DATA_ROOT; one missing there is
+// fetched and cached when QA_FETCH_MISSING_SUMMARIES, else the study fails QA), against the participant DB and this run's per-consent counts (qaRunCounts). Read-only but
+// for the cached summaries. It writes the pipeline report first, for this run's counts; post writes it
+// again with the final result. Skipped for a pre-flight run, when the DB
+// never started, or when the run failed (its counts would be partial; run qa-pipeline-counts on its
+// own after a re-run). Findings, and QA failing to run, make the build UNSTABLE, never FAILED: the
+// ETL itself already succeeded. Its reports land in downstream-artifacts/qa-pipeline-counts/ and
+// beside the run's report in S3.
+def runQaPipelineCounts(String job, String pipeline) {
+    if (params.PREFLIGHT_ONLY) {
+        return
+    }
+    if (env.DB_STARTED != 'true') {
+        echo 'QA pipeline counts skipped: the participant database was never started.'
+        return
+    }
+    if (!(currentBuild.currentResult in ['SUCCESS', 'UNSTABLE'])) {
+        echo "QA pipeline counts skipped: the run ended ${currentBuild.currentResult}, so its counts are partial. " +
+             "Run ${job} on its own once it has been re-run."
+        return
+    }
+    def reportPrefix = "s3://${params.DATA_ROOT.trim().substring('s3://'.length()).split('/')[0]}" +
+                       "/etl-runner/reports/${pipeline}-pipeline/${runTag()}"
+    writePipelineReport()
+    def downstream = build(job: job, wait: true, propagate: false, parameters: [
+        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS.trim()),
+        string(name: 'DATA_ROOT', value: params.DATA_ROOT.trim()),
+        string(name: 'RUN_COUNTS', value: qaRunCounts(pipeline, "${reportPrefix}/qa_run_counts.csv")),
+        string(name: 'PIPELINE', value: pipeline),
+        string(name: 'STUDY_FILTER', value: ''),
+        string(name: 'CACHE_CONCURRENCY', value: '8'),
+        // Off unless the run asks: a study with no summary file then fails QA instead of asking dbGaP.
+        booleanParam(name: 'FETCH_MISSING_SUMMARIES', value: params.QA_FETCH_MISSING_SUMMARIES == true),
+        booleanParam(name: 'CACHE_SUMMARIES', value: true),
+        // One dbGaP request at a time, 2 s apart (widening while dbGaP is overloaded), 3 attempts
+        // each (60 s then 120 s apart), none started after 6 hours: an outage is waited out that
+        // long, then the studies still without a summary are UNVERIFIED and a later run fetches them.
+        // The runner gets 7 h (the deadline, the in-flight study's retries, and the DB and cache reads).
+        string(name: 'CONCURRENCY', value: '1'),
+        string(name: 'DBGAP_REQUEST_SPACING_SECONDS', value: '2'),
+        string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
+        string(name: 'DBGAP_MAX_ATTEMPTS', value: '3'),
+        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '60'),
+        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
+        string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
+        string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
+        string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', value: '120'),
+        string(name: 'DBGAP_DEADLINE_SECONDS', value: '21600'),
+        string(name: 'RUN_ID', value: "${runTag()}-qa-pipeline-counts"),
+        string(name: 'INSTANCE_TYPE', value: 't3.medium'),
+        string(name: 'JOB_TIMEOUT_SECONDS', value: '25200'),
+        string(name: 'PREBUILT_IMAGE_TAR', value: ownRunnerImage()),
+        booleanParam(name: 'SKIP_TESTS', value: true),
+        booleanParam(name: 'RETRY_ON_INFRA', value: true),
+        string(name: 'ENV', value: params.ENV),
+    ])
+    copyDownstreamArtifacts(job, downstream.number, 'downstream-artifacts/qa-pipeline-counts')
+    withEnv(["QA_DEST=${reportPrefix}/qa-pipeline-counts/"]) {
+        sh(returnStatus: true, script: '''
+            [ -d downstream-artifacts/qa-pipeline-counts ] || exit 0
+            aws s3 cp downstream-artifacts/qa-pipeline-counts "$QA_DEST" --recursive --no-progress --only-show-errors \
+              && echo "QA report uploaded to $QA_DEST"
+        ''')
+    }
+    if (downstream.result == 'UNSTABLE') {
+        unstable("${job} #${downstream.number}: consent counts disagree with dbGaP, or some studies have no summary " +
+                 'yet; downstream-artifacts/qa-pipeline-counts/**/qa-pipeline-report.md lists each')
+    } else if (downstream.result != 'SUCCESS') {
+        unstable("${job} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the consent " +
+                 "counts were not checked against dbGaP. Run ${job} on its own (a dbGaP outage, exit 4, is retryable).")
+    }
+}
+
+// This run's per-consent counts from its stages' reports and final report
+// (etl-runners/qa-pipeline-counts/collect-run-counts.py), uploaded to dest for the runner to read.
+// '' (every study DB vs dbGaP only) when they cannot be collected or uploaded.
+def qaRunCounts(String pipeline, String dest) {
+    def local = 'downstream-artifacts/qa-pipeline-counts-input/qa_run_counts.csv'
+    int rc
+    withEnv(["QA_PIPELINE=${pipeline}", "QA_LOCAL=${local}", "QA_DEST=${dest}"]) {
+        rc = sh(returnStatus: true, script: '''
+            python3 etl-runners/qa-pipeline-counts/collect-run-counts.py "$QA_PIPELINE" downstream-artifacts "$QA_LOCAL" &&
+              aws s3 cp "$QA_LOCAL" "$QA_DEST" --only-show-errors
+        ''')
+    }
+    if (rc != 0) {
+        echo "WARNING: could not collect or upload this run's counts (rc=${rc}); QA compares the DB with dbGaP only."
+        return ''
+    }
+    return dest
+}
+
 // BUILD_TAG with only characters safe in an S3 key, a file name and an image name.
 def runTag() {
     return env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')

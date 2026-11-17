@@ -56,10 +56,23 @@ etl:
     merge-allconcepts:
       enabled: ${ETL_JOB_MERGE_ALLCONCEPTS_ENABLED:true}
 
-    # Runs last in both pipelines: verifies every ready consent group's MERGED file and writes the
+    # Runs after the merge in both pipelines: verifies every ready consent group's MERGED file and writes the
     # versioned allConcepts_manifest.csv handed to production ingestion.
     generate-allconcepts-manifest:
       enabled: ${ETL_JOB_GENERATE_ALLCONCEPTS_MANIFEST_ENABLED:true}
+
+    # PERMANENT QA, run standalone (in neither pipeline): participants per consent group in the
+    # participant DB (and a run's load reports) vs dbGaP's subject counts per study version.
+    # Read-only; needs HTTPS egress to www.ncbi.nlm.nih.gov.
+    qa-consent-counts:
+      enabled: ${ETL_JOB_QA_CONSENT_COUNTS_ENABLED:true}
+
+    # PERMANENT QA, the last step of both pipelines: every ready study's counts per consent group
+    # (participant DB, and the run's job and final reports) vs its dbGaP study summary, read from
+    # {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json or fetched (and cached there).
+    # Needs HTTPS egress to www.ncbi.nlm.nih.gov for summaries not yet cached.
+    qa-pipeline-counts:
+      enabled: ${ETL_JOB_QA_PIPELINE_COUNTS_ENABLED:true}
 
     # PERMANENT curation: harmonized-data consent mapping from the DMC drops (ALS-12727).
     generate-identity-consent-mapping:

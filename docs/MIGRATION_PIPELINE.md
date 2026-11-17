@@ -33,6 +33,7 @@ derived artifacts from newly migrated data.
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Merge AllConcepts](#stage-7-merge-allconcepts)
 - [Stage 8: AllConcepts Manifest](#stage-8-allconcepts-manifest)
+- [Stage 9: QA Pipeline Counts](#stage-9-qa-pipeline-counts)
 - [Post: Migration Report](#post-migration-report)
 - [Post: Back Up Participant DB](#post-back-up-participant-db)
 - [Data Flow Summary](#data-flow-summary)
@@ -81,6 +82,10 @@ Build ▸ Tests
 ┌─────────────────────────┐
 │  AllConcepts manifest    │  verifies every ready consent group, then writes
 │                          │  allConcepts_manifest.csv at the merge input root (versioned)
+└────────────┬────────────┘
+             ▼
+┌─────────────────────────┐
+│  QA pipeline counts      │  every ready study vs its dbGaP summary (findings: UNSTABLE)
 └─────────────────────────┘
 
 post { always }:  migration-report       (downstream-artifacts/migration-report/)
@@ -556,7 +561,7 @@ the bucket must be versioned), and skips the rest. Folders are merged
 
 **Job:** `generate-allconcepts-manifest`
 **Class:** [`GenerateAllConceptsManifestJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/allconcepts/GenerateAllConceptsManifestJob.java)
-**Runs:** once, last (skipped under `PREFLIGHT_ONLY`)
+**Runs:** once, after the merge (skipped under `PREFLIGHT_ONLY`)
 
 Verifies that every ready consent group's MERGED file is the merge of exactly its current source
 files, and that `global_AllConcepts.csv` under `ALL_CONCEPTS_OUTPUT` exists. Then it writes the
@@ -564,6 +569,32 @@ versioned `allConcepts_manifest.csv` at the root of `MERGE_ALLCONCEPTS_INPUT` (b
 `DATA_ROOT`): `partition, s3_uri, version_id, last_updated, md5`, with a `global` row for the
 global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consent group. If any check fails, no manifest is written and the build fails. See
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-10-allconcepts-manifest).
+
+---
+
+## Stage 9: QA Pipeline Counts
+
+**Job:** [`qa-pipeline-counts`](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines)
+(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, skipped under `PREFLIGHT_ONLY`. It
+first writes the [migration report](#post-migration-report), whose counts it reads (`post` writes it
+again with the final result). It only reads the database (it writes only cached dbGaP summaries).
+
+For **every study marked ready** in `MANAGED_INPUTS` -- excluded studies and those this run did not
+process included, as a regression check -- it compares each consent group's counts with that study
+version's dbGaP summary: the participant DB for every study (distinct participants vs
+`subject_count`, and for a genomic (`P/G`) study its own dbGaP samples vs `sample_count`), and for the studies this run
+processed, what `participants-migration` loaded, the split's `participantsPerConsent`, and the migration report's `participants_loaded` and `participants_split` (vs `subject_count`), collected from `downstream-artifacts/` by
+`etl-runners/qa-pipeline-counts/collect-run-counts.py`.
+
+Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json`, or else
+from a `{study_id}*study_summary.json` there for the study's version, when there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
+none started after 6 hours), and cached there at once. A study still without one is
+`UNVERIFIED` and is fetched by a later run.
+
+Any discrepancy, or a study without a summary, makes the build **UNSTABLE**; so does QA failing to
+run (never FAILED: the ETL itself succeeded). The readable `qa-pipeline-report.md` and its CSVs are
+in `downstream-artifacts/qa-pipeline-counts/` and under
+`s3://<DATA_ROOT bucket>/etl-runner/reports/migration-pipeline/<build-tag>/qa-pipeline-counts/`.
 
 ---
 
@@ -591,7 +622,11 @@ output is missing -- re-run it with `STUDY_FILTER`), `NOT_REACHED` (the pipeline
 sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DATA_MISMATCH`,
 `PARTIAL_DATA`, `PIPELINE_FAILURE`, `OUTPUT_WARNING`.
 
-Tests: `make -C etl-runners/migration-report test`.
+`migration_consent_counts.csv` (or participants-migration's own
+`participants_migration_consent_counts.csv`) can be passed to the standalone
+[`qa-consent-counts`](JENKINS.md#qa-consent-counts-standalone) job as `LOAD_COUNTS`, to check the
+participant DB against dbGaP and against what this run loaded. Tests:
+`make -C etl-runners/migration-report test`.
 
 ---
 
@@ -665,9 +700,10 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
 | `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
 | `MERGE_ALLCONCEPTS_TIMEOUT_SECONDS` | `14400` | How long the merge may run before it is failed as stuck (exit 124) |
-| `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job (last stage) |
+| `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
+| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-9-qa-pipeline-counts) run last; blank skips it |
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
 | `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
 | `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |

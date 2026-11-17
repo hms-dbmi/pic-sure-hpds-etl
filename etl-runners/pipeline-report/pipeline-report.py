@@ -36,7 +36,7 @@ Writes, under <out-dir>:
         study_id,abv,consent_code,participants_loaded,participants_written
         loaded into the participant DB (the SSTR load's countsByConsentGroup) and wrote to that
         consent group's allConcepts file (the generator's participantsPerConsent); blank where the
-        stage did not report it.
+        stage did not report it. What qa-pipeline-counts compares with dbGaP as the final report.
 
 Study status (most severe wins):
   FAILED                  a stage failed for it (the child's reason is in `reasons`)
