@@ -37,6 +37,7 @@ class EtlApplicationTest {
         assertThat(registry.contains("participants-migration")).isTrue();
         assertThat(registry.contains("sstr-populate-rds-participants")).isTrue();
         assertThat(registry.contains("generate-global-all-concepts")).isTrue();
+        assertThat(registry.contains("qa-consent-counts")).isTrue();
     }
 
     @Test
