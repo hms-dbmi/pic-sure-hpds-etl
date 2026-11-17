@@ -574,7 +574,7 @@ def runQaPipelineCounts(String job) {
         string(name: 'RUN_ID', value: "${tag}-qa-pipeline-counts"),
         string(name: 'INSTANCE_TYPE', value: 't3.medium'),
         string(name: 'JOB_TIMEOUT_SECONDS', value: '25200'),
-        string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
+        string(name: 'PREBUILT_IMAGE_TAR', value: ownRunnerImage()),
         booleanParam(name: 'SKIP_TESTS', value: true),
         booleanParam(name: 'RETRY_ON_INFRA', value: true),
         string(name: 'ENV', value: params.ENV),
@@ -822,8 +822,16 @@ def failureDetail(downstream) {
     return why ? " -- ${why}" : ''
 }
 
+// The runner image this build packaged, or '' when it packaged none. A build restarted from a
+// later stage inherits the original build's RUNNER_IMAGE_TAR, but that build's post already
+// deleted the tarball: the image name carries the build tag, so an inherited one never matches.
+def ownRunnerImage() {
+    def own = "hpds-etl-runner-${env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')}.tar.gz"
+    return env.RUNNER_IMAGE_TAR == own ? own : ''
+}
+
 def removeRunnerImage() {
-    if (!env.RUNNER_IMAGE_TAR) {
+    if (!ownRunnerImage()) {
         return
     }
     sh(returnStatus: true, script: '''

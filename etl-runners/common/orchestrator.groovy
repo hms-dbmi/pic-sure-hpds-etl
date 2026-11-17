@@ -580,10 +580,19 @@ def packageRunnerImage() {
     sh "make -C etl-runners/sstr-populate-rds-participants package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
 }
 
+// The runner image this build packaged, or '' when it packaged none. A build restarted from a
+// later stage inherits the original build's RUNNER_IMAGE_TAR, but that build's post already
+// deleted the tarball: the image name carries the build tag, so an inherited one never matches,
+// and each downstream build packages its own.
+def ownRunnerImage() {
+    def own = "hpds-etl-runner-${runTag()}.tar.gz"
+    return env.RUNNER_IMAGE_TAR == own ? own : ''
+}
+
 // Deletes the shared runner image: the tarball in S3, the local one, and the image in this host's
 // podman storage. Every downstream build that used it has finished by now.
 def removeRunnerImage() {
-    if (!env.RUNNER_IMAGE_TAR) {
+    if (!ownRunnerImage()) {
         return
     }
     sh(returnStatus: true, script: '''
@@ -677,7 +686,7 @@ def runQaPipelineCounts(String job, String pipeline) {
         string(name: 'RUN_ID', value: "${runTag()}-qa-pipeline-counts"),
         string(name: 'INSTANCE_TYPE', value: 't3.medium'),
         string(name: 'JOB_TIMEOUT_SECONDS', value: '25200'),
-        string(name: 'PREBUILT_IMAGE_TAR', value: env.RUNNER_IMAGE_TAR ?: ''),
+        string(name: 'PREBUILT_IMAGE_TAR', value: ownRunnerImage()),
         booleanParam(name: 'SKIP_TESTS', value: true),
         booleanParam(name: 'RETRY_ON_INFRA', value: true),
         string(name: 'ENV', value: params.ENV),
