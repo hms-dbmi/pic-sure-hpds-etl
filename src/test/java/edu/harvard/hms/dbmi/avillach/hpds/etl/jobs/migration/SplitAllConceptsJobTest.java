@@ -106,7 +106,7 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("42," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"42\",\"µtestµ\",\"\",\"val\",\"0\"");
+                "\"42\",\"µphs000999µtestµ\",\"\",\"val\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -130,7 +130,7 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("old-legacy-id-999," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"old-legacy-id-999\",\"µtestµ\",\"\",\"data\",\"0\"");
+                "\"old-legacy-id-999\",\"µphs000111µtestµ\",\"\",\"data\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -156,8 +156,8 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µtestµ\",\"\",\"mapped\",\"0\"",
-                "\"999\",\"µtestµ\",\"\",\"unmapped\",\"0\"");
+                "\"100\",\"µphs000222µtestµ\",\"\",\"mapped\",\"0\"",
+                "\"999\",\"µphs000222µtestµ\",\"\",\"unmapped\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -185,8 +185,8 @@ class SplitAllConceptsJobTest {
                 "100," + idWithConsent + ",S1",
                 "200," + idWithout + ",S2");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µtestµ\",\"\",\"val1\",\"0\"",
-                "\"200\",\"µtestµ\",\"\",\"val2\",\"0\"");
+                "\"100\",\"µphs000333µtestµ\",\"\",\"val1\",\"0\"",
+                "\"200\",\"µphs000333µtestµ\",\"\",\"val2\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(idWithConsent, studyId, "1", "GRU")));
@@ -212,7 +212,7 @@ class SplitAllConceptsJobTest {
         Files.writeString(mappingCsv, "old_hpds_id,new_hpds_id,common_dbgap_id\n");
 
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µtestµ\",\"\",\"val\",\"0\"");
+                "\"100\",\"µphs000444µtestµ\",\"\",\"val\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(99L, studyId, "1", "GRU")));
@@ -235,7 +235,7 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µtestµ\",\"\",\"val\",\"0\"");
+                "\"100\",\"µphs000555µtestµ\",\"\",\"val\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of());
 
@@ -272,8 +272,8 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("999,99,S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µtestµ\",\"\",\"val\",\"0\"",
-                "\"200\",\"µtestµ\",\"\",\"val2\",\"0\"");
+                "\"100\",\"µphs000666µtestµ\",\"\",\"val\",\"0\"",
+                "\"200\",\"µphs000666µtestµ\",\"\",\"val2\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(99L, studyId, "1", "GRU")));
@@ -298,7 +298,7 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("42," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"42\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"");
+                "\"42\",\"µphs000777µpathµ\",\"3.14\",\"\",\"1234567890\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -314,7 +314,7 @@ class SplitAllConceptsJobTest {
         Path outFile = outputDir.resolve("phs000777/allConcepts/c1/phs000777_allConcepts_c1.csv");
         String line = Files.readAllLines(outFile, StandardCharsets.UTF_8).getFirst();
         assertThat(line).isEqualTo(
-                "\"%s\",\"µpathµ\",\"3.14\",\"\",\"1234567890\"".formatted(id1));
+                "\"%s\",\"µphs000777µpathµ\",\"3.14\",\"\",\"1234567890\"".formatted(id1));
     }
 
     @Test
@@ -324,7 +324,7 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("42," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"42\",\"µpathµ\",\"\",\"value with \"\"quotes\"\"\",\"0\"");
+                "\"42\",\"µphs000888µpathµ\",\"\",\"value with \"\"quotes\"\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -354,9 +354,9 @@ class SplitAllConceptsJobTest {
                 "20," + id2 + ",S2",
                 "30," + id3 + ",S3");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"10\",\"µaµ\",\"\",\"a\",\"0\"",
-                "\"20\",\"µbµ\",\"\",\"b\",\"0\"",
-                "\"30\",\"µcµ\",\"\",\"c\",\"0\"");
+                "\"10\",\"µphs000123µaµ\",\"\",\"a\",\"0\"",
+                "\"20\",\"µphs000123µbµ\",\"\",\"b\",\"0\"",
+                "\"30\",\"µphs000123µcµ\",\"\",\"c\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU"),
@@ -406,10 +406,10 @@ class SplitAllConceptsJobTest {
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µtestµ\",\"\",\"mapped\",\"0\"",
-                "\"999\",\"µtestµ\",\"\",\"unmapped\",\"0\"",
-                "\"100\",\"µtestµ\",\"\",\"short\"",
-                "\"\",\"µtestµ\",\"\",\"blank id\",\"0\"");
+                "\"100\",\"µphs000777µtestµ\",\"\",\"mapped\",\"0\"",
+                "\"999\",\"µphs000777µtestµ\",\"\",\"unmapped\",\"0\"",
+                "\"100\",\"µphs000777µtestµ\",\"\",\"short\"",
+                "\"\",\"µphs000777µtestµ\",\"\",\"blank id\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -428,5 +428,199 @@ class SplitAllConceptsJobTest {
                 .anyMatch(i -> i.code().equals("UNMAPPED_IDS")
                         && i.context().get("firstOldHpdsIds").equals(List.of("999"))
                         && i.context().get("count").equals(1L));
+    }
+
+    @Test
+    void drops_rows_whose_concept_belongs_to_another_study() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs001211";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µphs001211µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"µphs000280µbmiµ\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs000280µsexµ\",\"\",\"M\",\"0\"",
+                "\"100\",\"µDCC Harmonized data setµheightµ\",\"170\",\"\",\"0\"",
+                // An unmapped id with a foreign concept counts as foreign, not unmapped.
+                "\"999\",\"µphs000280µbmiµ\",\"30\",\"\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        Path outputDir = tempDir.resolve("output");
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "ARIC",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", outputDir.toString()), "test-foreign");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
+                .containsExactly("\"1\",\"µphs001211µageµ\",\"42\",\"\",\"0\"");
+        assertThat(result.getMetrics())
+                .containsEntry("totalRows", 5L)
+                .containsEntry("foreignConceptRows", 4L)
+                .containsEntry("unmappedIds", 0L)
+                .containsEntry("rowsPerConsent", Map.of("1", 1L));
+        assertThat(result.getMetrics().get("foreignFirstNodes"))
+                .isEqualTo(Map.of("phs000280", 3L, "DCC Harmonized data set", 1L));
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("FOREIGN_CONCEPTS")
+                        && i.message().startsWith("4 row(s) (80.0%)")
+                        && i.context().get("count").equals(4L)
+                        && ((List<?>) i.context().get("sampleConceptPaths")).size() == 3);
+    }
+
+    @Test
+    void fails_when_every_row_belongs_to_another_study() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs001211";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv("\"100\",\"µphs000280µbmiµ\",\"27\",\"\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "ARIC",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", tempDir.resolve("output").toString()), "test-all-foreign");
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("NO_OUTPUT"))
+                .anyMatch(i -> i.code().equals("FOREIGN_CONCEPTS"));
+    }
+
+    @Test
+    void first_node_follows_the_paths_own_delimiter() {
+        assertThat(SplitAllConceptsJob.firstNode("µphs000123µageµ")).isEqualTo("phs000123");
+        assertThat(SplitAllConceptsJob.firstNode("\\phs000123\\age\\")).isEqualTo("phs000123");
+        assertThat(SplitAllConceptsJob.firstNode("µphs000123µ")).isEqualTo("phs000123");
+        // A µ path is split only on µ: a backslash inside a node is part of it.
+        assertThat(SplitAllConceptsJob.firstNode("µa\\bµcµ")).isEqualTo("a\\b");
+    }
+
+    @Test
+    void a_path_must_start_and_end_with_the_same_delimiter() {
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µphs000123µageµ")).isTrue();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("\\phs000123\\age\\")).isTrue();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µaµ")).isTrue();
+
+        assertThat(SplitAllConceptsJob.isWellFormedPath("phs000123µageµ")).as("no leading delimiter").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µphs000123µage")).as("no trailing delimiter").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µphs000123µage\\")).as("mixed delimiters").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("/phs000123/age/")).as("not a node delimiter").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µµ")).as("no node").isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("µ")).isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath("")).isFalse();
+        assertThat(SplitAllConceptsJob.isWellFormedPath(null)).isFalse();
+    }
+
+    @Test
+    void drops_rows_whose_concept_path_has_no_node_structure() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs001211";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µphs001211µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"phs001211µbmiµ\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs001211µbmi\",\"27\",\"\",\"0\"",
+                "\"100\",\"\",\"\",\"x\",\"0\"",
+                // Malformed is checked first: a malformed path is never counted as another study's.
+                "\"100\",\"µphs000280µbmi\",\"27\",\"\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        Path outputDir = tempDir.resolve("output");
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "ARIC",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", outputDir.toString()), "test-malformed-paths");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
+                .containsExactly("\"1\",\"µphs001211µageµ\",\"42\",\"\",\"0\"");
+        assertThat(result.getMetrics())
+                .containsEntry("malformedPathRows", 4L)
+                .containsEntry("foreignConceptRows", 0L)
+                .containsEntry("malformedRows", 0L);
+        assertThat(result.getOutputValidation().getIssues())
+                .anyMatch(i -> i.code().equals("MALFORMED_CONCEPT_PATHS")
+                        && i.message().startsWith("4 row(s) (80.0%)")
+                        && i.context().get("sampleConceptPaths").equals(
+                                List.of("phs001211µbmiµ", "µphs001211µbmi", "", "µphs000280µbmi")))
+                .noneMatch(i -> i.code().equals("FOREIGN_CONCEPTS"));
+    }
+
+    @Test
+    void a_first_node_that_includes_the_study_id_belongs_to_the_study() {
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123.v1", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123.v1.p1", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123_v2", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("TOPMed phs000123", "phs000123")).isTrue();
+        // A later occurrence counts when an earlier one runs on into a digit.
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234 phs000123", "phs000123")).isTrue();
+
+        // Another accession, not this study's.
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000280", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("DCC Harmonized data set", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("PHS000123", "phs000123")).as("case-sensitive").isFalse();
+    }
+
+    @Test
+    void keeps_rows_whose_first_node_is_a_versioned_study_id() throws Exception {
+        long id1 = 1L;
+        String studyId = "phs001211";
+
+        Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
+        Path allConceptsCsv = writeAllConceptsCsv(
+                "\"100\",\"µphs001211.v1µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"\\phs001211.v1.p1\\bmi\\\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs0012110µbmiµ\",\"27\",\"\",\"0\"");
+
+        when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
+                new Consent(id1, studyId, "1", "GRU")));
+
+        Path outputDir = tempDir.resolve("output");
+        JobResult result = executor.run(job, Map.of(
+                "study-id", studyId,
+                "abbreviation", "ARIC",
+                "input", allConceptsCsv.toString(),
+                "mapping", mappingCsv.toString(),
+                "output", outputDir.toString()), "test-versioned");
+
+        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
+                .containsExactly(
+                        "\"1\",\"µphs001211.v1µageµ\",\"42\",\"\",\"0\"",
+                        "\"1\",\"\\phs001211.v1.p1\\bmi\\\",\"27\",\"\",\"0\"");
+        assertThat(result.getMetrics())
+                .containsEntry("foreignConceptRows", 1L)
+                .containsEntry("foreignFirstNodes", Map.of("phs0012110", 1L));
+    }
+
+    @Test
+    void reports_the_largest_foreign_nodes_and_sums_the_rest() {
+        Map<String, Long> counts = new java.util.HashMap<>();
+        for (int i = 0; i < SplitAllConceptsJob.FOREIGN_NODES_REPORTED + 2; i++) {
+            counts.put("n" + i, (long) i + 1);
+        }
+
+        Map<String, Long> top = SplitAllConceptsJob.topCounts(counts);
+
+        assertThat(top).hasSize(SplitAllConceptsJob.FOREIGN_NODES_REPORTED + 1);
+        assertThat(top.keySet().iterator().next()).isEqualTo("n" + (SplitAllConceptsJob.FOREIGN_NODES_REPORTED + 1));
+        assertThat(top).containsEntry(SplitAllConceptsJob.OTHER_NODES, 1L + 2L);
     }
 }
