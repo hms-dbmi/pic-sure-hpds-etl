@@ -5,8 +5,8 @@
 // and the participant DB backup), and runnable on its own. For EVERY study marked ready in
 // MANAGED_INPUTS -- not only those the run processed, so it doubles as a regression check --
 // compares each consent group's counts with the study version's dbGaP summary:
-//   - the participant DB, every study: distinct participants vs subject_count, and the study's own
-//     dbGaP samples vs sample_count;
+//   - the participant DB, every study: distinct participants vs subject_count, and for a genomic
+//     (Data Type with G, as in P/G) study its own dbGaP samples vs sample_count;
 //   - RUN_COUNTS, the studies the run processed: every per-consent count its job reports and final
 //     report give (etl-runners/qa-pipeline-counts/collect-run-counts.py), vs subject_count.
 //

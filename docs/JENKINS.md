@@ -94,7 +94,7 @@ group's counts with that study version's dbGaP summary:
 | Measure | Covers | Compared with |
 |---|---|---|
 | `db:participants` | every study | `subject_count` |
-| `db:samples` (the study's own `DBGap` samples) | every study | `sample_count` |
+| `db:samples` (the study's own `DBGap` samples) | genomic studies only (`Data Type` with `G`, as in `P/G`) | `sample_count` |
 | `participants-migration`, `split-allconcepts`, `migration-report:loaded`, `migration-report:split` | migration: the studies the run processed | `subject_count` |
 | `sstr-load`, `all-concepts-data-generator`, `pipeline-report:loaded`, `pipeline-report:written` | permanent: the studies the run processed | `subject_count` |
 

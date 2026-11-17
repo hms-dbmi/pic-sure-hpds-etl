@@ -590,7 +590,7 @@ again with the final result). It only reads the database (it writes only cached 
 For **every study marked ready** in `MANAGED_INPUTS` -- excluded studies and those this run did not
 process included, as a regression check -- it compares each consent group's counts with that study
 version's dbGaP summary: the participant DB for every study (distinct participants vs
-`subject_count`, the study's own dbGaP samples vs `sample_count`), and for the studies this run
+`subject_count`, and for a genomic (`P/G`) study its own dbGaP samples vs `sample_count`), and for the studies this run
 processed, what `participants-migration` loaded, the split's `participantsPerConsent`, and the migration report's `participants_loaded` and `participants_split` (vs `subject_count`), collected from `downstream-artifacts/` by
 `etl-runners/qa-pipeline-counts/collect-run-counts.py`.
 
