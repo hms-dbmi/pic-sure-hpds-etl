@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -126,6 +127,36 @@ public class ConsentRepository {
                             rs.getString("consent_abbreviation")));
         } catch (DataAccessException e) {
             throw new InfrastructureException("Query consents by study_id failed", e);
+        }
+    }
+
+    /** Distinct participants in one consent group of a study, and the group's abbreviation. */
+    public record ConsentGroupCount(String studyId, String consentCode, String consentAbbreviation, long participants) {
+    }
+
+    /**
+     * Distinct participants per (study, consent code) for the given studies, one query for all of
+     * them. A study with no consents has no rows. The abbreviation is the group's lowest one, should
+     * its rows disagree.
+     */
+    public List<ConsentGroupCount> countParticipantsByConsent(Collection<String> studyIds) {
+        if (studyIds.isEmpty()) {
+            return List.of();
+        }
+        try {
+            return jdbc.query("""
+                            SELECT study_id, consent_code, MIN(consent_abbreviation) AS consent_abbreviation,
+                                   COUNT(DISTINCT hpds_id) AS participants
+                            FROM consents WHERE study_id IN (:studyIds)
+                            GROUP BY study_id, consent_code ORDER BY study_id, consent_code""",
+                    new MapSqlParameterSource().addValue("studyIds", List.copyOf(studyIds)),
+                    (rs, n) -> new ConsentGroupCount(
+                            rs.getString("study_id"),
+                            rs.getString("consent_code"),
+                            rs.getString("consent_abbreviation"),
+                            rs.getLong("participants")));
+        } catch (DataAccessException e) {
+            throw new InfrastructureException("Count of participants per consent group failed", e);
         }
     }
 
