@@ -52,16 +52,18 @@ public record AllConceptsRow(
         return new AllConceptsRow(hpdsId, conceptPath, value, "", "0");
     }
 
+    /** Every field quoted. Built directly, not with {@code formatted}: it runs once per row of large files. */
     public String toCsvLine() {
-        return "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"".formatted(
-                escapeQuotes(hpdsId),
-                escapeQuotes(conceptPath),
-                escapeQuotes(numericValue),
-                escapeQuotes(nonNumericValue),
-                escapeQuotes(timestamp));
+        StringBuilder sb = new StringBuilder(hpdsId.length() + conceptPath.length() + numericValue.length()
+                + nonNumericValue.length() + timestamp.length() + 14);
+        appendQuoted(sb, hpdsId).append(',');
+        appendQuoted(sb, conceptPath).append(',');
+        appendQuoted(sb, numericValue).append(',');
+        appendQuoted(sb, nonNumericValue).append(',');
+        return appendQuoted(sb, timestamp).toString();
     }
 
-    private static String escapeQuotes(String value) {
-        return value.replace("\"", "\"\"");
+    private static StringBuilder appendQuoted(StringBuilder sb, String value) {
+        return sb.append('"').append(value.replace("\"", "\"\"")).append('"');
     }
 }

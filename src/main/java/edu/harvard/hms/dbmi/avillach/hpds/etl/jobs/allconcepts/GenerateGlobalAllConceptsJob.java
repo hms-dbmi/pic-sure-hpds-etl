@@ -1,6 +1,7 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.allconcepts;
 
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.DataException;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.io.IoResolver;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.AbstractJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobContext;
@@ -9,46 +10,61 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobType;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ParamSpec;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsCsvBuilder;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.AllConceptsRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.ConceptPaths;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Participant;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ConsentRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.SampleRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.GlobalAllConceptsRepository;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.GlobalAllConceptsRepository.ConsentStats;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.GlobalAllConceptsRepository.IdentityCounts;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Writes {@code global_AllConcepts.csv}: the concepts that describe every participant across all
+ * ready studies. The participant DB builds and formats every row (see
+ * {@link GlobalAllConceptsRepository}), streamed straight to the output; row order is not meaningful.
+ *
+ * <p>{@code _consents} and {@code _studies_consents} are per study. {@code _source_subject_id} and
+ * {@code _source_sample_id} are not: one participant (one dbGaP subject, one HPDS id) can be in
+ * several studies, and a sample can be loaded by more than one of them, so each
+ * {@code (hpds_id, value)} is written once, and {@value #IDENTITY_STUDIES_REPORT} records, for every
+ * one of those rows, how many ready studies (and which) it applies to.
+ */
 @Component
 @ConditionalOnProperty(name = "etl.jobs.generate-global-all-concepts.enabled", havingValue = "true")
 public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllConceptsJob.Output> {
 
     static final String OUTPUT_FILENAME = "global_AllConcepts.csv";
+    /** Written to the reports directory: every subject/sample id row with the studies it applies to. */
+    static final String IDENTITY_STUDIES_REPORT = "global_allconcepts_identity_studies.csv";
+    /** Study combinations listed in the metrics, most shared rows first. */
+    static final int STUDY_SETS_REPORTED = 50;
+
+    private static final int BUFFER_BYTES = 1 << 20;
 
     private final ManagedInputsService managedInputsService;
-    private final ConsentRepository consentRepository;
-    private final ParticipantRepository participantRepository;
-    private final SampleRepository sampleRepository;
+    private final GlobalAllConceptsRepository repository;
     private final IoResolver io;
 
     public GenerateGlobalAllConceptsJob(ManagedInputsService managedInputsService,
-                                         ConsentRepository consentRepository,
-                                         ParticipantRepository participantRepository,
-                                         SampleRepository sampleRepository,
+                                         GlobalAllConceptsRepository repository,
                                          IoResolver io) {
         this.managedInputsService = managedInputsService;
-        this.consentRepository = consentRepository;
-        this.participantRepository = participantRepository;
-        this.sampleRepository = sampleRepository;
+        this.repository = repository;
         this.io = io;
     }
 
@@ -91,113 +107,107 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
     @Override
     protected Output execute(JobContext ctx) {
         String outputUri = resolveOutputUri(ctx.require("output"));
-        List<ManagedInputRow> allRows = managedInputsService.read();
-        List<ManagedInputRow> readyStudies = allRows.stream().filter(ManagedInputRow::isReady).toList();
+        List<String> readyStudies = new ArrayList<>(new LinkedHashSet<>(managedInputsService.read().stream()
+                .filter(ManagedInputRow::isReady).map(ManagedInputRow::studyId).toList()));
 
-        AllConceptsCsvBuilder builder = new AllConceptsCsvBuilder();
-        Map<String, Long> rowsPerStudy = new LinkedHashMap<>();
-        Map<String, Long> emptyAbbreviationCounts = new LinkedHashMap<>();
-        List<String> skippedNoConsents = new ArrayList<>();
-
-        for (ManagedInputRow study : readyStudies) {
-            String studyId = study.studyId();
-            log.info("Processing study {} ({})", studyId, study.abv());
-            long before = builder.size();
-
-            List<Consent> consents = consentRepository.findByStudyId(studyId);
-            if (consents.isEmpty()) {
-                log.warn("Study {} has no consents in the database; skipping", studyId);
-                skippedNoConsents.add(studyId);
-                continue;
+        try (GlobalAllConceptsRepository.Session session = repository.open(readyStudies)) {
+            Map<String, ConsentStats> stats = session.consentStats();
+            Map<String, Long> rowsPerStudy = new LinkedHashMap<>();
+            Map<String, Long> emptyAbbreviationCounts = new LinkedHashMap<>();
+            List<String> skippedNoConsents = new ArrayList<>();
+            for (String studyId : readyStudies) {
+                ConsentStats s = stats.get(studyId);
+                if (s == null) {
+                    log.warn("Study {} has no consents in the database; skipping", studyId);
+                    skippedNoConsents.add(studyId);
+                    continue;
+                }
+                // µ_consentsµ and µ_studies_consentsµstudyµ for every consent, and the individual
+                // path for those with an abbreviation.
+                rowsPerStudy.put(studyId, 3 * s.rows() - s.emptyAbbreviations());
+                if (s.emptyAbbreviations() > 0) {
+                    emptyAbbreviationCounts.put(studyId, s.emptyAbbreviations());
+                    log.warn("Skipping individual _studies_consents paths for {} consent row(s) of study {} "
+                                    + "(consent_code {}): consent_abbreviation is empty",
+                            s.emptyAbbreviations(), studyId, s.emptyAbbreviationCodes());
+                }
             }
 
-            addConsentsConcept(builder, consents, studyId);
-            addParticipantsConcept(builder, studyId);
-            addSamplesConcept(builder, studyId);
-            long emptyAbbrevs = addStudiesConsentsConcepts(builder, consents, studyId);
+            IdentitySummary subjects = summary(session.identityCounts(ConceptPaths.SOURCE_SUBJECT_ID,
+                    STUDY_SETS_REPORTED));
+            IdentitySummary samples = summary(session.identityCounts(ConceptPaths.SOURCE_SAMPLE_ID,
+                    STUDY_SETS_REPORTED));
+            log.info("{} ready study/studies, {} with consents; {} subject id row(s) ({} in more than one study) "
+                            + "and {} sample id row(s) ({} in more than one study)", readyStudies.size(),
+                    stats.size(), subjects.rows(), subjects.shared(), samples.rows(), samples.shared());
+            writeIdentityStudiesReport(ctx, session);
 
-            long added = builder.size() - before;
-            rowsPerStudy.put(studyId, added);
-            if (emptyAbbrevs > 0) {
-                emptyAbbreviationCounts.put(studyId, emptyAbbrevs);
+            if (stats.isEmpty()) {
+                if (ctx.getBoolean("allow-empty", false)) {
+                    log.warn("No concept rows generated across {} ready studies, but --allow-empty is set; "
+                            + "skipping output", readyStudies.size());
+                    return new Output(readyStudies.size(), 0, rowsPerStudy, subjects, samples,
+                            emptyAbbreviationCounts, skippedNoConsents, outputUri);
+                }
+                throw new DataException("No concept rows were generated across " + readyStudies.size()
+                        + " ready studies. Check that the database has been populated.");
             }
-            log.info("Study {} contributed {} rows", studyId, added);
-        }
 
-        if (builder.isEmpty()) {
-            if (ctx.getBoolean("allow-empty", false)) {
-                log.warn("No concept rows generated across {} ready studies, but --allow-empty is set; skipping output",
-                        readyStudies.size());
-                return new Output(readyStudies.size(), 0, rowsPerStudy,
-                        emptyAbbreviationCounts, skippedNoConsents, outputUri);
-            }
-            throw new DataException("No concept rows were generated across " + readyStudies.size()
-                    + " ready studies. Check that the database has been populated.");
-        }
+            AtomicLong written = new AtomicLong();
+            io.writeOutput(outputUri, out -> written.set(session.copyConcepts(out)));
+            log.info("Wrote {} rows to {}", written.get(), outputUri);
 
-        io.writeOutput(outputUri, builder::writeTo);
-        log.info("Wrote {} rows to {}", builder.size(), outputUri);
-
-        return new Output(readyStudies.size(), builder.size(), rowsPerStudy,
-                emptyAbbreviationCounts, skippedNoConsents, outputUri);
-    }
-
-    private void addConsentsConcept(AllConceptsCsvBuilder builder, List<Consent> consents, String studyId) {
-        for (Consent c : consents) {
-            builder.add(AllConceptsRow.nonNumeric(
-                    String.valueOf(c.hpdsId()),
-                    ConceptPaths.CONSENTS,
-                    studyId + ".c" + c.consentCode()));
+            return new Output(readyStudies.size(), written.get(), rowsPerStudy, subjects, samples,
+                    emptyAbbreviationCounts, skippedNoConsents, outputUri);
         }
     }
 
-    private void addParticipantsConcept(AllConceptsCsvBuilder builder, String studyId) {
-        List<Participant> participants = participantRepository.findByStudyId(studyId);
-        for (Participant p : participants) {
-            builder.add(AllConceptsRow.nonNumeric(
-                    String.valueOf(p.hpdsId()),
-                    ConceptPaths.SOURCE_SUBJECT_ID,
-                    p.sourceId()));
+    private static IdentitySummary summary(IdentityCounts counts) {
+        long rows = 0;
+        long shared = 0;
+        Map<String, Long> byCount = new LinkedHashMap<>();
+        for (Map.Entry<Integer, Long> e : counts.rowsByStudyCount().entrySet()) {
+            rows += e.getValue();
+            if (e.getKey() > 1) {
+                shared += e.getValue();
+            }
+            byCount.put(String.valueOf(e.getKey()), e.getValue());
         }
-    }
-
-    private void addSamplesConcept(AllConceptsCsvBuilder builder, String studyId) {
-        List<Sample> samples = sampleRepository.findByStudyId(studyId);
-        for (Sample s : samples) {
-            builder.add(AllConceptsRow.nonNumeric(
-                    String.valueOf(s.hpdsId()),
-                    ConceptPaths.SOURCE_SAMPLE_ID,
-                    s.sourceSampleId()));
-        }
+        Map<String, Long> sets = new LinkedHashMap<>();
+        counts.sharedStudySets().forEach((studies, n) -> sets.put(studies.replace(';', '+'), n));
+        return new IdentitySummary(rows, shared, byCount, sets);
     }
 
     /**
-     * Adds both study-level and individual consent concept paths. Returns the count of
-     * consents skipped due to empty abbreviation (for individual paths only).
+     * How one identity concept's rows spread over the ready studies.
+     *
+     * @param rows             rows written, one per {@code (hpds_id, value)}
+     * @param shared           rows that apply to more than one study
+     * @param rowsByStudyCount number of studies &rarr; rows that apply to that many ({@code "1"}, {@code "2"}, ...)
+     * @param sharedStudySets  for shared rows, the studies joined with {@code +} &rarr; rows, the
+     *                         {@value #STUDY_SETS_REPORTED} most common
      */
-    private long addStudiesConsentsConcepts(AllConceptsCsvBuilder builder, List<Consent> consents, String studyId) {
-        long emptyAbbrevCount = 0;
+    public record IdentitySummary(long rows, long shared, Map<String, Long> rowsByStudyCount,
+                                  Map<String, Long> sharedStudySets) {
+    }
 
-        for (Consent c : consents) {
-            builder.add(AllConceptsRow.nonNumeric(
-                    String.valueOf(c.hpdsId()),
-                    ConceptPaths.STUDIES_CONSENTS_PREFIX + studyId + "µ",
-                    "TRUE"));
-
-            if (c.consentAbbreviation() == null || c.consentAbbreviation().isBlank()) {
-                emptyAbbrevCount++;
-                log.warn("Skipping individual _studies_consents path for study {} consent_code {}: "
-                        + "consent_abbreviation is empty", studyId, c.consentCode());
-                continue;
+    /**
+     * Writes {@value #IDENTITY_STUDIES_REPORT} to the reports directory: {@code concept, hpds_id, value,
+     * study_count, study_ids} for every subject and sample id row, study ids joined with {@code ;}.
+     */
+    private void writeIdentityStudiesReport(JobContext ctx, GlobalAllConceptsRepository.Session session) {
+        Path target = ctx.reportsDir().resolve(IDENTITY_STUDIES_REPORT);
+        Path partial = target.resolveSibling(target.getFileName() + ".partial");
+        try {
+            Files.createDirectories(target.getParent());
+            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(partial), BUFFER_BYTES)) {
+                out.write("concept,hpds_id,value,study_count,study_ids\n".getBytes(StandardCharsets.UTF_8));
+                session.copyIdentityStudies(out);
             }
-
-            builder.add(AllConceptsRow.nonNumeric(
-                    String.valueOf(c.hpdsId()),
-                    ConceptPaths.STUDIES_CONSENTS_PREFIX + studyId + "µ" + c.consentAbbreviation() + "µ",
-                    "TRUE"));
+            Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            throw new InfrastructureException("Failed to write report " + IDENTITY_STUDIES_REPORT, e);
         }
-
-        return emptyAbbrevCount;
     }
 
     private String resolveOutputUri(String output) {
@@ -226,6 +236,17 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
                                 + "_studies_consents paths due to empty consent_abbreviation"));
         output.rowsPerStudy().forEach((studyId, count) ->
                 report.info("STUDY_ROW_COUNT", studyId + ": " + count + " row(s)"));
+        reportShared(report, "SHARED_SUBJECT_IDS", "_source_subject_id", output.subjects());
+        reportShared(report, "SHARED_SAMPLE_IDS", "_source_sample_id", output.samples());
+    }
+
+    /** Info, not a warning: a participant in a parent study and its TOPMed study is expected. */
+    private static void reportShared(ValidationReport report, String code, String concept, IdentitySummary s) {
+        if (s.shared() > 0) {
+            report.info(code, s.shared() + " of " + s.rows() + " " + concept + " row(s) apply to more than one "
+                    + "ready study and were written once; by number of studies: " + s.rowsByStudyCount()
+                    + ". Every row's studies are in " + IDENTITY_STUDIES_REPORT);
+        }
     }
 
     @Override
@@ -233,6 +254,13 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
         builder.metric("studiesProcessed", output.studiesProcessed())
                 .metric("totalRows", output.totalRows())
                 .metric("rowsPerStudy", output.rowsPerStudy())
+                .metric("subjectIdRows", output.subjects().rows())
+                .metric("subjectIdsByStudyCount", output.subjects().rowsByStudyCount())
+                .metric("sharedSubjectIdStudySets", output.subjects().sharedStudySets())
+                .metric("sampleIdRows", output.samples().rows())
+                .metric("sampleIdsByStudyCount", output.samples().rowsByStudyCount())
+                .metric("sharedSampleIdStudySets", output.samples().sharedStudySets())
+                .metric("identityStudiesReport", IDENTITY_STUDIES_REPORT)
                 .metric("skippedNoConsents", output.skippedNoConsents())
                 .metric("outputUri", output.outputUri());
     }
@@ -240,7 +268,12 @@ public class GenerateGlobalAllConceptsJob extends AbstractJob<GenerateGlobalAllC
     public record Output(
             int studiesProcessed,
             long totalRows,
+            /** Per study, its {@code _consents} and {@code _studies_consents} rows: the rows only it has. */
             Map<String, Long> rowsPerStudy,
+            /** {@code _source_subject_id}: written once per row across all studies. */
+            IdentitySummary subjects,
+            /** {@code _source_sample_id}: written once per row across all studies. */
+            IdentitySummary samples,
             Map<String, Long> emptyAbbreviationCounts,
             List<String> skippedNoConsents,
             String outputUri

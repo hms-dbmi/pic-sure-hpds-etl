@@ -28,6 +28,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -284,6 +285,9 @@ public class IoResolver {
     /** S3's limit on one object's size. */
     static final long MAX_OBJECT_BYTES = 5L * 1024 * 1024 * 1024 * 1024;
     private static final long PART_SIZE_ROUNDING_BYTES = 1024 * 1024;
+
+    /** Buffer for {@link #writeOutput(String, IoWriter)}'s spool and local files. */
+    private static final int WRITE_BUFFER_BYTES = 1 << 20;
 
     private long multipartThresholdBytes = DEFAULT_MULTIPART_THRESHOLD_BYTES;
     private int multipartPartSizeBytes = DEFAULT_MULTIPART_PART_SIZE_BYTES;
@@ -588,7 +592,8 @@ public class IoResolver {
             try {
                 Path tmp = Files.createTempFile("etl-upload-", ".tmp");
                 try {
-                    try (OutputStream out = Files.newOutputStream(tmp)) {
+                    // Buffered: writers emit a row at a time, each a system call on a bare file stream.
+                    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tmp), WRITE_BUFFER_BYTES)) {
                         writer.writeTo(out);
                     }
                     uploadFile(s3Uri.bucket(), s3Uri.key(), tmp);
@@ -608,7 +613,7 @@ public class IoResolver {
             if (path.getParent() != null) {
                 Files.createDirectories(path.getParent());
             }
-            try (OutputStream out = Files.newOutputStream(path)) {
+            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(path), WRITE_BUFFER_BYTES)) {
                 writer.writeTo(out);
             }
             log.info("Streamed to {}", path.toAbsolutePath());
