@@ -37,7 +37,8 @@ Writes, under <out-dir>:
         loaded into the participant DB (the SSTR load's countsByConsentGroup) and wrote to that
         consent group's allConcepts file (the generator's participantsPerConsent); blank where the
         stage did not report it. A group with more written than loaded, or written but not loaded,
-        is also a review item (CONSENT_WRITTEN_EXCEEDS_LOADED / CONSENT_WRITTEN_NOT_LOADED).
+        is also a review item (CONSENT_WRITTEN_EXCEEDS_LOADED / CONSENT_WRITTEN_NOT_LOADED). What
+        qa-pipeline-counts compares with dbGaP as the final report.
 
 Study status (most severe wins):
   FAILED                  a stage failed for it (the child's reason is in `reasons`)
