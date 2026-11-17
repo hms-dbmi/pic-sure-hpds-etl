@@ -23,6 +23,7 @@
 # Environment (optional; the Jenkins job parameters of the same names):
 #   EXPECTED_CONSENT_CODES    comma-separated CONSENT values this study must produce
 #   EXPECTED_MIN_PARTICIPANTS  floor on distinct participants
+#   GENOMIC                   true/false: the study's Data Type includes G (P/G); blank: unknown
 # Exit: 0 clean | 10 clean but with warnings | 1 failed | 64 usage
 set -uo pipefail
 
@@ -65,6 +66,11 @@ CONSENTS=$(jq -r  '.metrics.consentsWritten      // 0' "$REPORT")
 SAMPLES=$(jq -r   '.metrics.samplesInserted      // 0' "$REPORT")
 # samplesSeen (input rows with a non-blank dbgap_sample_id) is absent from older reports.
 SAMPLES_SEEN=$(jq -r '.metrics.samplesSeen // empty' "$REPORT")
+# sampleIdColumn is false when the input has no dbgap_sample_id column (absent: older reports,
+# which required it). The job's NO_SAMPLE_ID_COLUMN issue already carries the right severity --
+# a warning for a genomic (P/G) study, info otherwise -- so it is not warned on again here.
+SAMPLE_ID_COLUMN=$(jq -r 'if .metrics.sampleIdColumn == false then "false" else "true" end' "$REPORT")
+GENOMIC="${GENOMIC:-}"
 GROUP_SUM=$(jq -r '[(.metrics.countsByConsentGroup // {})[]] | add // 0' "$REPORT")
 GROUP_KEYS=$(jq -r '(.metrics.countsByConsentGroup // {}) | keys_unsorted | join(",")' "$REPORT")
 
@@ -92,13 +98,17 @@ if [[ "$NEW" == "0" && "$SUBJECTS" != "0" ]]; then
 fi
 
 # One sample row per input row that has a non-blank dbgap_sample_id, deduplicated by the
-# (hpds_id, sample id, source) constraint -- so at most rowsRead. Samples are inserted with
-# ON CONFLICT DO NOTHING, so samplesInserted is legitimately 0 on a reload; only an input with
-# no sample ids at all, or new participants arriving with no new samples, is suspicious.
+# (hpds_id, study, sample id, source) key -- so at most rowsRead. The study's samples are purged
+# and written again on every load, so only an input with no sample ids at all, or new
+# participants arriving with no new samples, is suspicious.
 check "no more samples than rows"                        test "$SAMPLES" -le "$ROWS"
 if [[ -n "$SAMPLES_SEEN" ]]; then
   check "no more samples inserted than seen ($SAMPLES <= $SAMPLES_SEEN)" test "$SAMPLES" -le "$SAMPLES_SEEN"
-  if [[ "$SAMPLES_SEEN" == "0" ]]; then
+  if [[ "$SAMPLE_ID_COLUMN" == "false" ]]; then
+    note "no dbgap_sample_id column in the input (see NO_SAMPLE_ID_COLUMN)"
+  elif [[ "$SAMPLES_SEEN" == "0" && "$GENOMIC" == "false" ]]; then
+    note "no sample ids in the input: every dbgap_sample_id in the file was blank (fine: not a genomic study)"
+  elif [[ "$SAMPLES_SEEN" == "0" ]]; then
     warn "no sample ids in the input: every dbgap_sample_id in the file was blank"
   elif [[ "$NEW" != "0" && "$SAMPLES" == "0" ]]; then
     warn "$NEW new participant(s) but no new sample rows, although $SAMPLES_SEEN input row(s) carry a dbgap_sample_id"

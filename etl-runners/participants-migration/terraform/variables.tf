@@ -98,7 +98,8 @@ variable "managed_inputs_uri" {
   type        = string
   description = <<-EOT
     --managed-inputs: CSV of studies with columns 'Study Abbreviated Name',
-    'Study Identifier', and 'Data is ready to process'. Local path or s3:// URI.
+    'Study Identifier', 'Data is ready to process' and 'Data Processed' (studies
+    marked processed are not migrated). Local path or s3:// URI.
   EOT
 }
 
@@ -106,8 +107,8 @@ variable "data_folder_uri" {
   type        = string
   description = <<-EOT
     --data-folder: root of the per-study folders. Per study: {study_id}/rawData/sstr_{study_id}.{v}.txt
-    or, as a fallback, {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt and
-    *Subject.data_dict.xml); and {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv. Local path or s3:// URI.
+    (or {study_id}*telemetry_report.tsv) or, as a fallback, {study_id}/rawData/{study_id}*Subject.MULTI.txt (+ optional *Sample.MULTI.txt and
+    *Subject.data_dict*.xml); and {study_id}/legacy/data/{ABV}_PatientMapping.v2.csv. Local path or s3:// URI.
   EOT
 }
 

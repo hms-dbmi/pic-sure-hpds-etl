@@ -41,6 +41,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -60,23 +61,23 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * MIGRATION. Orchestrates the one-time move of every "ready" study's participant
+ * MIGRATION. Orchestrates the one-time move of every "ready", not yet processed study's participant
  * identities into the {@code participants}/{@code consents}/{@code samples} RDS tables,
  * from a legacy export laid out as:
  *
  * <ul>
  *   <li>{@link ManagedInputsService}: provides the study list (columns "Study Abbreviated Name",
- *       "Study Identifier", and "Data is ready to process"), configured via
+ *       "Study Identifier", "Data is ready to process" and "Data Processed"), configured via
  *       {@code etl.managed-inputs.uri} or {@code --managed-inputs=<uri>}.</li>
  *   <li>{@code --data-folder}: a base URI (local or {@code s3://}) whose subfolders, one per
  *       study id, hold per-study data. Every rawData file is matched case-insensitively:
  *       <ul>
  *         <li>{@code {base}/{studyId}/rawData/sstr_{studyId}.{v}.txt}: the dbGaP SSTR export
- *             (tab-delimited; the legacy folder-flattened {@code SSTR__sstr_*} and
- *             {@code BDC-ingestion-only__sstr_*} names are accepted, the canonical lowercase name
- *             preferred)</li>
+ *             (tab-delimited; the alternative {@code {studyId}*telemetry_report.tsv} and the legacy
+ *             folder-flattened {@code SSTR__sstr_*} and {@code BDC-ingestion-only__sstr_*} names are
+ *             accepted, the canonical lowercase name preferred, then the telemetry report)</li>
  *         <li>{@code {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt}, and optionally
- *             {@code {studyid}*Sample.MULTI.txt} and {@code {studyid}*Subject.data_dict.xml}: the
+ *             {@code {studyid}*Sample.MULTI.txt} and {@code {studyid}*Subject.data_dict*.xml}: the
  *             dbGaP phenotype tables, the fallback when there is no usable SSTR</li>
  *         <li>{@code {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv}: per-study
  *             patient mapping (headerless; columns: id, abv, legacy hpds id)</li>
@@ -150,7 +151,6 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /** Participants loaded per (study, consent code), as the sub-job wrote them to RDS. */
     static final String CONSENT_COUNTS_REPORT = "participants_migration_consent_counts.csv";
 
-    private static final String SSTR_COL_SUBJECT_ID = "SUBJECT_ID";
     private static final String SSTR_COL_DBGAP_SUBJECT_ID = "dbgap_subject_id";
     private static final int DEFAULT_BATCH_SIZE = 1000;
     private static final int DEFAULT_PARALLELISM = 4;
@@ -183,6 +183,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     /** A dbGaP table accession, e.g. {@code pht000182}; pairs a Subject.MULTI with its data dictionary. */
     private static final Pattern TABLE_ACCESSION = Pattern.compile("pht\\d+");
+    private static final Pattern SUBJECT_DATA_DICT =
+            Pattern.compile(".*subject\\.data_dict.*\\.xml", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LOOSE_SUBJECT_DATA_DICT =
+            Pattern.compile(".*subject.*data_dict.*\\.xml", Pattern.CASE_INSENSITIVE);
 
     private final IoResolver io;
     private final DelimitedReader delimitedReader;
@@ -226,9 +230,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 List.of(
                         ParamSpec.required("data-folder",
                                 "Base URI whose subfolders, one per study id, hold per-study data: "
-                                        + "{base}/{studyId}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
+                                        + "{base}/{studyId}/rawData/sstr_{studyId}.{v}.txt (case-insensitive; {studyId}*telemetry_report.tsv and legacy SSTR__/BDC-ingestion-only__ prefixes accepted), "
                                         + "or as a fallback {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt "
-                                        + "(+ optional *Sample.MULTI.txt and *Subject.data_dict.xml), "
+                                        + "(+ optional *Sample.MULTI.txt and *Subject.data_dict*.xml), "
                                         + "{base}/{studyId}/legacy/data/{ABV_UPPER}_PatientMapping.v2.csv "
                                         + "(local path or s3:// URI)",
                                 "s3://hpds-migration/data"),
@@ -294,7 +298,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         // listed twice is migrated once.
         Map<String, ManagedInputRow> studies = new LinkedHashMap<>();
         for (ManagedInputRow row : managedInputs) {
-            if (!row.isReady() || (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId()))) {
+            // Like the permanent pipeline's loads: a study already marked "Data Processed" is not run again.
+            if (!row.isReady() || row.isProcessed()
+                    || (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId()))) {
                 continue;
             }
             if (studies.putIfAbsent(row.studyId(), row) != null) {
@@ -544,7 +550,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return new StudyResult(r.studyId(), r.abv(), r.source(), true, null, r.mappingRowCount(),
                 r.unresolvedHpdsIds(), new SourceUsage(u.sstrFile(), u.sstrStatus(), u.sstrError(),
                 u.subjectMultiFile(), u.sampleMultiFile(), u.dataDictFile(), u.multiStatus(), u.consentColumn(),
-                u.participantsByConsent(), List.copyOf(issues)));
+                u.participantsByConsent(), u.mappedByConsent(), List.copyOf(issues)));
     }
 
     private void writeStudyRecord(JobContext ctx, String baseUri, StudyResult result) {
@@ -567,22 +573,18 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         String rawDataDir = joinPath(studyBase, "rawData");
         List<String> rawDataFiles = io.listFileNames(rawDataDir);
-        // Staged SSTRs arrive under three naming families, all the same NHLBI artifact:
-        // the canonical 'sstr_{phs}.{v}.txt' filename, plus legacy folder-flattened copies
-        // 'SSTR__sstr_*' and 'BDC-ingestion-only__sstr_*' (an S3 sync collapsed the source
-        // folder into the basename). Match all three, case-insensitively; when a study has
-        // several, prefer the canonical name -- it is the freshest staging convention.
-        List<String> sstrCandidates = rawDataFiles.stream()
+        // Staged SSTRs arrive under four naming families, all the same NHLBI artifact:
+        // the canonical 'sstr_{phs}.{v}.txt' filename, the alternative '{phs}*telemetry_report.tsv',
+        // plus legacy folder-flattened copies 'SSTR__sstr_*' and 'BDC-ingestion-only__sstr_*' (an
+        // S3 sync collapsed the source folder into the basename). Match all of them,
+        // case-insensitively; when a study has several, prefer the canonical name -- it is the
+        // freshest staging convention -- then the telemetry report. Several is routine, not an issue.
+        String sstrFileName = rawDataFiles.stream()
                 .filter(name -> isSstrFileFor(name, studyId))
-                .sorted(Comparator
-                        .comparing((String name) -> !isCanonicalSstrName(name))
+                .min(Comparator
+                        .comparing((String name) -> sstrNamePreference(name))
                         .thenComparing(name -> name))
-                .toList();
-        String sstrFileName = sstrCandidates.isEmpty() ? null : sstrCandidates.get(0);
-        if (sstrCandidates.size() > 1) {
-            trace.issue(Severity.WARNING, "MULTIPLE_SSTR_CANDIDATES", sstrFileName,
-                    "found " + sstrCandidates.size() + " SSTR files; using '" + sstrFileName + "'", sstrCandidates);
-        }
+                .orElse(null);
 
         List<String> subjectMultis = newestFirst(rawDataFiles, n -> isSubjectMultiFileFor(n, studyId));
         List<String> sampleMultis = newestFirst(rawDataFiles, n -> isSampleMultiFileFor(n, studyId));
@@ -593,6 +595,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         trace.subjectMultiFile = first(subjectMultis);
         trace.sampleMultiFile = first(sampleMultis);
         trace.dataDictFile = first(dataDicts);
+
+        // Before anything is staged: such a study is skipped, so it needs no patient mapping either.
+        if (sstrFileName == null && subjectMultis.isEmpty()) {
+            String reason = "no SSTR file and no Subject.MULTI file in rawData";
+            trace.issue(Severity.WARNING, NO_PARTICIPANT_FILES, null, reason + "; skipped", List.of());
+            throw new DataException(studyId + " has no participant files (" + reason + "); skipped");
+        }
 
         Path localSstr = null;
         if (sstrFileName != null) {
@@ -628,14 +637,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         SubjectIdentities identities = null;
         if (files.sstrFile() != null) {
-            identities = runSstr(studyId, files, batchSize, ctx, trace);
+            identities = runSstr(row, files, batchSize, ctx, trace);
         }
         if (identities == null) {
-            if (files.subjectMulti() == null && trace.sstrFile == null) {
-                String reason = "no SSTR file and no Subject.MULTI file in rawData";
-                trace.issue(Severity.WARNING, NO_PARTICIPANT_FILES, null, reason + "; skipped", List.of());
-                throw new DataException(studyId + " has no participant files (" + reason + "); skipped");
-            }
+            // discoverStudyFiles skipped a study with no participant files, so an SSTR is present.
             if (files.subjectMulti() == null) {
                 // There is a file, it is just unusable: that is a data error to fix, so the study fails.
                 String reason = "SSTR '" + trace.sstrFile + "' is malformed (" + trace.sstrError
@@ -654,13 +659,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     + mapping.noParticipant() + " with no participant id, " + mapping.notConsented()
                     + " consent 0); check that the file's subject ids match the legacy patient mapping";
             trace.issue(Severity.WARNING, NEEDS_DATA_REVIEW, identities.file(), reason + "; not migrated",
-                    mapping.unresolvedHpdsIds().stream().limit(MAX_EXAMPLES).toList());
+                    mapping.unresolvedHpdsIds());
             log.warn("Study '{}' needs data review: {}", studyId, reason);
             return StudyResult.needsReview(studyId, row.abv(), trace.source, studyId + " needs data review: " + reason,
                     mapping.unresolvedHpdsIds(), trace.snapshot());
         }
         if (!mapping.unresolvedHpdsIds().isEmpty()) {
-            log.warn("Study '{}': {} of {} patient mapping row(s) could not be resolved via {}",
+            log.info("Study '{}': {} of {} patient mapping row(s) could not be resolved via {}",
                     studyId, mapping.unresolvedHpdsIds().size(), patientMappings.size(), identities.file());
         }
         return StudyResult.success(studyId, row.abv(), trace.source, mapping.mappingRows().size(),
@@ -671,11 +676,13 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
      * Loads the study from its SSTR. Returns the subject identities to map against, or null when the
      * SSTR is malformed (the sub-job failed on its data, and rolled back) so the caller falls back.
      */
-    private SubjectIdentities runSstr(String studyId, StudyFiles files, int batchSize, JobContext ctx,
+    private SubjectIdentities runSstr(ManagedInputRow row, StudyFiles files, int batchSize, JobContext ctx,
                                       SourceTrace trace) {
+        String studyId = row.studyId();
         String sstrPath = files.sstrFile().toString();
         JobResult result = executor.run(sstrJob,
-                Map.of("input", sstrPath, "study-id", studyId, "batch-size", String.valueOf(batchSize)),
+                Map.of("input", sstrPath, "study-id", studyId, "batch-size", String.valueOf(batchSize),
+                        SstrPopulateRdsParticipantsJob.PARAM_GENOMIC, String.valueOf(row.isGenomic())),
                 ctx.runId() + "-" + studyId + "-sstr");
         if (!result.isSuccess()) {
             String message = describeFailure(result);
@@ -691,6 +698,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         if (result.getExitCode() == ExitCode.SUCCESS_WITH_WARNINGS) {
             log.warn("Study '{}': sstr sub-job completed with warnings: {}",
                     studyId, result.getOutputValidation().getIssues());
+        }
+        // A missing dbgap_sample_id column: a warning for a genomic (P/G) study, info otherwise.
+        if (result.getOutputValidation() != null) {
+            result.getOutputValidation().getIssues().stream()
+                    .filter(i -> i.code().equals("NO_SAMPLE_ID_COLUMN"))
+                    .forEach(i -> trace.issue(i.severity(), i.code(), trace.sstrFile, i.message(), List.of()));
         }
         trace.sstrStatus = "used";
         trace.source = Source.SSTR;
@@ -747,17 +760,10 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         trace.participantsByConsent = countsByConsent(result);
 
         SubjectTable subjects = multiReader.readSubjects(localSubject.toString());
-        Map<String, String> subjectIdToDbgapId = new HashMap<>();
-        subjects.consented().values().forEach(s -> {
-            if (s.subjectId() != null) {
-                subjectIdToDbgapId.put(s.subjectId(), s.dbgapSubjectId());
-            }
-        });
-        // Patient mapping ids may be either id, so a consent-0 subject is recognized by both.
-        Set<String> notConsentedIds = new LinkedHashSet<>(subjects.notConsented());
-        notConsentedIds.addAll(subjects.notConsentedSubjectIds());
+        Map<String, String> consentByDbgapId = new HashMap<>();
+        subjects.consented().values().forEach(s -> consentByDbgapId.put(s.dbgapSubjectId(), s.consentCode()));
         return new SubjectIdentities(files.subjectMulti(), new LinkedHashSet<>(subjects.consented().keySet()),
-                subjectIdToDbgapId, notConsentedIds);
+                new LinkedHashSet<>(subjects.notConsented()), consentByDbgapId);
     }
 
     /** A populate sub-job's {@code countsByConsentGroup} metric: participants written per consent code. */
@@ -817,10 +823,14 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return errors.isEmpty() ? base : base + ": " + String.join("; ", errors);
     }
 
-    /** dbGaP subject ids loaded from the SSTR, and the study's own subject id &rarr; dbGaP id. */
+    /**
+     * dbGaP subject ids loaded from the SSTR, and each subject's consent (from its first row, as
+     * the sstr sub-job takes it).
+     */
     private SubjectIdentities readSstrIdentities(String sstrPath, String fileName) {
-        Map<String, String> subjectIdToDbgapId = new HashMap<>();
+        Map<String, String> consentByDbgapId = new HashMap<>();
         Set<String> dbgapIds = new LinkedHashSet<>();
+        String consentCol = null;
 
         InputStream in = io.openInput(sstrPath);
         try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.TAB)) {
@@ -830,19 +840,22 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     continue;
                 }
                 dbgapIds.add(dbgapId);
-                String subjectId = Strings.trimToNull(row.get(SSTR_COL_SUBJECT_ID));
-                if (subjectId != null) {
-                    subjectIdToDbgapId.put(subjectId, dbgapId);
+                if (consentCol == null) {
+                    consentCol = SstrPopulateRdsParticipantsJob.consentColumn(row.keySet());
+                }
+                String consent = consentCol == null ? null : Strings.trimToNull(row.get(consentCol));
+                if (consent != null) {
+                    consentByDbgapId.putIfAbsent(dbgapId, consent);
                 }
             }
         }
-        return new SubjectIdentities(fileName, dbgapIds, subjectIdToDbgapId, Set.of());
+        return new SubjectIdentities(fileName, dbgapIds, Set.of(), consentByDbgapId);
     }
 
     /**
      * The source sub-job populated RDS keyed by {@code dbgap_subject_id}. This resolves each
-     * patient-mapping row's id (which may be a dbgap id or the study's own subject id) to that
-     * same dbgap id, so the mapping file can report the new hpds_id RDS actually assigned.
+     * patient-mapping row's id, a dbgap id (never the study's own subject id), to that participant,
+     * so the mapping file can report the new hpds_id RDS actually assigned.
      */
     private MappingResult buildMapping(String studyId, SubjectIdentities identities,
                                        List<PatientMappingRow> patientMappings, int batchSize, SourceTrace trace) {
@@ -850,28 +863,28 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 new ArrayList<>(identities.dbgapIds()), SstrPopulateRdsParticipantsJob.SOURCE, batchSize);
 
         List<MappingRow> rows = new ArrayList<>();
+        Map<String, Set<String>> mappedSubjectsByConsent = new LinkedHashMap<>();
         List<String> unresolved = new ArrayList<>();
         List<String> notConsented = new ArrayList<>();
         // Unresolved rows are summarised per study rather than logged one by one: a study can have
-        // tens of thousands, and every id is already listed in the report's PATIENT_MAPPING_UNRESOLVED issue.
-        List<String> notFound = new ArrayList<>();
+        // tens of thousands. They are expected -- studies sharing an abbreviation shared a patient
+        // mapping, and old mappings linger -- so they are not an issue; only a study none of whose
+        // rows resolve is (NEEDS_DATA_REVIEW).
         List<String> notInFileSample = new ArrayList<>();
         List<String> noParticipantSample = new ArrayList<>();
         int notInFile = 0;
         int noParticipant = 0;
         for (PatientMappingRow pm : patientMappings) {
-            String dbgapId = identities.dbgapIds().contains(pm.id())
-                    ? pm.id() : identities.subjectIdToDbgapId().get(pm.id());
-            if (dbgapId == null && identities.notConsentedIds().contains(pm.id())) {
+            String dbgapId = pm.id();
+            if (!identities.dbgapIds().contains(dbgapId) && identities.notConsentedIds().contains(dbgapId)) {
                 notConsented.add(pm.oldHpdsId());
                 unresolved.add(pm.oldHpdsId());
                 continue;
             }
-            if (dbgapId == null) {
+            if (!identities.dbgapIds().contains(dbgapId)) {
                 if (notInFile++ < UNRESOLVED_LOG_SAMPLE) {
-                    notInFileSample.add("'" + pm.id() + "' (old hpds id " + pm.oldHpdsId() + ")");
+                    notInFileSample.add("'" + dbgapId + "' (old hpds id " + pm.oldHpdsId() + ")");
                 }
-                notFound.add(pm.oldHpdsId());
                 unresolved.add(pm.oldHpdsId());
                 continue;
             }
@@ -880,15 +893,21 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                 if (noParticipant++ < UNRESOLVED_LOG_SAMPLE) {
                     noParticipantSample.add("'" + dbgapId + "' (old hpds id " + pm.oldHpdsId() + ")");
                 }
-                notFound.add(pm.oldHpdsId());
                 unresolved.add(pm.oldHpdsId());
                 continue;
             }
             rows.add(new MappingRow(pm.oldHpdsId(), hpdsId, dbgapId));
+            String consent = identities.consentByDbgapId().get(dbgapId);
+            if (consent != null) {
+                mappedSubjectsByConsent.computeIfAbsent(consent, c -> new HashSet<>()).add(dbgapId);
+            }
         }
+        Map<String, Long> mappedByConsent = new LinkedHashMap<>();
+        mappedSubjectsByConsent.forEach((consent, ids) -> mappedByConsent.put(consent, (long) ids.size()));
+        trace.mappedByConsent = Collections.unmodifiableMap(mappedByConsent);
 
         if (notInFile > 0) {
-            log.warn("Study '{}': {} of {} patient mapping id(s) not found in {}; skipped. First: {}",
+            log.info("Study '{}': {} of {} patient mapping id(s) not found in {}; skipped. First: {}",
                     studyId, notInFile, patientMappings.size(), identities.file(), String.join(", ", notInFileSample));
         }
         if (noParticipant > 0) {
@@ -899,11 +918,6 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
             trace.issue(Severity.INFO, "PATIENT_MAPPING_NOT_CONSENTED", identities.file(),
                     notConsented.size() + " patient mapping row(s) name a consent-0 subject and were not mapped "
                             + "(old hpds ids)", notConsented);
-        }
-        if (!notFound.isEmpty()) {
-            trace.issue(Severity.WARNING, "PATIENT_MAPPING_UNRESOLVED", identities.file(),
-                    notFound.size() + " patient mapping row(s) could not be resolved to a loaded subject (old hpds ids)",
-                    notFound);
         }
         return new MappingResult(rows, unresolved, notInFile, noParticipant, notConsented.size());
     }
@@ -1075,9 +1089,23 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     static boolean isSstrFileFor(String fileName, String studyId) {
         String lower = fileName.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".txt")
+        return (lower.endsWith(".txt")
                 && lower.contains(studyId.toLowerCase(Locale.ROOT))
-                && (lower.startsWith("sstr_") || lower.startsWith("bdc-ingestion-only__sstr_"));
+                && (lower.startsWith("sstr_") || lower.startsWith("bdc-ingestion-only__sstr_")))
+                || isTelemetryReportFor(fileName, studyId);
+    }
+
+    /** {@code {studyid}*telemetry_report.tsv}, case-insensitively: the SSTR under its alternative name. */
+    static boolean isTelemetryReportFor(String fileName, String studyId) {
+        return startsWithStudy(fileName, studyId) && fileName.toLowerCase(Locale.ROOT).endsWith("telemetry_report.tsv");
+    }
+
+    /** Which SSTR to use when a study has several: canonical (0), telemetry report (1), folder-flattened (2). */
+    static int sstrNamePreference(String fileName) {
+        if (isCanonicalSstrName(fileName)) {
+            return 0;
+        }
+        return fileName.toLowerCase(Locale.ROOT).endsWith("telemetry_report.tsv") ? 1 : 2;
     }
 
     /** The canonical NHLBI filename shape {@code sstr_{phs}.{v}.txt} — not a
@@ -1097,10 +1125,23 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         return startsWithStudy(fileName, studyId) && fileName.toLowerCase(Locale.ROOT).endsWith("sample.multi.txt");
     }
 
-    /** {@code rawData/{studyid}*Subject.data_dict.xml}, case-insensitively. */
+    /**
+     * {@code rawData/{studyid}*Subject.data_dict*.xml}, case-insensitively, as in
+     * {@code ..._Subject.data_dict_2019_01_15.xml}. The first choice for a data dictionary.
+     */
     static boolean isSubjectDataDictFor(String fileName, String studyId) {
         return startsWithStudy(fileName, studyId)
-                && fileName.toLowerCase(Locale.ROOT).endsWith("subject.data_dict.xml");
+                && SUBJECT_DATA_DICT.matcher(fileName.substring(studyId.length())).matches();
+    }
+
+    /**
+     * {@code rawData/{studyid}*Subject*data_dict*.xml}, case-insensitively: the fallback when no
+     * {@link #isSubjectDataDictFor} file exists. Wider, so it can also match another Subject table's
+     * dictionary (a {@code Subject_Phenotypes} one, say).
+     */
+    static boolean isLooseSubjectDataDictFor(String fileName, String studyId) {
+        return startsWithStudy(fileName, studyId)
+                && LOOSE_SUBJECT_DATA_DICT.matcher(fileName.substring(studyId.length())).matches();
     }
 
     private static boolean startsWithStudy(String fileName, String studyId) {
@@ -1116,11 +1157,15 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     /**
-     * Data dictionaries for the chosen Subject.MULTI, newest first: only those sharing its table
-     * accession ({@code pht######}) when any do, since a release holds one dictionary per table.
+     * Data dictionaries for the chosen Subject.MULTI, newest first: the {@code Subject.data_dict*.xml}
+     * files, or the {@code Subject*data_dict*.xml} ones when there are none. Only those sharing its
+     * table accession ({@code pht######}) when any do, since a release holds one dictionary per table.
      */
     static List<String> dataDictCandidates(List<String> names, String studyId, String subjectMulti) {
         List<String> dicts = newestFirst(names, n -> isSubjectDataDictFor(n, studyId));
+        if (dicts.isEmpty()) {
+            dicts = newestFirst(names, n -> isLooseSubjectDataDictFor(n, studyId));
+        }
         if (subjectMulti != null) {
             Matcher m = TABLE_ACCESSION.matcher(subjectMulti.toLowerCase(Locale.ROOT));
             if (m.find()) {
@@ -1191,7 +1236,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     @Override
     protected void validateOutput(Output output, JobContext ctx, ValidationReport report) {
         if (output.studyResults().isEmpty()) {
-            report.error("NO_READY_STUDIES", "No studies marked ready to process were found");
+            report.error("NO_READY_STUDIES", "No studies marked ready to process and not yet processed were found");
         }
         for (StudyResult result : output.studyResults()) {
             SourceUsage usage = result.usage();
@@ -1204,28 +1249,38 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                     + "); loaded from " + usage.subjectMultiFile() + " instead",
                             Map.of("studyId", result.studyId(), "sstrFile", usage.sstrFile())));
                 }
-                // MULTI files only: an SSTR study's issues were log-only before the fallback existed.
-                long fileWarnings = result.source() != Source.MULTI ? 0 : usage.issues().stream()
+                // Every MULTI file warning; of an SSTR study's, only a genomic study's missing sample
+                // ids (its other issues were log-only before the fallback existed).
+                long fileWarnings = usage.issues().stream()
                         .filter(i -> i.severity() == Severity.WARNING)
-                        .filter(i -> !i.code().equals("SSTR_MALFORMED") && !i.code().equals("PATIENT_MAPPING_UNRESOLVED"))
+                        .filter(i -> result.source() == Source.MULTI
+                                ? !i.code().equals("SSTR_MALFORMED") : i.code().equals("NO_SAMPLE_ID_COLUMN"))
                         .count();
                 if (fileWarnings > 0) {
                     report.add(ValidationIssue.warning("SOURCE_FILE_ISSUES", result.studyId() + ": " + fileWarnings
                                     + " warning(s) reading its " + result.source().label() + " file(s); see " + ISSUES_REPORT,
                             Map.of("studyId", result.studyId(), "count", fileWarnings)));
                 }
-                // Absent from the migration without anything failing, so report it as a warning
-                // to bring the run back UNSTABLE rather than clean.
+                // Legacy subjects the source file has no consent for are often expected (withdrawn,
+                // consent 0), so only info -- unless a whole consent group matched none of the
+                // patient mapping, which points at mismatched ids: a warning brings the run back UNSTABLE.
                 if (!result.unresolvedHpdsIds().isEmpty()) {
                     List<String> sample = result.unresolvedHpdsIds().stream().limit(MAX_EXAMPLES).toList();
+                    List<String> unmatched = unmatchedConsents(usage);
                     String reason = "could not be resolved via the " + result.source().label() + " file";
-                    report.add(ValidationIssue.warning("SUBJECTS_WITHOUT_CONSENT", result.studyId() + ": "
-                                    + result.unresolvedHpdsIds().size() + " subject(s) " + reason
-                                    + " and were NOT migrated. First: " + sample,
-                            Map.of("studyId", result.studyId(),
-                                    "path", result.source().label(),
-                                    "count", (long) result.unresolvedHpdsIds().size(),
-                                    "firstOldHpdsIds", sample)));
+                    String message = result.studyId() + ": " + result.unresolvedHpdsIds().size() + " subject(s) "
+                            + reason + " and were NOT migrated"
+                            + (unmatched.isEmpty() ? "" : "; no participant matched consent(s) " + unmatched)
+                            + ". First: " + sample;
+                    Map<String, Object> context = new LinkedHashMap<>();
+                    context.put("studyId", result.studyId());
+                    context.put("path", result.source().label());
+                    context.put("count", (long) result.unresolvedHpdsIds().size());
+                    context.put("firstOldHpdsIds", sample);
+                    context.put("unmatchedConsents", unmatched);
+                    report.add(unmatched.isEmpty()
+                            ? ValidationIssue.info("SUBJECTS_WITHOUT_CONSENT", message, context)
+                            : ValidationIssue.warning("SUBJECTS_WITHOUT_CONSENT", message, context));
                 }
             } else if (result.needsReview()) {
                 // A warning, not an error: the run (and the pipeline after it) carries on without it.
@@ -1246,6 +1301,20 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                         null, Map.of("studyId", result.studyId(), "reason", reason)));
             }
         }
+    }
+
+    /**
+     * Consent codes the source file loaded participants for but no patient mapping row resolved to.
+     * For a study record from before per-consent matches were kept, every code with participants:
+     * unknown is reported as a warning, as it always was.
+     */
+    static List<String> unmatchedConsents(SourceUsage usage) {
+        return usage.participantsByConsent().entrySet().stream()
+                .filter(e -> e.getValue() > 0)
+                .filter(e -> usage.mappedByConsent() == null || usage.mappedByConsent().getOrDefault(e.getKey(), 0L) == 0)
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
     }
 
     @Override
@@ -1297,10 +1366,17 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                             List<String> examples) {
     }
 
-    /** What a study's source discovery found and did; one row of {@value #SOURCES_REPORT}. */
+    /**
+     * What a study's source discovery found and did; one row of {@value #SOURCES_REPORT}.
+     *
+     * @param participantsByConsent participants loaded from the source file, per consent code
+     * @param mappedByConsent       of those, how many a patient mapping row resolved to, per consent code
+     *                              (a code none did is absent); null in study records written before it existed
+     */
     public record SourceUsage(String sstrFile, String sstrStatus, String sstrError, String subjectMultiFile,
                               String sampleMultiFile, String dataDictFile, String multiStatus, String consentColumn,
-                              Map<String, Long> participantsByConsent, List<FileIssue> issues) {
+                              Map<String, Long> participantsByConsent, Map<String, Long> mappedByConsent,
+                              List<FileIssue> issues) {
         public SourceUsage {
             // Absent from study records written before it existed.
             participantsByConsent = participantsByConsent == null ? Map.of() : participantsByConsent;
@@ -1324,6 +1400,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         String multiStatus = "not attempted";
         String consentColumn;
         Map<String, Long> participantsByConsent = Map.of();
+        Map<String, Long> mappedByConsent;
         Source source = Source.NONE;
 
         SourceTrace(String studyId) {
@@ -1352,7 +1429,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
         SourceUsage snapshot() {
             return new SourceUsage(sstrFile, sstrStatus, sstrError, subjectMultiFile, sampleMultiFile, dataDictFile,
-                    multiStatus, consentColumn, participantsByConsent, List.copyOf(issues));
+                    multiStatus, consentColumn, participantsByConsent, mappedByConsent, List.copyOf(issues));
         }
     }
 
@@ -1375,11 +1452,11 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     /**
      * @param file                  the source file the ids came from, for messages
      * @param dbgapIds              dbGaP subject ids the source loaded
-     * @param subjectIdToDbgapId    the study's own subject id &rarr; dbGaP id
-     * @param notConsentedIds       dbGaP ids and the study's own subject ids of subjects dropped for consent 0
+     * @param notConsentedIds       dbGaP ids of subjects dropped for consent 0
+     * @param consentByDbgapId      each loaded subject's consent code
      */
-    private record SubjectIdentities(String file, Set<String> dbgapIds, Map<String, String> subjectIdToDbgapId,
-                                     Set<String> notConsentedIds) {
+    private record SubjectIdentities(String file, Set<String> dbgapIds, Set<String> notConsentedIds,
+                                     Map<String, String> consentByDbgapId) {
     }
 
     private record MappingResult(List<MappingRow> mappingRows, List<String> unresolvedHpdsIds,

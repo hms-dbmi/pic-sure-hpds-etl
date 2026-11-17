@@ -64,4 +64,8 @@ public record ValidationIssue(
     public static ValidationIssue info(String code, String message) {
         return new ValidationIssue(Severity.INFO, code, message, null, Map.of());
     }
+
+    public static ValidationIssue info(String code, String message, Map<String, Object> context) {
+        return new ValidationIssue(Severity.INFO, code, message, null, context);
+    }
 }

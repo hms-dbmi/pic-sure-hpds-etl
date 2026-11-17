@@ -35,7 +35,7 @@ import java.util.stream.Stream;
  *   <li>{@code {studyid}*Sample.MULTI.txt} (optional): one row per sample;
  *       {@code dbGaP_Subject_ID}, {@code dbGaP_Sample_ID}, and usually the submitted
  *       {@code SAMPLE_ID}.</li>
- *   <li>{@code {studyid}*Subject.data_dict.xml} (optional): decodes the numeric consent codes
+ *   <li>{@code {studyid}*Subject.data_dict*.xml} (optional): decodes the numeric consent codes
  *       into labels such as {@code General Research Use (GRU)}.</li>
  * </ul>
  *
@@ -64,8 +64,6 @@ public class DbgapMultiFileReader {
      */
     static final List<String> CONSENT_COLUMNS = List.of("consent", "consent_1217", "consentcol", "gencons",
             "consent_code", "consent_group");
-    /** The study's own subject id, which a patient mapping file may use instead of the dbGaP id. */
-    static final List<String> SUBJECT_ID_COLUMNS = List.of("SUBJECT_ID", "SUBJID", "submitted_subject_id", "subj_id");
     /** dbGaP's "did not consent / did not participate" group; never loaded. */
     static final String NOT_CONSENTED_CODE = "0";
 
@@ -92,11 +90,9 @@ public class DbgapMultiFileReader {
         String file = fileName(path);
         Map<String, Subject> consented = new LinkedHashMap<>();
         Set<String> notConsented = new LinkedHashSet<>();
-        Map<String, String> notConsentedSubjectIds = new LinkedHashMap<>();
         IssueTally tally = new IssueTally(file);
         String dbgapCol = null;
         String consentCol = null;
-        String subjectIdCol = null;
         long rowsRead = 0;
 
         InputStream in = io.openInput(path);
@@ -119,11 +115,6 @@ public class DbgapMultiFileReader {
                                         + consentCols + "; using '" + consentCol + "'",
                                 context(file, consentCols.size(), consentCols)));
                     }
-                    subjectIdCol = firstColumn(headers, SUBJECT_ID_COLUMNS);
-                    if (subjectIdCol == null) {
-                        tally.add(ValidationIssue.info("NO_SUBJECT_ID_COLUMN", file + ": no " + SUBJECT_ID_COLUMNS
-                                + " column; patient mapping rows can only be matched by " + COL_DBGAP_SUBJECT_ID));
-                    }
                 }
                 rowsRead++;
                 String dbgapId = Strings.trimToNull(row.get(dbgapCol));
@@ -144,10 +135,6 @@ public class DbgapMultiFileReader {
                 if (NOT_CONSENTED_CODE.equals(code)) {
                     tally.count("CONSENT_ZERO_DROPPED", dbgapId);
                     notConsented.add(dbgapId);
-                    String subjectId = subjectIdCol == null ? null : Strings.trimToNull(row.get(subjectIdCol));
-                    if (subjectId != null) {
-                        notConsentedSubjectIds.putIfAbsent(dbgapId, subjectId);
-                    }
                     continue;
                 }
                 Subject existing = consented.get(dbgapId);
@@ -157,8 +144,7 @@ public class DbgapMultiFileReader {
                     }
                     continue;
                 }
-                String subjectId = subjectIdCol == null ? null : Strings.trimToNull(row.get(subjectIdCol));
-                consented.put(dbgapId, new Subject(dbgapId, subjectId, code));
+                consented.put(dbgapId, new Subject(dbgapId, code));
             }
         }
 
@@ -167,9 +153,7 @@ public class DbgapMultiFileReader {
         }
         // A subject consented on any row is loaded; only subjects never consented count as dropped.
         notConsented.removeAll(consented.keySet());
-        notConsentedSubjectIds.keySet().retainAll(notConsented);
-        return new SubjectTable(file, consentCol, subjectIdCol, consented, notConsented,
-                new LinkedHashSet<>(notConsentedSubjectIds.values()), rowsRead, tally.issues());
+        return new SubjectTable(file, consentCol, consented, notConsented, rowsRead, tally.issues());
     }
 
     /**
@@ -372,19 +356,16 @@ public class DbgapMultiFileReader {
     }
 
     /** One loadable subject: a usable, non-zero consent code. */
-    public record Subject(String dbgapSubjectId, String subjectId, String consentCode) {
+    public record Subject(String dbgapSubjectId, String consentCode) {
     }
 
     /**
      * @param consentColumn    the header the consent was read from, as it appears in the file
-     * @param subjectIdColumn  the study's own subject id header, or null if the file has none
      * @param consented        dbGaP subject id &rarr; subject, for every subject with a usable consent
      * @param notConsented     dbGaP subject ids seen only with consent 0
-     * @param notConsentedSubjectIds  the study's own subject ids of those subjects, where the file has them
      */
-    public record SubjectTable(String file, String consentColumn, String subjectIdColumn,
+    public record SubjectTable(String file, String consentColumn,
                                Map<String, Subject> consented, Set<String> notConsented,
-                               Set<String> notConsentedSubjectIds,
                                long rowsRead, List<ValidationIssue> issues) {
     }
 

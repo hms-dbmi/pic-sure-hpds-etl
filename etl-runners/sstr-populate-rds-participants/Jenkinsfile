@@ -11,7 +11,8 @@
 //     subject was already loaded, source = "DBGap"
 //   - one consents row per participant, study_id = --study-id, consent/abbreviation from that
 //     subject's first row
-//   - one samples row per input row with a non-blank dbgap_sample_id
+//   - one samples row per input row with a non-blank dbgap_sample_id. The column is optional:
+//     without it, a warning for a genomic study (Data Type P/G) and info otherwise
 //
 //   Every run first purges the study's existing consents rows so its consent groups are
 //   repopulated from this file rather than merged with stale data. Purge and load share one
@@ -23,6 +24,7 @@
 //   --study-id     phs###### (params.STUDY_ID)
 //   --input        the SSTR TSV, local or s3:// (params.INPUT)
 //   --batch-size   rows per batch insert (params.BATCH_SIZE)
+//   --genomic      true/false, the study has genomic data (params.GENOMIC; blank: unknown)
 //   RDS credentials read by the runner at boot from the SSM parameter
 //                   /hpds-etl/<ENV>/participant-db/app-credentials, written by participant-db-start
 //
@@ -73,6 +75,8 @@ pipeline {
                description: 'REQUIRED. --input: the dbGaP SSTR subject/sample mapping TSV (local path or s3:// URI)')
         string(name: 'BATCH_SIZE', defaultValue: '1000',
                description: '--batch-size: rows per batch insert')
+        string(name: 'GENOMIC', defaultValue: '',
+               description: '--genomic: true when the study\'s managed-inputs Data Type includes G (P/G), false when it does not. A missing dbgap_sample_id column is a warning unless this is false. Blank: unknown, treated as genomic. The orchestrator sets it.')
         string(name: 'EXPECTED_CONSENT_CODES', defaultValue: '',
                description: 'Optional. Comma-separated CONSENT values this study must produce. When set, a mismatch fails the build — this is what catches a file swapped for the wrong study.')
         string(name: 'EXPECTED_MIN_PARTICIPANTS', defaultValue: '',
@@ -106,10 +110,12 @@ pipeline {
         TF_VAR_study_id                  = "${params.STUDY_ID.trim()}"
         TF_VAR_input_uri                 = "${params.INPUT.trim()}"
         TF_VAR_batch_size                = "${params.BATCH_SIZE.trim()}"
+        TF_VAR_genomic                   = "${params.GENOMIC.trim()}"
         TF_VAR_instance_type             = "${params.INSTANCE_TYPE.trim()}"
 
         EXPECTED_CONSENT_CODES   = "${params.EXPECTED_CONSENT_CODES.trim()}"
         EXPECTED_MIN_PARTICIPANTS = "${params.EXPECTED_MIN_PARTICIPANTS.trim()}"
+        GENOMIC                  = "${params.GENOMIC.trim()}"
 
         PIPELINE_TIMEOUT = "${params.JOB_TIMEOUT_SECONDS.trim()}"
     }
@@ -124,6 +130,9 @@ pipeline {
                     }
                     if (!params.INPUT?.trim()) {
                         error('INPUT is required: the s3:// URI or local path of this study\'s SSTR TSV.')
+                    }
+                    if (!(params.GENOMIC.trim() in ['', 'true', 'false'])) {
+                        error("GENOMIC '${params.GENOMIC}' must be true, false, or blank.")
                     }
                     if (!(params.STUDY_ID ==~ /^phs\d{6}$/)) {
                         error("STUDY_ID '${params.STUDY_ID}' must match phs###### (exactly 6 digits) — the same rule the job enforces, failing with exit 2 if broken.")
@@ -272,7 +281,7 @@ pipeline {
                         String meaning = [
                             1  : 'UNKNOWN (unclassified failure)',
                             2  : 'VALIDATION_FAILED (bad --study-id/--batch-size, or empty input)',
-                            3  : 'DATA_ERROR (blank dbgap_subject_id or CONSENT, or a missing column — the study was rolled back, RDS is unchanged)',
+                            3  : 'DATA_ERROR (blank dbgap_subject_id or CONSENT/consent_code, or a missing column — the study was rolled back, RDS is unchanged)',
                             4  : 'INFRASTRUCTURE_ERROR (RDS/S3/network)',
                             5  : 'CONFIG_ERROR (missing or invalid parameter/credential)',
                             124: 'TIMEOUT (runner did not finish in time)',

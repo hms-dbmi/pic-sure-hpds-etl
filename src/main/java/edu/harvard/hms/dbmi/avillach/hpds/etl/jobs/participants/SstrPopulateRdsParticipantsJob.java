@@ -24,6 +24,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -42,9 +43,18 @@ import java.util.stream.Stream;
  * {@code --study-id}; consent/abbreviation come from that subject's first row), and one
  * {@code samples} row per input row that has a non-blank {@code dbgap_sample_id}.
  *
- * <p>Every run first purges existing {@code consents} rows for {@code --study-id} so the
- * study's consent groups are fully repopulated from the given file, not merged with stale
- * data. Purge + load happen in one transaction: a bad row rolls the whole run back.
+ * <p>Every run first purges existing {@code consents} and {@code samples} rows for
+ * {@code --study-id} so the study's consent groups and samples are fully repopulated from the
+ * given file, not merged with stale data. Samples are written under {@code --study-id}, so a
+ * participant shared with another study never picks up that study's samples. Purge + load happen
+ * in one transaction: a bad row rolls the whole run back.
+ *
+ * <p>The consent column is {@code CONSENT} or, in some files (telemetry reports among them),
+ * {@code consent_code}; either name is matched case-insensitively, {@code CONSENT} first.
+ *
+ * <p>{@code dbgap_sample_id} is optional. A file without it loads no dbGaP sample rows, which is
+ * a warning for a genomic study ({@code --genomic true}, managed-inputs Data Type with {@code G},
+ * as in {@code P/G}) or one not known to be otherwise, and info for {@code --genomic false}.
  *
  * <p>Enabled by {@code etl.jobs.sstr-populate-rds-participants.enabled=true}; without it the bean
  * is never created and {@link edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobRegistry} does not
@@ -63,7 +73,11 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
     static final String COL_SUBMITTED_SAMPLE_ID = "SAMPLE_ID";
     static final String COL_DBGAP_SAMPLE_ID = "dbgap_sample_id";
     static final String COL_CONSENT = "CONSENT";
+    /** The consent column's other name, used when there is no {@link #COL_CONSENT}. */
+    static final String COL_CONSENT_CODE = "consent_code";
     static final String COL_CONSENT_ABBREVIATION = "consent_abbreviation";
+    /** Optional: whether the study is genomic, so dbGaP sample ids are expected. Blank: unknown. */
+    public static final String PARAM_GENOMIC = "genomic";
     private static final int DEFAULT_BATCH_SIZE = 1000;
     private static final Pattern STUDY_ID_PATTERN = Pattern.compile("phs\\d{6}");
 
@@ -107,7 +121,10 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                                 "/data/phs001412.sstr.txt"),
                         ParamSpec.required("study-id",
                                 "dbGaP study id these rows belong to, format phs###### (6 digits)", "phs001412"),
-                        ParamSpec.optional("batch-size", "Rows per batch insert", "1000")),
+                        ParamSpec.optional("batch-size", "Rows per batch insert", "1000"),
+                        ParamSpec.optional(PARAM_GENOMIC, "true when the study's managed-inputs Data Type "
+                                + "includes G (P/G): a missing dbgap_sample_id column is then a warning, and with "
+                                + "false only info. Unset is treated as genomic", "true")),
                 List.of("participants/consents/samples upserted in RDS from the mapping file; "
                         + "existing consents for --study-id are purged and repopulated"));
     }
@@ -129,6 +146,11 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 report.error("BAD_BATCH_SIZE", "batch-size must be an integer, got: " + bs, "--batch-size");
             }
         });
+        ctx.get(PARAM_GENOMIC).ifPresent(g -> {
+            if (!g.equalsIgnoreCase("true") && !g.equalsIgnoreCase("false")) {
+                report.error("BAD_GENOMIC", "genomic must be true or false, got: " + g, "--" + PARAM_GENOMIC);
+            }
+        });
     }
 
     @Override
@@ -146,24 +168,25 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         Map<String, Telemetry> firstRowBySubject = new LinkedHashMap<>();
         List<String[]> samplePairs = new ArrayList<>();
         List<String[]> submittedSamplePairs = new ArrayList<>();
-        boolean headerChecked = false;
+        String consentCol = null;
+        boolean sampleIdColumn = false;
         long rowsRead = 0;
 
         InputStream in = io.openInput(input);
         try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.TAB)) {
             for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
-                if (!headerChecked) {
-                    requireColumns(row);
-                    headerChecked = true;
+                if (consentCol == null) {
+                    consentCol = requireColumns(row);
+                    sampleIdColumn = row.containsKey(COL_DBGAP_SAMPLE_ID);
                 }
                 rowsRead++;
                 String dbgapSubjectId = Strings.trimToNull(row.get(COL_DBGAP_SUBJECT_ID));
                 if (dbgapSubjectId == null) {
                     throw new DataException("Row " + rowsRead + " has a blank " + COL_DBGAP_SUBJECT_ID);
                 }
-                String consent = Strings.trimToNull(row.get(COL_CONSENT));
+                String consent = Strings.trimToNull(row.get(consentCol));
                 if (consent == null) {
-                    throw new DataException("Row " + rowsRead + " has a blank " + COL_CONSENT);
+                    throw new DataException("Row " + rowsRead + " has a blank " + consentCol);
                 }
                 String consentAbbreviation = row.get(COL_CONSENT_ABBREVIATION);
                 consentAbbreviation = (consentAbbreviation == null || consentAbbreviation.isBlank()) ? "" : consentAbbreviation.trim();
@@ -188,6 +211,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         }
 
         consents.deleteByStudyId(studyId);
+        samples.deleteByStudyId(studyId);
 
         ParticipantRepository.Resolution resolution = participants.resolveOrCreate(subjectIds, SOURCE, batchSize);
         Map<String, Long> idBySubject = resolution.idsBySourceId();
@@ -204,13 +228,13 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 ConsentRepository.KEY_ORDER);
 
         List<Sample> sampleRows = samplePairs.stream()
-                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), studyId, pair[1], SOURCE))
                 .toList();
         long samplesInserted = BatchOps.upsertInChunks(samples::batchUpsert, sampleRows, batchSize,
                 SampleRepository.KEY_ORDER);
 
         List<Sample> submittedSampleRows = submittedSamplePairs.stream()
-                .map(pair -> new Sample(idBySubject.get(pair[0]), pair[1], SOURCE_SUBMITTED))
+                .map(pair -> new Sample(idBySubject.get(pair[0]), studyId, pair[1], SOURCE_SUBMITTED))
                 .toList();
         long submittedSamplesInserted =
                 BatchOps.upsertInChunks(samples::batchUpsert, submittedSampleRows, batchSize,
@@ -221,19 +245,36 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 rowsRead, subjectIds.size(), participantsInserted, consentsWritten,
                 samplesInserted, submittedSamplesInserted);
         return new Output(rowsRead, subjectIds.size(), participantsInserted, consentsWritten,
-                samplePairs.size(), samplesInserted, submittedSamplesInserted, countsByConsentGroup);
+                samplePairs.size(), samplesInserted, submittedSamplesInserted, sampleIdColumn, countsByConsentGroup);
     }
 
-    private void requireColumns(Map<String, String> firstRow) {
+    /** Fails unless every required column is present; returns the consent column's header. */
+    private String requireColumns(Map<String, String> firstRow) {
         List<String> missing = new ArrayList<>();
         if (!firstRow.containsKey(COL_DBGAP_SUBJECT_ID)) missing.add(COL_DBGAP_SUBJECT_ID);
-        if (!firstRow.containsKey(COL_CONSENT)) missing.add(COL_CONSENT);
+        String consentCol = consentColumn(firstRow.keySet());
+        if (consentCol == null) missing.add(COL_CONSENT + " (or " + COL_CONSENT_CODE + ")");
         if (!firstRow.containsKey(COL_CONSENT_ABBREVIATION)) missing.add(COL_CONSENT_ABBREVIATION);
-        if (!firstRow.containsKey(COL_DBGAP_SAMPLE_ID)) missing.add(COL_DBGAP_SAMPLE_ID);
         if (!missing.isEmpty()) {
             throw new DataException("Input is missing required column(s): " + missing
                     + ". Found: " + firstRow.keySet());
         }
+        return consentCol;
+    }
+
+    /**
+     * The header holding the consent: {@value #COL_CONSENT}, else {@value #COL_CONSENT_CODE}, each
+     * in any case; null when there is neither.
+     */
+    public static String consentColumn(Collection<String> headers) {
+        for (String name : List.of(COL_CONSENT, COL_CONSENT_CODE)) {
+            for (String header : headers) {
+                if (header.equalsIgnoreCase(name)) {
+                    return header;
+                }
+            }
+        }
+        return null;
     }
 
 
@@ -243,6 +284,19 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
         // consents are never deleted.
         output.countsByConsentGroup().forEach((group, count) ->
                 report.info("CONSENT_CODE_COUNT", group + ": " + count + " participant(s)"));
+        if (!output.sampleIdColumn()) {
+            String message = "Input has no " + COL_DBGAP_SAMPLE_ID + " column; no dbGaP sample rows were loaded";
+            if (sampleIdsExpected(ctx)) {
+                report.warning("NO_SAMPLE_ID_COLUMN", message + " for a genomic study");
+            } else {
+                report.info("NO_SAMPLE_ID_COLUMN", message + " (not a genomic study)");
+            }
+        }
+    }
+
+    /** Sample ids are expected unless the study is known not to be genomic. */
+    static boolean sampleIdsExpected(JobContext ctx) {
+        return !ctx.get(PARAM_GENOMIC).map(g -> g.equalsIgnoreCase("false")).orElse(false);
     }
 
     @Override
@@ -254,6 +308,7 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                 .metric("samplesSeen", output.samplesSeen())
                 .metric("samplesInserted", output.samplesInserted())
                 .metric("submittedSamplesInserted", output.submittedSamplesInserted())
+                .metric("sampleIdColumn", output.sampleIdColumn())
                 .metric("countsByConsentGroup", output.countsByConsentGroup());
     }
 
@@ -263,10 +318,12 @@ public class SstrPopulateRdsParticipantsJob extends AbstractJob<SstrPopulateRdsP
                           long participantsInserted,
                           long consentsWritten,
                           // input rows with a non-blank dbgap_sample_id; samplesInserted is fewer
-                          // on a reload, since samples are inserted with ON CONFLICT DO NOTHING
+                          // when the file repeats a sample (ON CONFLICT DO NOTHING)
                           long samplesSeen,
                           long samplesInserted,
                           long submittedSamplesInserted,
+                          // whether the input has a dbgap_sample_id column at all
+                          boolean sampleIdColumn,
                           Map<String, Long> countsByConsentGroup) {
     }
 }
