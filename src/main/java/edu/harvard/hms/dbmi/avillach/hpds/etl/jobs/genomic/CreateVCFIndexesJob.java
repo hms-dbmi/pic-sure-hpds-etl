@@ -20,9 +20,11 @@ import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Component
@@ -104,7 +106,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         long genomicCount = rows.stream()
                 .filter(ManagedInputRow::isReady)
                 .filter(r -> includeProcessed || !r.isProcessed())
-                .filter(r -> isGenomic(r))
+                .filter(ManagedInputRow::isGenomic)
                 .count();
         if (genomicCount == 0) {
             // An empty workload is a legitimate state (e.g. a phenotype-only sweep or a
@@ -126,7 +128,7 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
         List<ManagedInputRow> genomicStudies = allRows.stream()
                 .filter(ManagedInputRow::isReady)
                 .filter(r -> includeProcessed || !r.isProcessed())
-                .filter(r -> isGenomic(r))
+                .filter(ManagedInputRow::isGenomic)
                 .toList();
 
         List<PlannedGroup> planned = new ArrayList<>();
@@ -171,8 +173,12 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
                 String consentCode = entry.getKey();
                 String consentGroup = studyId + ".c" + consentCode;
 
+                // The same NWD id can be loaded under both sample sources (dbGaP and submitted):
+                // index it once per participant.
+                Set<String> seen = new HashSet<>();
                 List<Sample> nwdSamples = entry.getValue().stream()
                         .filter(s -> s.sourceSampleId().startsWith("NWD"))
+                        .filter(s -> seen.add(s.hpdsId() + "\t" + s.sourceSampleId()))
                         .toList();
                 if (nwdSamples.isEmpty()) {
                     log.info("Consent group {} has no NWD samples; skipping", consentGroup);
@@ -362,18 +368,6 @@ public class CreateVCFIndexesJob extends AbstractJob<CreateVCFIndexesJob.Output>
 
     private String normalizeOutputBase(String output) {
         return output.endsWith("/") ? output : output + "/";
-    }
-
-    private static boolean isGenomic(ManagedInputRow row) {
-        if (row.dataType() == null || row.dataType().isBlank()) {
-            return false;
-        }
-        for (String part : row.dataType().split("/")) {
-            if (part.trim().equalsIgnoreCase("G")) {
-                return true;
-            }
-        }
-        return false;
     }
 
     @Override

@@ -106,6 +106,16 @@ dispatch_removes_a_stale_sentinel_for_the_same_run_id() {
     [[ ! -e "$stale" ]] || fail "stale status.json was not removed"
 }
 
+dispatch_removes_every_earlier_report_for_the_same_run_id() {
+    local stale="$STUB_STATE/s3/bucket/etl-runner/reports/m/r/phs000007_hpds_id_mapping.csv"
+    local other="$STUB_STATE/s3/bucket/etl-runner/reports/m/r2/phs000007_hpds_id_mapping.csv"
+    mkdir -p "$(dirname "$stale")" "$(dirname "$other")"; touch "$stale" "$other"
+    dispatch "$WORKER" "$MAILBOX" m j r
+    expect_rc 0
+    [[ ! -e "$stale" ]] || fail "an earlier run's report was not removed"
+    [[ -e "$other" ]] || fail "another run's report was removed"
+}
+
 dispatch_refuses_when_a_stale_sentinel_cannot_be_removed() {
     local stale="$STUB_STATE/s3/bucket/etl-runner/reports/m/r/status.json"
     mkdir -p "$(dirname "$stale")"; echo '{"exitCode": 4}' > "$stale"

@@ -34,13 +34,13 @@ module "etl_runner" {
   uses_participant_db = true
   environment         = var.environment
 
-  # Keys use underscores; the runner converts them to --input, --study-id, --batch-size.
+  # Keys use underscores; the runner converts them to --input, --study-id, --batch-size, --genomic.
   # Names must match SstrPopulateRdsParticipantsJob.expectations().
-  job_params = {
+  job_params = merge({
     input      = var.input_uri
     study_id   = var.study_id
     batch_size = var.batch_size
-  }
+  }, var.genomic == "" ? {} : { genomic = var.genomic })
 
   tags = merge({
     Project  = "PIC-SURE HPDS ETL"

@@ -4,6 +4,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.config.EtlProperties;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.ExitCode;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobExecutor;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.job.JobResult;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.Severity;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.repository.ParticipantRepository;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.AfterEach;
@@ -149,7 +150,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
 
     /**
      * On the sstr path a subject is lost because its patient-mapping id is not in the sstr file; the
-     * warning must say so.
+     * issue must say so. Every consent group still matched a participant, so it is only info.
      */
     @Test
     void sstr_study_reports_ids_missing_from_the_sstr_file_as_such() throws IOException {
@@ -165,18 +166,49 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-sstr-unresolved");
 
-        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 1L);
         assertThat(result.getOutputValidation().getIssues())
                 .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
                 .singleElement()
                 .satisfies(i -> {
+                    assertThat(i.severity()).isEqualTo(Severity.INFO);
                     assertThat(i.message()).contains("could not be resolved via the sstr file");
                     assertThat(i.context())
                             .containsEntry("studyId", "phs001412")
                             .containsEntry("path", "sstr")
                             .containsEntry("count", 1L)
                             .containsEntry("firstOldHpdsIds", List.of("1002"));
+                });
+    }
+
+    /**
+     * A consent group none of the patient mapping matched points at mismatched ids, so the subjects
+     * without consent are a warning. The SSTR names its consent column consent_code.
+     */
+    @Test
+    void sstr_consent_group_matching_no_patient_mapping_row_is_a_warning() throws IOException {
+        managedInputs("GRU,phs001412,Yes");
+        String base = baseUri(Map.of(
+                "phs001412/rawData/phs001412.v1_telemetry_report.tsv", """
+                SUBJECT_ID\tSAMPLE_ID\tconsent_code\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
+                SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
+                SUBJ2\tSAMP2\t2\tHMB\tphs001412.v1.p2.c1\tphs001412.v1.p2.s1
+                """,
+                "phs001412/legacy/data/GRU_PatientMapping.v2.csv",
+                "phs001412.v1.p1.c1,GRU,1001\n" + "NOT_IN_SSTR,GRU,1002\n"));
+
+        JobResult result = executor.run(job, Map.of("data-folder", base), "it-sstr-unmatched-consent");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(countWhere("consents", "study_id = ? AND consent_code = '2'", "phs001412")).isEqualTo(1);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.severity()).isEqualTo(Severity.WARNING);
+                    assertThat(i.message()).contains("no participant matched consent(s) [2]");
+                    assertThat(i.context()).containsEntry("unmatchedConsents", List.of("2"));
                 });
     }
 
@@ -187,7 +219,7 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.SAMPLE_MULTI_NAME, ParticipantsMigrationJobTest.SAMPLE_MULTI,
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
-                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\nS2,FHS,9002\n"));
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n1002,FHS,9002\n"));
 
         JobResult result = executor.run(job, Map.of("data-folder", base), "it-multi");
 
@@ -279,10 +311,13 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
         managedInputs(
                 "FHS,phs000007,Yes",
                 "MISSING,phs000009,Yes");
+        // phs000009 has participant files but no patient mapping: a failure, not a skip.
         String base = baseUri(Map.of(
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME, ParticipantsMigrationJobTest.SUBJECT_MULTI,
                 "phs000007/rawData/" + ParticipantsMigrationJobTest.DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT,
-                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n"));
+                "phs000007/legacy/data/FHS_PatientMapping.v2.csv", "1001,FHS,9001\n",
+                "phs000009/rawData/" + ParticipantsMigrationJobTest.SUBJECT_MULTI_NAME.replace("phs000007", "phs000009"),
+                ParticipantsMigrationJobTest.SUBJECT_MULTI));
 
         JobResult result = executor.run(job,
                 Map.of("data-folder", base), "it-isolation");

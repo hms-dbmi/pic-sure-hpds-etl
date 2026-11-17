@@ -148,7 +148,20 @@ validate-tf:
 plan:
 	$(TF) -chdir=$(TF_DIR) plan -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS))
 
+# Clears the run's report prefix first. The runner only adds to it, and a run id can repeat (the
+# pipelines derive it from the Jenkins build tag, which a recreated job reuses), so an earlier run's
+# reports would otherwise be fetched, validated and copied as this run's. Not when the run resumes
+# from that same prefix (participants-migration --resume-from), which is what it reads.
 apply:
+	@if [[ -n "$${TF_VAR_run_id:-}" ]]; then \
+		prefix="s3://$(STACK_S3_BUCKET)/etl-runner/reports/$(NAME)/$${TF_VAR_run_id}/"; \
+		if [[ "$${TF_VAR_resume_from_run_id:-}" == "$${TF_VAR_run_id}" ]]; then \
+			echo "Not clearing $$prefix: this run resumes from it"; \
+		else \
+			echo "Clearing $$prefix (reports of an earlier run with this run id)"; \
+			aws s3 rm "$$prefix" --recursive --region $(AWS_REGION) --only-show-errors; \
+		fi; \
+	fi
 	$(TF) -chdir=$(TF_DIR) apply -var-file=$(ENV_TFVARS) -var-file=$(notdir $(TFVARS)) --auto-approve
 
 output:

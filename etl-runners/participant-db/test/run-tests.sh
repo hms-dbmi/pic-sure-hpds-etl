@@ -138,6 +138,34 @@ start_keeps_a_clean_running_db_and_refreshes_its_host() {
     check [ "$(role_password)" == abc123 ]
 }
 
+start_upgrades_the_schema_of_a_kept_db() {
+    given_running_db; given_live_state clean
+    run_start
+    expect_rc 0
+    expect_out "Plan: keep"
+    # schema.sql itself, which only adds what is missing; a current samples table is kept.
+    check grep -q "CREATE TABLE IF NOT EXISTS samples" "$STUB_STATE/psql.log"
+    refute grep -q "DROP TABLE samples" "$STUB_STATE/psql.log"
+}
+
+start_drops_and_recreates_a_samples_table_without_study_id() {
+    given_running_db; given_live_state clean
+    echo old > "$STUB_STATE/samples_shape"
+    run_start
+    expect_rc 0
+    expect_out "The samples table predates per-study samples (no study_id): dropping it"
+    check grep -q "DROP TABLE samples;" "$STUB_STATE/psql.log"
+    check grep -q "CREATE TABLE IF NOT EXISTS samples" "$STUB_STATE/psql.log"
+}
+
+start_fails_when_the_schema_upgrade_fails() {
+    given_running_db; given_live_state clean
+    echo 3 > "$STUB_STATE/psql_rc"
+    run_start
+    expect_rc 1
+    expect_out "could not bring the etl schema up to schema.sql"
+}
+
 start_reissues_a_password_when_the_saved_one_is_stale() {
     given_running_db; given_live_state clean
     echo other > "$STUB_STATE/app_password"

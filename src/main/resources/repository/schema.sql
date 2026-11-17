@@ -36,11 +36,18 @@ CREATE INDEX IF NOT EXISTS ix_consents_hpds_id ON consents (hpds_id);
 CREATE INDEX IF NOT EXISTS ix_consents_study_id ON consents (study_id);
 
 -- Table 3: samples
--- Maps an HPDS id to potentially many source_sample_id/sample_source pairs.
+-- Maps an HPDS id to potentially many source_sample_id/sample_source pairs, each attributed to
+-- the study whose load wrote it. One participant (one dbGaP subject) may be in several studies,
+-- and each study's genomic artifacts must list only its own samples, so lookups filter on
+-- study_id, never on the participant's consents. A samples table from before this column existed
+-- is dropped and recreated empty by participant-db-start (etl-runners/participant-db/lib.sh).
 CREATE TABLE IF NOT EXISTS samples (
     hpds_id          BIGINT NOT NULL,
+    study_id         TEXT NOT NULL,
     source_sample_id TEXT NOT NULL,
     sample_source    TEXT NOT NULL,
-    CONSTRAINT uq_samples UNIQUE (hpds_id, source_sample_id, sample_source)
+    CONSTRAINT uq_samples_study UNIQUE (hpds_id, study_id, source_sample_id, sample_source)
 );
 CREATE INDEX IF NOT EXISTS ix_samples_hpds_id ON samples (hpds_id);
+-- Every study load purges the study's samples, and every genomic job reads them by study.
+CREATE INDEX IF NOT EXISTS ix_samples_study_id ON samples (study_id);

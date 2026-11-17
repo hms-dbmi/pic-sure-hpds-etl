@@ -104,7 +104,7 @@ The permanent orchestrator's stage logic is in `etl-runners/common/orchestrator.
             ▸ Provision (require-db.sh, terraform apply) ▸ Monitor ▸ Fetch reports ▸ Validate
             post: terraform destroy, archive reports
   post { always }: build job: participant-db-backup    PROMOTE_BACKUP = build SUCCESS/UNSTABLE (DB stays up)
-                   permanent: pipeline-report           downstream-artifacts/pipeline-report/ + S3
+                   pipeline-report / migration-report  downstream-artifacts/<report>/ + S3
 ```
 
 Build and test run once in the orchestrator as the gate for the whole run. Downstream jobs are
@@ -304,7 +304,7 @@ Validators never abort on the first failure, so one console read shows everythin
 | Terraform ≥ 1.3        | provisions runners (`common.mk` installs 1.9.8 if missing)                |
 | AWS CLI v2             | image upload, report sync, SSM, EC2 describe                             |
 | `jq`                   | report and sentinel parsing                                              |
-| `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module |
+| `python3`              | the migration pre-flight parses the study-list CSV with its `csv` module; the end-of-run reports |
 | `bdc-etl-jenkins-role` | the agent's own role; it does all AWS work as this role (no profiles)    |
 
 ### Jenkins Plugins
@@ -486,7 +486,8 @@ Run `hpds-etl-pipeline` with `STUDY_ID` blank and `MANAGED_INPUTS` set. Every st
 the SSTR loads sequentially (or `STUDY_CONCURRENCY` at once with `PARALLEL_STUDY_LOADS`), the
 per-study allConcepts always `STUDY_CONCURRENCY` at once, largest study first, with a timeout
 scaled to its decoded data. Each study's SSTR is discovered under `{DATA_ROOT}/{study_id}/rawData/` as
-`sstr_{study_id}.{v}.txt` (case-insensitive; `BDC-ingestion-only__sstr_*` also accepted) — the
+`sstr_{study_id}.{v}.txt` (case-insensitive; `{study_id}*telemetry_report.tsv` and
+`BDC-ingestion-only__sstr_*` also accepted) — the
 same rule `participants-migration` uses. Its per-study allConcepts inputs are
 `{DATA_ROOT}/{study_id}/decoded_data/` and `{DATA_ROOT}/{study_id}/mappings/mapping2.csv`
 (`DECODED_DATA_DIR` / `CONCEPT_MAPPING_FILE`). All three are probed in parallel before anything is
@@ -655,7 +656,7 @@ etl-runners/
 │  └─ test/                     run-tests.sh + stub docker/aws
 ├─ participants-migration/            TEMPORARY
 ├─ split-allconcepts/                 TEMPORARY
-├─ migration-report/                  TEMPORARY: the migration orchestrator's final report (no runner)
+├─ migration-report/                  TEMPORARY: the migration orchestrator's final report (no runner; + test/)
 ├─ sstr-populate-rds-participants/    PERMANENT
 ├─ generate-global-all-concepts/      PERMANENT
 ├─ create-vcf-indexes/                PERMANENT

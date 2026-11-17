@@ -99,9 +99,10 @@ with open(sys.argv[1], newline="", encoding="utf-8-sig") as fh:
         sid = (row.get(SID) or "").strip()
         if not abv or not sid:
             continue
-        # Mirrors ParticipantsMigrationJob.parseReady exactly.
+        # Mirrors ParticipantsMigrationJob: ready, and not already marked processed.
         ready = (row.get(READY) or "").strip().lower() in ("true", "yes", "1")
-        print(f"{abv}\t{sid}\t{'ready' if ready else 'skip'}")
+        processed = (row.get(PROCESSED) or "").strip().lower() in ("true", "yes", "1")
+        print(f"{abv}\t{sid}\t{'processed' if ready and processed else 'ready' if ready else 'skip'}")
 PY
 ) || { fail "could not parse managed-inputs as CSV"; summary; exit 1; }
 
@@ -115,16 +116,20 @@ fi
 check "managed-inputs has the required columns" true
 
 READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
-check "at least one study is marked ready" test "$READY_COUNT" -gt 0
-note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process"
+PROCESSED_COUNT=$(awk -F'\t' '$3=="processed"' <<<"$STUDIES" | grep -c . || true)
+check "at least one study is marked ready and not yet processed" test "$READY_COUNT" -gt 0
+note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process and not yet processed"
+note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- not migrated"
 
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source; or
+#                                         {studyid}*telemetry_report.tsv)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
-#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
-# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict*.xml      (optional, fallback only;
+#                                         else {studyid}*Subject*data_dict*.xml)
+# A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 # Probing is two S3 round trips per study (~3s), and done one study at a time it took 28 minutes
 # for ~580 studies. probe_study runs PARALLELISM at once, each writing $PROBES/<n>; the results
@@ -143,16 +148,20 @@ probe_study() {
   mapping="$DATA_FOLDER/${sid}/legacy/data/${abv_upper}_PatientMapping.v2.csv"
 
   listing=$(uri_ls "$DATA_FOLDER/${sid}/rawData" 2>/dev/null || true)
-  # Three naming families, all the same NHLBI artifact (canonical sstr_*, legacy
-  # SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened copies); match
-  # case-insensitively, preferring the canonical name -- mirrors the job's discovery.
-  sstr_file=$(grep -iF "$sid" <<<"$listing" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$" \
-              | awk '{ key = (tolower($0) ~ /^sstr_[^_]/) ? 0 : 1; print key "\t" $0 }' | sort | head -1 | cut -f2- || true)
+  # Four naming families, all the same NHLBI artifact (canonical sstr_*, the alternative
+  # {sid}*telemetry_report.tsv, legacy SSTR__sstr_* and BDC-ingestion-only__sstr_* folder-flattened
+  # copies); match case-insensitively, preferring the canonical name, then the telemetry report --
+  # mirrors the job's discovery.
+  sstr_file=$( { grep -iF "$sid" <<<"$listing" | grep -iE "^(sstr_|bdc-ingestion-only__sstr_).*\.txt$";
+                 grep -iE "^${sid}.*telemetry_report\.tsv$" <<<"$listing"; } \
+              | awk '{ l = tolower($0); key = (l ~ /^sstr_[^_]/) ? 0 : (l ~ /telemetry_report\.tsv$/ ? 1 : 2); print key "\t" $0 }' \
+              | sort | head -1 | cut -f2- || true)
   # ParticipantsMigrationJob.isSubjectMultiFileFor / isSampleMultiFileFor / isSubjectDataDictFor.
   # Only presence matters here; when several match, the job picks the newest and reports it.
   subject_multi=$(grep -iE "^${sid}.*subject\.multi\.txt$" <<<"$listing" | head -1 || true)
   sample_multi=$(grep -iE "^${sid}.*sample\.multi\.txt$" <<<"$listing" | head -1 || true)
-  data_dict=$(grep -iE "^${sid}.*subject\.data_dict\.xml$" <<<"$listing" | head -1 || true)
+  data_dict=$(grep -iE "^${sid}.*subject\.data_dict.*\.xml$" <<<"$listing" | head -1 || true)
+  [[ -n "$data_dict" ]] || data_dict=$(grep -iE "^${sid}.*subject.*data_dict.*\.xml$" <<<"$listing" | head -1 || true)
   uri_exists "$mapping" && mapping_ok=1 || mapping_ok=0
 
   # Written whole, then renamed, so a probe that dies midway leaves no record at all.
@@ -169,11 +178,13 @@ fi
 
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv
-#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source)
+#         {base}/{studyId}/rawData/sstr_*{studyId}*.txt                 (preferred source; or
+#                                         {studyid}*telemetry_report.tsv)
 #         {base}/{studyId}/rawData/{studyid}*Subject.MULTI.txt           (fallback source)
 #         {base}/{studyId}/rawData/{studyid}*Sample.MULTI.txt            (optional, fallback only)
-#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict.xml       (optional, fallback only)
-# A study with neither an SSTR nor a Subject.MULTI fails at run time. That is a warning here,
+#         {base}/{studyId}/rawData/{studyid}*Subject.data_dict*.xml      (optional, fallback only;
+#                                         else {studyid}*Subject*data_dict*.xml)
+# A study with neither an SSTR nor a Subject.MULTI is skipped at run time. That is a warning here,
 # not a failure: the job still migrates every other study and reports the ones it could not.
 echo ""
 echo "  Per-study inputs:"
@@ -204,19 +215,24 @@ while IFS=$'\t' read -r abv sid state; do
     route="multi"
     note "$sid ($abv): no SSTR; will load from '$subject_multi'"
     [[ -z "$sample_multi" ]] && note "$sid ($abv): no Sample.MULTI file -- no samples will be loaded"
-    [[ -z "$data_dict" ]] && note "$sid ($abv): no Subject.data_dict.xml -- consent abbreviations will be blank"
+    [[ -z "$data_dict" ]] && warn "$sid ($abv): no Subject data dictionary -- consent abbreviations will be blank"
   else
     NO_SOURCE_STUDIES=$((NO_SOURCE_STUDIES + 1))
     route="none"
-    warn "$sid ($abv): no SSTR and no Subject.MULTI in $raw_data_dir -- this study will fail"
+    warn "$sid ($abv): no SSTR and no Subject.MULTI in $raw_data_dir -- this study will be skipped (not migrated)"
   fi
 
-  # Required on every route; it supplies the old-hpds-id -> new-hpds-id pairs.
-  check "$sid ($abv, $route): $mapping" test "$mapping_ok" = 1
+  # Required on every route that loads; it supplies the old-hpds-id -> new-hpds-id pairs. A study
+  # with no participant source is skipped before its mapping is read, so it needs none.
+  if [[ "$route" == none ]]; then
+    [[ "$mapping_ok" == 1 ]] || note "$sid ($abv): no patient mapping either ($mapping)"
+  else
+    check "$sid ($abv, $route): $mapping" test "$mapping_ok" = 1
+  fi
 done < "$READY_STUDIES"
 
 echo ""
 note "$SSTR_STUDIES study/studies will load from their SSTR, $MULTI_STUDIES from their MULTI files, "
-note "$NO_SOURCE_STUDIES have no participant source and will fail"
+note "$NO_SOURCE_STUDIES have no participant source and will be skipped"
 
 summary

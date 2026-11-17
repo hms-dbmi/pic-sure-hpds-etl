@@ -299,6 +299,10 @@ class AllConceptsDataGeneratorJobTest {
         JobResult result = executor.run(job, params(outputDir), "test-multi-mapping");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        // Two rows each, one participant per consent group.
+        assertThat(result.getMetrics())
+                .containsEntry("rowsPerConsent", Map.of("c1", 2L, "c2", 2L))
+                .containsEntry("participantsPerConsent", Map.of("c1", 1L, "c2", 1L));
 
         ArgumentCaptor<IoResolver.IoWriter> contentCaptor = ArgumentCaptor.forClass(IoResolver.IoWriter.class);
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);

@@ -454,17 +454,35 @@ SQL
             "SELECT count(*) FROM information_schema.schemata WHERE schema_name = '$DB_SCHEMA'" | tr -d '[:space:]')
         [[ "$has_schema" == 1 ]] || pdb_die "the restored dump has no '$DB_SCHEMA' schema (was it taken with --schema $DB_SCHEMA?)"
     fi
-    # A dump taken before ix_consents_study_id was added to schema.sql lacks it, and every study
-    # load's consents purge would then scan the whole table.
-    PDB_PSQL_DB="$DB_NAME" pdb_psql -c "SET ROLE \"$DB_USERNAME\";
-        CREATE INDEX IF NOT EXISTS ix_consents_study_id ON \"$DB_SCHEMA\".consents (study_id)" \
-        || pdb_die "could not create ix_consents_study_id"
+    pdb_upgrade_schema
     # Unqualified names resolve to the schema for the app role (the JAR also sets DB_SCHEMA).
     pdb_psql -c "ALTER ROLE \"$DB_USERNAME\" SET search_path TO \"$DB_SCHEMA\"" || pdb_die "could not set search_path"
     pdb_log "Row counts: $(PDB_PSQL_DB="$DB_NAME" pdb_psql -tA -F ' ' -c \
         "SELECT 'participants=' || (SELECT count(*) FROM \"$DB_SCHEMA\".participants),
                 'consents='     || (SELECT count(*) FROM \"$DB_SCHEMA\".consents),
                 'samples='      || (SELECT count(*) FROM \"$DB_SCHEMA\".samples)")"
+}
+
+# Brings a database restored from an older dump, or kept running from before a schema change, up
+# to schema.sql, by running schema.sql itself: every statement in it is CREATE ... IF NOT EXISTS, so
+# it adds only what is missing (a newer index, say). A samples table from before samples were
+# attributed to studies (no study_id) is dropped first, so schema.sql recreates it empty: which
+# study loaded its rows was never recorded, and every study load writes its samples again.
+pdb_upgrade_schema() {
+    local shape drop=""
+    shape=$(PDB_PSQL_DB="$DB_NAME" pdb_psql -tAc "SELECT CASE
+            WHEN to_regclass('\"$DB_SCHEMA\".samples') IS NULL THEN 'none'
+            WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = '$DB_SCHEMA'
+                         AND table_name = 'samples' AND column_name = 'study_id') THEN 'current'
+            ELSE 'old' END" </dev/null | tr -d '[:space:]') \
+        || pdb_die "could not read the shape of the samples table"
+    if [[ "$shape" == old ]]; then
+        pdb_log "The samples table predates per-study samples (no study_id): dropping it; schema.sql recreates it empty. Load every study again (participants-migration without RESUME_FROM_RUN_ID, or the SSTR loads) to refill it."
+        drop="DROP TABLE samples;"
+    fi
+    { echo "SET ROLE \"$DB_USERNAME\"; SET search_path TO \"$DB_SCHEMA\"; $drop"
+      cat "$PDB_DIR/../../src/main/resources/repository/schema.sql"; } \
+        | PDB_PSQL_DB="$DB_NAME" pdb_psql || pdb_die "could not bring the $DB_SCHEMA schema up to schema.sql"
 }
 
 # --------------------------------------------------------------------------- credentials

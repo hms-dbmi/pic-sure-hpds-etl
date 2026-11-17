@@ -59,9 +59,7 @@ class DbgapMultiFileReaderTest {
 
         assertThat(table.rowsRead()).isEqualTo(2);
         assertThat(table.consentColumn()).isEqualTo("CONSENT");
-        assertThat(table.subjectIdColumn()).isEqualTo("SUBJECT_ID");
         assertThat(table.consented()).containsOnlyKeys("1001", "1002");
-        assertThat(table.consented().get("1001").subjectId()).isEqualTo("S1");
         assertThat(table.consented().get("1002").consentCode()).isEqualTo("2");
         assertThat(table.issues()).isEmpty();
     }
@@ -75,7 +73,6 @@ class DbgapMultiFileReaderTest {
 
         assertThat(table.consentColumn()).isEqualTo(header);
         assertThat(table.consented().get("1001").consentCode()).isEqualTo("1");
-        assertThat(table.subjectIdColumn()).isEqualTo("SUBJID");
     }
 
     @Test
@@ -93,7 +90,6 @@ class DbgapMultiFileReaderTest {
         SubjectTable table = reader.readSubjects(path);
 
         assertThat(table.consented()).containsOnlyKeys("1001");
-        assertThat(table.consented().get("1001").subjectId()).isEqualTo("S1");
     }
 
     @Test
@@ -105,9 +101,7 @@ class DbgapMultiFileReaderTest {
         SubjectTable table = reader.readSubjects(path);
 
         assertThat(table.consentColumn()).isEqualTo("consent_code");
-        assertThat(table.subjectIdColumn()).isEqualTo("submitted_subject_id");
         assertThat(table.consented().get("1001").consentCode()).isEqualTo("1");
-        assertThat(table.consented().get("1001").subjectId()).isEqualTo("S1");
     }
 
     @Test
@@ -137,15 +131,13 @@ class DbgapMultiFileReaderTest {
     }
 
     @Test
-    void records_the_own_subject_ids_of_consent_zero_subjects() {
-        String path = file("s.txt", "dbGaP_Subject_ID\tSUBJECT_ID\tCONSENT\n1001\tS1\t1\n1002\tS2\t0\n"
-                + "1003\tS3\t0\n1003\tS3\t1\n");
+    void a_subject_consented_on_a_later_row_is_not_counted_as_not_consented() {
+        String path = file("s.txt", "dbGaP_Subject_ID\tCONSENT\n1001\t1\n1002\t0\n1003\t0\n1003\t1\n");
 
         SubjectTable table = reader.readSubjects(path);
 
-        // 1003 is consented on a later row, so only S2 counts as not consented.
         assertThat(table.notConsented()).containsExactly("1002");
-        assertThat(table.notConsentedSubjectIds()).containsExactly("S2");
+        assertThat(table.consented()).containsOnlyKeys("1001", "1003");
     }
 
     @Test
@@ -199,13 +191,14 @@ class DbgapMultiFileReaderTest {
     }
 
     @Test
-    void reports_a_missing_subject_id_column_as_info() {
-        String path = file("s.txt", "dbGaP_Subject_ID\tCONSENT\n1001\t1\n");
+    void a_file_without_the_study_subject_id_loads_with_no_issues() {
+        // As in phs001368's TOPMed_WGS_CHS_VTE_Subject.MULTI.txt (Individual_ID, not SUBJECT_ID).
+        String path = file("s.txt", "dbGaP_Subject_ID\tIndividual_ID\tCONSENT\tSEX\n1001\t100051\t1\t2\n");
 
         SubjectTable table = reader.readSubjects(path);
 
-        assertThat(table.subjectIdColumn()).isNull();
-        assertThat(issue(table.issues(), "NO_SUBJECT_ID_COLUMN").severity()).isEqualTo(Severity.INFO);
+        assertThat(table.consented()).containsOnlyKeys("1001");
+        assertThat(table.issues()).isEmpty();
     }
 
     @Test

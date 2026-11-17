@@ -180,6 +180,14 @@ live database *dirty* ("run … in progress"), whether it kept or replaced it; t
 *clean*, keeps one restored from `participant_db_not_promoted.tar` because of `continue` *dirty*,
 and leaves a kept database's state as it was.
 
+Every start, whether it kept or replaced the database, then brings the schema up to `schema.sql` by
+running it (`pdb_upgrade_schema`): every statement in it is `CREATE ... IF NOT EXISTS`, so it adds
+only what is missing, such as `ix_consents_study_id`. A `samples` table from before samples were
+attributed to studies (no `study_id` column) is **dropped and recreated empty** first -- which study
+loaded its rows was never recorded -- and the start says so. Load every study again afterwards
+(`participants-migration` without `RESUME_FROM_RUN_ID`, which copies a study instead of loading it,
+or the SSTR loads) to refill it.
+
 `live_state.json` missing means "no recorded state" (a kept database is then recorded clean). Any
 other S3 error reading it, or a record with no known state, stops the start: guessing could erase a
 *dirty* or *replacing* marker.

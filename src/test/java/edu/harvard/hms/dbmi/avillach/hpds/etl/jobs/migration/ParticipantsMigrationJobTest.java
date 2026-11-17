@@ -17,6 +17,8 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -278,6 +280,24 @@ class ParticipantsMigrationJobTest {
         assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L);
     }
 
+    /** A study already marked "Data Processed" is not touched, even with no files at all. */
+    @Test
+    void skips_studies_already_marked_processed() {
+        String managed = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process,Data Processed\n"
+                        + "ABV2,phs000002,Yes,No\n"
+                        + "DONE,phs000003,Yes,Yes\n");
+        String folder = baseUri(Map.of(
+                "phs000002/rawData/sstr_phs000002.v1.txt", SSTR,
+                "phs000002/legacy/data/ABV2_PatientMapping.v2.csv", "1001,ABV2,2002\n"));
+
+        JobResult result = executor.run(newJob(managed), Map.of("data-folder", folder), "unit-processed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L)
+                .containsEntry("skippedStudyIds", List.of());
+    }
+
     @Test
     void rejects_parallelism_outside_one_to_eight() {
         for (String bad : List.of("0", "9", "x")) {
@@ -304,6 +324,29 @@ class ParticipantsMigrationJobTest {
 
         assertThat(store.purgedStudies).containsExactly("phs000002", "phs000001");
         assertThat(result.getMetrics().get("sstrStudyIds")).isEqualTo(List.of("phs000001", "phs000002"));
+    }
+
+    static final String SSTR_WITHOUT_SAMPLE_ID_COLUMN = """
+            SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id
+            S1\tNWD1\t1\tHMB-IRB-MDS\t1001
+            """;
+
+    @ParameterizedTest
+    @CsvSource({"P, INFO, SUCCESS", "P/G, WARNING, SUCCESS_WITH_WARNINGS", "G, WARNING, SUCCESS_WITH_WARNINGS"})
+    void an_sstr_without_dbgap_sample_id_loads_and_is_only_a_warning_for_a_genomic_study(
+            String dataType, Severity severity, ExitCode exitCode) {
+        Map<String, String> files = Map.of(
+                STUDY + "/rawData/" + SSTR_NAME, SSTR_WITHOUT_SAMPLE_ID_COLUMN,
+                STUDY + "/legacy/data/" + ABV + "_PatientMapping.v2.csv", "1001,FHS,9001\n");
+        String managed = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process,Data Type\n"
+                        + ABV + "," + STUDY + ",Yes," + dataType + "\n");
+
+        JobResult result = executor.run(newJob(managed), Map.of("data-folder", baseUri(files)), "unit");
+
+        assertThat(result.getExitCode()).isEqualTo(exitCode);
+        assertThat(sourcesRow(STUDY)).containsEntry("source", "sstr").containsEntry("mapping_rows", "1");
+        assertThat(issueRow(STUDY, "NO_SAMPLE_ID_COLUMN")).containsEntry("severity", severity.name());
     }
 
     @Test
@@ -524,11 +567,27 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void an_sstr_named_as_a_telemetry_report_is_loaded_like_one() {
+        String telemetry = STUDY + ".v33_telemetry_report.tsv";
+        JobResult result = runOneStudy(Map.of(
+                telemetry, SSTR,
+                SUBJECT_MULTI_NAME, SUBJECT_MULTI), "1001,FHS,9001\n");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("sstrStudyIds", List.of(STUDY));
+        assertThat(store.consentsFor(STUDY)).containsExactly(
+                new Consent(store.hpdsId("DBGap", "1001"), STUDY, "1", "HMB-IRB-MDS"));
+        assertThat(sourcesRow(STUDY))
+                .containsEntry("sstr_file", telemetry)
+                .containsEntry("sstr_status", "used");
+    }
+
+    @Test
     void falls_back_to_multi_when_there_is_no_sstr() throws IOException {
         JobResult result = runOneStudy(Map.of(
                 SUBJECT_MULTI_NAME, SUBJECT_MULTI,
                 SAMPLE_MULTI_NAME, SAMPLE_MULTI,
-                DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT), "1001,FHS,9001\nS2,FHS,9002\n");
+                DATA_DICT_NAME, DbgapMultiFileReaderTest.DATA_DICT), "1001,FHS,9001\n1002,FHS,9002\n");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics())
@@ -542,12 +601,11 @@ class ParticipantsMigrationJobTest {
         assertThat(store.consentsFor(STUDY)).containsExactly(
                 new Consent(p1, STUDY, "1", "HMB-IRB-MDS"),
                 new Consent(p2, STUDY, "2", "DS-CVD-IRB-NPU-MDS"));
-        assertThat(store.samplesFrom("DBGap")).containsExactly(new Sample(p1, "5001", "DBGap"), new Sample(p2, "5002", "DBGap"));
+        assertThat(store.samplesFrom("DBGap")).containsExactly(new Sample(p1, STUDY, "5001", "DBGap"), new Sample(p2, STUDY, "5002", "DBGap"));
         assertThat(store.samplesFrom("submitted")).containsExactly(
-                new Sample(p1, "NWD1", "submitted"), new Sample(p2, "NWD2", "submitted"));
+                new Sample(p1, STUDY, "NWD1", "submitted"), new Sample(p2, STUDY, "NWD2", "submitted"));
         assertThat(store.participantIds).doesNotContainKey("DBGap|1003");
 
-        // Patient mapping ids resolve by dbGaP id (1001) or by the study's own SUBJECT_ID (S2).
         assertThat(Files.readString(reportsDir.resolve(STUDY + "_hpds_id_mapping.csv"))).isEqualTo(
                 "old_hpds_id,new_hpds_id,common_dbgap_id\n9001," + p1 + ",1001\n9002," + p2 + ",1002\n");
 
@@ -621,6 +679,19 @@ class ParticipantsMigrationJobTest {
         assertThat(report(ParticipantsMigrationJob.SUMMARY_REPORT))
                 .contains("| Skipped: no participant files | 1 |")
                 .contains("| Failed: no usable participant source | 0 |");
+    }
+
+    /** Such a study often has no patient mapping either; it is still skipped, not failed. */
+    @Test
+    void skips_a_study_with_no_participant_files_and_no_patient_mapping() {
+        JobResult result = run(Map.of(STUDY + "/rawData/" + SAMPLE_MULTI_NAME, SAMPLE_MULTI), ABV + "," + STUDY + ",Yes");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
+        assertThat(result.getMetrics())
+                .containsEntry("failedStudies", 0L)
+                .containsEntry("skippedStudyIds", List.of(STUDY));
+        assertThat(result.getOutputValidation().getIssues()).noneMatch(i -> i.code().equals("STUDY_FAILED"));
+        assertThat(issueCodes(STUDY)).contains("NO_PARTICIPANT_FILES");
     }
 
     @Test
@@ -755,7 +826,7 @@ class ParticipantsMigrationJobTest {
 
     @Test
     void patient_mapping_rows_for_consent_zero_subjects_are_reported_not_mapped() {
-        // 1003 by its dbGaP id, S3 (also subject 1003) by the study's own SUBJECT_ID.
+        // 1003 is consent 0. S3 is 1003's own SUBJECT_ID, which is never matched: only dbGaP ids are.
         JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI),
                 "1001,FHS,9001\n1003,FHS,9003\nS3,FHS,9033\nNOPE,FHS,9999\n");
 
@@ -765,15 +836,46 @@ class ParticipantsMigrationJobTest {
                 .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
                 .singleElement()
                 .satisfies(i -> {
-                    assertThat(i.message()).contains("could not be resolved via the multi file");
+                    // Consent 2's only subject (1002) is not in the patient mapping.
+                    assertThat(i.severity()).isEqualTo(Severity.WARNING);
+                    assertThat(i.message()).contains("could not be resolved via the multi file")
+                            .contains("no participant matched consent(s) [2]");
                     assertThat(i.context()).containsEntry("path", "multi")
-                            .containsEntry("firstOldHpdsIds", List.of("9003", "9033", "9999"));
+                            .containsEntry("firstOldHpdsIds", List.of("9003", "9033", "9999"))
+                            .containsEntry("unmatchedConsents", List.of("2"));
                 });
         assertThat(issueRow(STUDY, "PATIENT_MAPPING_NOT_CONSENTED"))
-                .containsEntry("severity", "INFO").containsEntry("count", "2").containsEntry("examples", "9003 9033");
-        assertThat(issueRow(STUDY, "PATIENT_MAPPING_UNRESOLVED"))
-                .containsEntry("severity", "WARNING").containsEntry("count", "1").containsEntry("examples", "9999");
+                .containsEntry("severity", "INFO").containsEntry("count", "1").containsEntry("examples", "9003");
+        // Rows matching no subject in the file are expected (shared or stale mappings): no issue.
+        assertThat(issueCodes(STUDY)).doesNotContain("PATIENT_MAPPING_UNRESOLVED");
         assertThat(sourcesRow(STUDY)).containsEntry("unresolved_mapping_rows", "3");
+    }
+
+    @Test
+    void subjects_without_consent_are_only_info_when_every_consent_matched_a_participant() {
+        JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI),
+                "1001,FHS,9001\n1002,FHS,9002\n1003,FHS,9003\nNOPE,FHS,9999\n");
+
+        assertThat(result.getMetrics()).containsEntry("subjectsWithoutConsent", 2L);
+        assertThat(result.getOutputValidation().getIssues())
+                .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
+                .singleElement()
+                .satisfies(i -> {
+                    assertThat(i.severity()).isEqualTo(Severity.INFO);
+                    assertThat(i.message()).doesNotContain("no participant matched");
+                    assertThat(i.context()).containsEntry("unmatchedConsents", List.of());
+                });
+    }
+
+    @Test
+    void a_study_record_without_per_consent_matches_reports_every_consent_unmatched() {
+        ParticipantsMigrationJob.SourceUsage usage = new ParticipantsMigrationJob.SourceUsage(null, "used", null, null, null, null, "not attempted", null,
+                Map.of("1", 3L, "2", 0L), null, List.of());
+        assertThat(ParticipantsMigrationJob.unmatchedConsents(usage)).containsExactly("1");
+
+        ParticipantsMigrationJob.SourceUsage matched = new ParticipantsMigrationJob.SourceUsage(null, "used", null, null, null, null, "not attempted", null,
+                Map.of("1", 3L, "3", 2L), Map.of("1", 1L), List.of());
+        assertThat(ParticipantsMigrationJob.unmatchedConsents(matched)).containsExactly("3");
     }
 
     @Test
@@ -868,6 +970,24 @@ class ParticipantsMigrationJobTest {
     }
 
     @Test
+    void sstr_discovery_accepts_a_telemetry_report_named_for_the_study() {
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("phs000200.v13_telemetry_report.tsv", "phs000200")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("PHS000200_Telemetry_Report.TSV", "phs000200")).isTrue();
+        // must start with the study id, and be the .tsv
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("x_phs000200_telemetry_report.tsv", "phs000200")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("phs000200_telemetry_report.tsv", "phs000999")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSstrFileFor("phs000200_telemetry_report.txt", "phs000200")).isFalse();
+    }
+
+    @Test
+    void the_canonical_sstr_is_preferred_then_the_telemetry_report_then_flattened_copies() {
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("sstr_phs000200.v13.txt")).isEqualTo(0);
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("phs000200.v13_telemetry_report.tsv")).isEqualTo(1);
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("SSTR__sstr_phs000200.v13.txt")).isEqualTo(2);
+        assertThat(ParticipantsMigrationJob.sstrNamePreference("BDC-ingestion-only__sstr_phs000200.v13.txt")).isEqualTo(2);
+    }
+
+    @Test
     void canonical_sstr_name_is_preferred_over_flattened_copies() {
         assertThat(ParticipantsMigrationJob.isCanonicalSstrName("sstr_phs000557.v8.txt")).isTrue();
         assertThat(ParticipantsMigrationJob.isCanonicalSstrName("SSTR__phs000557.v7.txt")).isFalse();
@@ -890,6 +1010,24 @@ class ParticipantsMigrationJobTest {
                 "phs000007.v33.pht001416.v1.p14.FHS_Sample_Attributes.MULTI.txt", "phs000007")).isFalse();
 
         assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(DATA_DICT_NAME, "phs000007")).isTrue();
+        // Subject.data_dict*.xml: other text may follow data_dict.
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.FHS_Subject.data_dict_2019_01_15.xml", "phs000007")).isTrue();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.p14.FHS_Subject_Consent.v2.data_dict.XML", "phs000007")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000008.v1.pht000182.v14.FHS_Subject.data_dict.xml", "phs000007")).isFalse();
+        assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.FHS_Subject.data_dict.xml.gz", "phs000007")).isFalse();
+
+        // The fallback, Subject*data_dict*.xml: other text may also sit between Subject and data_dict.
+        assertThat(ParticipantsMigrationJob.isLooseSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.p14.FHS_Subject_Consent.v2.data_dict.XML", "phs000007")).isTrue();
+        assertThat(ParticipantsMigrationJob.isLooseSubjectDataDictFor(DATA_DICT_NAME, "phs000007")).isTrue();
+        assertThat(ParticipantsMigrationJob.isLooseSubjectDataDictFor(
+                "phs000007.v33.pht000182.v14.FHS.data_dict.Subject.xml", "phs000007")).isFalse();
+        assertThat(ParticipantsMigrationJob.isLooseSubjectDataDictFor(
+                "phs000007.v33.pht001415.v1.FHS_Sample.data_dict.xml", "phs000007")).isFalse();
         assertThat(ParticipantsMigrationJob.isSubjectDataDictFor(
                 "phs000007.v33.pht001415.v1.FHS_Sample.data_dict.xml", "phs000007")).isFalse();
     }
@@ -917,5 +1055,18 @@ class ParticipantsMigrationJobTest {
                 .containsExactly("phs000007.v33.pht000182.v14.FHS_Subject.data_dict.xml");
         // No pairing possible: every dictionary is a candidate, newest first.
         assertThat(ParticipantsMigrationJob.dataDictCandidates(names, "phs000007", null)).hasSize(2);
+    }
+
+    @Test
+    void subject_data_dict_is_preferred_and_the_wider_pattern_is_only_a_fallback() {
+        String exact = "phs000007.v33.pht000182.v14.FHS_Subject.data_dict_2019.xml";
+        String phenotypes = "phs000007.v33.pht000182.v14.FHS_Subject_Phenotypes.data_dict.xml";
+
+        assertThat(ParticipantsMigrationJob.dataDictCandidates(List.of(phenotypes, exact), "phs000007",
+                SUBJECT_MULTI_NAME)).containsExactly(exact);
+        assertThat(ParticipantsMigrationJob.dataDictCandidates(List.of(phenotypes), "phs000007",
+                SUBJECT_MULTI_NAME)).containsExactly(phenotypes);
+        assertThat(ParticipantsMigrationJob.dataDictCandidates(List.of(), "phs000007", SUBJECT_MULTI_NAME))
+                .isEmpty();
     }
 }

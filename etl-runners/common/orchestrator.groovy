@@ -67,7 +67,8 @@ def resolveStudies() {
         def sid = params.STUDY_ID.trim()
         def row = studies.find { it.studyId == sid }
         // An explicit reload: the ready/processed flags do not apply.
-        selected = [[studyId: sid, abv: row?.abv ?: '', processed: false, input: params.INPUT?.trim() ?: '']]
+        selected = [[studyId: sid, abv: row?.abv ?: '', genomic: row?.genomic, processed: false,
+                     input: params.INPUT?.trim() ?: '']]
     } else {
         selected = studies.findAll { it.ready }
         if (selected.isEmpty()) {
@@ -201,13 +202,13 @@ def probeInputs(List studies, boolean single) {
         def studyBase = "${dataRoot}/${s.studyId}"
         def reasons = []
         if (!s.input) {
-            // Staged files keep NHLBI's own name (sstr_phs######.v#.txt), so the SSTR cannot be
+            // Staged files keep NHLBI's own name (sstr_phs######.v#.txt, or phs######*telemetry_report.tsv), so the SSTR cannot be
             // derived from the study id alone: picked the way participants-migration does.
             def file = pickSstr(p.sstr_candidates.split('/') as List, s.studyId)
             if (file) {
                 s.input = "${studyBase}/rawData/${file}"
             } else {
-                reasons << "no sstr_${s.studyId}.*.txt in ${studyBase}/rawData/"
+                reasons << "no sstr_${s.studyId}.*.txt or ${s.studyId}*telemetry_report.tsv in ${studyBase}/rawData/"
             }
         }
         // The generator's inputs, checked here so a missing one is caught before anything is
@@ -579,10 +580,19 @@ def packageRunnerImage() {
     sh "make -C etl-runners/sstr-populate-rds-participants package IMAGE_TAR=${env.RUNNER_IMAGE_TAR}"
 }
 
+// The runner image this build packaged, or '' when it packaged none. A build restarted from a
+// later stage inherits the original build's RUNNER_IMAGE_TAR, but that build's post already
+// deleted the tarball: the image name carries the build tag, so an inherited one never matches,
+// and each downstream build packages its own.
+def ownRunnerImage() {
+    def own = "hpds-etl-runner-${runTag()}.tar.gz"
+    return env.RUNNER_IMAGE_TAR == own ? own : ''
+}
+
 // Deletes the shared runner image: the tarball in S3, the local one, and the image in this host's
 // podman storage. Every downstream build that used it has finished by now.
 def removeRunnerImage() {
-    if (!env.RUNNER_IMAGE_TAR) {
+    if (!ownRunnerImage()) {
         return
     }
     sh(returnStatus: true, script: '''
@@ -634,6 +644,13 @@ def runTag() {
 // id. Throws IllegalArgumentException on a header missing any of `required` (naming what it found)
 // or a ready/processed value that is not Yes/No.
 @NonCPS
+// Whether a managed-inputs Data Type marks a genomic study: it includes G, as in P/G. The same rule
+// as ManagedInputRow.isGenomic.
+@NonCPS
+static boolean isGenomic(String dataType) {
+    return (dataType ?: '').split('/').any { it.trim().equalsIgnoreCase('G') }
+}
+
 static List<Map> parseManagedInputs(String text, List<String> required) {
     List<String> header = null
     def rows = []
@@ -649,10 +666,12 @@ static List<Map> parseManagedInputs(String text, List<String> required) {
             }
             continue
         }
-        def col = { String name -> int i = header.indexOf(name); i < cols.size() ? cols[i].trim() : '' }
+        def col = { String name -> int i = header.indexOf(name); i >= 0 && i < cols.size() ? cols[i].trim() : '' }
         def studyId = col('Study Identifier')
         if (!studyId) continue
-        rows << [studyId  : studyId, abv: col('Study Abbreviated Name'),
+        // 'Data Type' is optional: without it, whether a study is genomic is unknown (null).
+        def genomic = header.contains('Data Type') ? isGenomic(col('Data Type')) : null
+        rows << [studyId  : studyId, abv: col('Study Abbreviated Name'), genomic: genomic,
                  ready    : parseYesNo(col('Data is ready to process'), 'Data is ready to process', studyId),
                  processed: parseYesNo(col('Data Processed'), 'Data Processed', studyId)]
     }
@@ -728,19 +747,25 @@ static List largestFirst(List studies) {
 }
 
 // Picks a study's SSTR from the file names in its rawData folder, by the same rule as
-// ParticipantsMigrationJob.isSstrFileFor / isCanonicalSstrName: a .txt naming the study, starting
-// sstr_ or bdc-ingestion-only__sstr_ (case-insensitive), the canonical sstr_{phs}.{v}.txt preferred
-// over folder-flattened copies. Null when there is none.
+// ParticipantsMigrationJob.isSstrFileFor / sstrNamePreference: a .txt naming the study, starting
+// sstr_ or bdc-ingestion-only__sstr_, or a {phs}*telemetry_report.tsv (case-insensitive). The
+// canonical sstr_{phs}.{v}.txt is preferred, then the telemetry report, then folder-flattened
+// copies. Null when there is none.
 @NonCPS
 static String pickSstr(List names, String studyId) {
     def sid = studyId.toLowerCase()
+    def telemetry = { String l -> l.startsWith(sid) && l.endsWith('telemetry_report.tsv') }
     def matches = names.collect { "${it}".trim() }.findAll { n ->
         def l = n.toLowerCase()
-        l.endsWith('.txt') && l.contains(sid) && (l.startsWith('sstr_') || l.startsWith('bdc-ingestion-only__sstr_'))
+        (l.endsWith('.txt') && l.contains(sid) && (l.startsWith('sstr_') || l.startsWith('bdc-ingestion-only__sstr_'))) ||
+            telemetry(l)
     }
     if (!matches) return null
-    def canonical = { String n -> def l = n.toLowerCase(); l.startsWith('sstr_') && !l.startsWith('sstr__') }
-    return matches.sort { a, b -> (canonical(a) == canonical(b)) ? a <=> b : (canonical(a) ? -1 : 1) }[0]
+    def rank = { String n ->
+        def l = n.toLowerCase()
+        (l.startsWith('sstr_') && !l.startsWith('sstr__')) ? 0 : (telemetry(l) ? 1 : 2)
+    }
+    return matches.sort { a, b -> rank(a) <=> rank(b) ?: a <=> b }[0]
 }
 
 return this

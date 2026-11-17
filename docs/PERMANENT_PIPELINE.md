@@ -190,8 +190,9 @@ rule `participants-migration` uses:
 
 - a `.txt` whose name contains the study id and starts with `sstr_` or
   `bdc-ingestion-only__sstr_` (case-insensitive);
-- the canonical `sstr_{phs}.{v}.txt` is preferred over folder-flattened copies
-  (`SSTR__sstr_*`).
+- or a `{phs}*telemetry_report.tsv` (the same file under its alternative name);
+- the canonical `sstr_{phs}.{v}.txt` is preferred, then the telemetry report, then folder-flattened
+  copies (`SSTR__sstr_*`).
 
 ### Per-Study AllConcepts Inputs
 
@@ -273,9 +274,12 @@ build's own reason for a failure, is printed in the stage summary and recorded i
 
 A dbGaP SSTR subject/sample mapping file (tab-delimited) with columns:
 - `dbgap_subject_id`
-- `dbgap_sample_id`
-- `CONSENT` (consent group code)
+- `CONSENT` or `consent_code`, in any case (consent group code; `CONSENT` wins if both are present)
 - `consent_abbreviation`
+- `dbgap_sample_id`, optional. Without it no dbGaP sample rows load: the job reports
+  `NO_SAMPLE_ID_COLUMN`, a **warning** for a genomic study (managed-inputs `Data Type` includes `G`,
+  as in `P/G`, or no `Data Type` column) and **info** otherwise. The orchestrator passes this to the
+  job as `GENOMIC` / `--genomic true|false`; preflight checks it the same way.
 
 ### Flow
 
@@ -283,7 +287,7 @@ A dbGaP SSTR subject/sample mapping file (tab-delimited) with columns:
 Read SSTR file (from S3 or local)
         │
         ▼
-Purge existing consents for this study_id
+Purge existing consents and samples for this study_id
         │
         ▼
 Resolve or create participants           one per distinct dbgap_subject_id
@@ -294,8 +298,9 @@ Upsert consents                          one per participant
   (ON CONFLICT DO UPDATE)                keyed by consent group from the file
         │
         ▼
-Upsert samples                           one per non-blank dbgap_sample_id
-  (ON CONFLICT DO NOTHING)
+Upsert samples                           one per non-blank dbgap_sample_id, and one per
+  (ON CONFLICT DO NOTHING)               non-blank SAMPLE_ID (source "submitted"); all
+                                         attributed to this study_id
         │
         ▼
 All within one transaction per study
@@ -306,8 +311,9 @@ All within one transaction per study
 Populated participant database tables: `participants`, `consents`, `samples`. A JSON report
 with row/insert counts: `rowsRead`, `distinctParticipants`, `participantsInserted`,
 `consentsWritten`, `samplesSeen` (input rows with a non-blank `dbgap_sample_id`),
-`samplesInserted` (fewer than `samplesSeen` on a reload: samples are inserted with
-`ON CONFLICT DO NOTHING`), `submittedSamplesInserted`, `countsByConsentGroup`.
+`samplesInserted` (fewer than `samplesSeen` when the file repeats a sample: samples are
+inserted with `ON CONFLICT DO NOTHING`), `submittedSamplesInserted`, `sampleIdColumn` (false when
+the input has no `dbgap_sample_id` column), `countsByConsentGroup`.
 
 ---
 
@@ -332,17 +338,19 @@ For each ready study:
   ├─ Query consents        ─▶ build _consents concept rows
   │                           (consent group membership per patient)
   │
-  ├─ Query participants    ─▶ build _source_subject_id concept rows
-  │                           (participant identifier per patient)
+  ├─ Combine study + consent info  ─▶ build _studies_consents concept rows
+  │                                   (study-level and individual consent paths)
   │
-  ├─ Query samples         ─▶ build _source_sample_id concept rows
-  │                           (sample identifier per patient)
+  ├─ Query participants    ─▶ collect subject ids, with the studies each is found in
   │
-  └─ Combine study + consent info  ─▶ build _studies_consents concept rows
-                                      (study-level and individual consent paths)
+  └─ Query samples         ─▶ collect sample ids (this study's own), with their studies
         │
         ▼
-Aggregate all studies into one CSV
+Build _source_subject_id and _source_sample_id rows: each (hpds_id, id) once, however many
+studies it applies to
+        │
+        ▼
+Aggregate into one CSV; write global_allconcepts_identity_studies.csv to the reports
         │
         ▼
 Write global_AllConcepts.csv to ALL_CONCEPTS_OUTPUT (s3://)
@@ -352,6 +360,21 @@ Write global_AllConcepts.csv to ALL_CONCEPTS_OUTPUT (s3://)
 
 A single `global_AllConcepts.csv` containing concept rows for consent, subject, sample, and
 study metadata across all ready studies.
+
+One participant (one dbGaP subject, one `hpds_id`) can be in several studies, typically a parent
+study and its TOPMed study, and a sample can be loaded by more than one of them. `_consents` and
+`_studies_consents` are per study, so such a participant has a row per study. `_source_subject_id`
+and `_source_sample_id` are not, so each `(hpds_id, id)` row is written **once**, and the job
+reports how many studies each applies to:
+
+- `global_allconcepts_identity_studies.csv` in the job's reports (archived with the build):
+  `concept, hpds_id, value, study_count, study_ids` (`;`-joined) for every subject and sample id row.
+- Metrics `subjectIdRows` / `sampleIdRows`, `subjectIdsByStudyCount` / `sampleIdsByStudyCount`
+  (number of studies → rows, e.g. `{"1": 9500, "2": 500}`), and `sharedSubjectIdStudySets` /
+  `sharedSampleIdStudySets` (for shared rows, the studies joined with `+` → rows; the 50 most common).
+  `rowsPerStudy` counts only a study's own `_consents` and `_studies_consents` rows.
+- Info issues `SHARED_SUBJECT_IDS` / `SHARED_SAMPLE_IDS` when any row applies to more than one study.
+  Sharing is expected, so it is not a warning.
 
 ---
 
@@ -376,10 +399,10 @@ Read managed inputs ─▶ filter to genomic studies (data type contains "G")
         │
         ▼
 For each genomic study:
-  Query consents + samples
-        │
+  Query consents + samples             samples by study_id: only those this study loaded,
+        │                              never another study's for a shared participant
         ▼
-  For each consent group with NWD-prefixed samples:
+  For each consent group with NWD-prefixed samples (each NWD id once per participant):
     ├─ Generate vcfIndex.tsv        one row per chromosome (1-22, X)
     │                               with sample/patient ID lists
     │
@@ -483,6 +506,8 @@ the migration's `split-allconcepts` writes to, and which other sources will writ
   (`true`) and `staleFilesKept` (the stale files left in place). `staleFilesRemoved` lists what
   was deleted when cleanup ran.
 - An invalid `STUDY_ID` (not `phs` + 6 digits) is rejected before anything runs (`BAD_STUDY_ID`).
+- Besides `rowsPerConsent`, the report's `participantsPerConsent` counts the distinct participants
+  written to each consent group's file (keyed `c1`, `c2`, ...).
 - The runner's `validate.sh` checks the report, that there is one file per consent group with
   rows, and that every listed file is really in S3. Its warnings (`validate-report.sh` exit 10)
   make the child build, and so this one, UNSTABLE.
@@ -677,6 +702,7 @@ It writes `downstream-artifacts/pipeline-report/`, archived on the build and upl
 |------|---------|
 | `pipeline-report.md` | for people: study statuses, each stage's outcome, studies needing follow-up (with why and what to do), all studies |
 | `pipeline_study_outcomes.csv` | one row per study: `study_id, abv, status, plan, sstr_result, sstr_build_url, participants, participants_inserted, allconcepts_result, allconcepts_build_url, consent_groups, rows_processed, decoded_bytes, review_items, reasons` |
+| `pipeline_consent_counts.csv` | one row per loaded study and consent code: `study_id, abv, consent_code, participants_loaded` (the SSTR load's `countsByConsentGroup`), `participants_written` (the generator's `participantsPerConsent`); blank where the stage did not report it. |
 | `pipeline-report.json` | all of the above plus every review item and `heldBackVcfGroups` (`reportVersion` 1) |
 
 Study status, most severe first: `FAILED` (a stage failed for it), `EXCLUDED` (missing inputs),
