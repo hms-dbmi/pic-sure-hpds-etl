@@ -110,42 +110,42 @@ class GenerateGlobalAllConceptsJobIT extends AbstractIntegrationTest {
 
     @Test
     void writes_every_concept_type_each_field_quoted() throws IOException {
-        managedInputs("STUDY1,phs001412,Yes");
-        consent(1, "phs001412", "1", "GRU");
-        consent(2, "phs001412", "2", "HMB");
+        managedInputs("STUDY1,phs000904,Yes");
+        consent(1, "phs000904", "1", "GRU");
+        consent(2, "phs000904", "2", "HMB");
         participant(1, "SUBJ1", "DBGap");
-        participant(1, "S-1", "phs001412");
+        participant(1, "S-1", "phs000904");
         participant(2, "SUBJ2", "DBGap");
-        sample(1, "phs001412", "SAMP1", "DBGap");
+        sample(1, "phs000904", "SAMP1", "DBGap");
         Path out = tmp.resolve("out/");
 
         JobResult result = run(out + "/");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(lines(out.resolve(GenerateGlobalAllConceptsJob.OUTPUT_FILENAME))).containsExactlyInAnyOrder(
-                row(1, "µ_consentsµ", "phs001412.c1"),
-                row(2, "µ_consentsµ", "phs001412.c2"),
-                row(1, "µ_studies_consentsµphs001412µ", "TRUE"),
-                row(2, "µ_studies_consentsµphs001412µ", "TRUE"),
-                row(1, "µ_studies_consentsµphs001412µGRUµ", "TRUE"),
-                row(2, "µ_studies_consentsµphs001412µHMBµ", "TRUE"),
+                row(1, "µ_consentsµ", "phs000904.c1"),
+                row(2, "µ_consentsµ", "phs000904.c2"),
+                row(1, "µ_studies_consentsµphs000904µ", "TRUE"),
+                row(2, "µ_studies_consentsµphs000904µ", "TRUE"),
+                row(1, "µ_studies_consentsµphs000904µGRUµ", "TRUE"),
+                row(2, "µ_studies_consentsµphs000904µHMBµ", "TRUE"),
                 row(1, "µ_source_subject_idµ", "SUBJ1"),
                 row(1, "µ_source_subject_idµ", "S-1"),
                 row(2, "µ_source_subject_idµ", "SUBJ2"),
                 row(1, "µ_source_sample_idµ", "SAMP1"));
         assertThat(result.getMetrics())
                 .containsEntry("totalRows", 10L)
-                .containsEntry("rowsPerStudy", Map.of("phs001412", 6L))
+                .containsEntry("rowsPerStudy", Map.of("phs000904", 6L))
                 .containsEntry("subjectIdRows", 3L)
                 .containsEntry("sampleIdRows", 1L);
     }
 
     @Test
     void a_blank_abbreviation_gets_no_individual_path_and_a_warning() throws IOException {
-        managedInputs("STUDY1,phs001412,Yes");
-        consent(1, "phs001412", "1", "");
-        consent(2, "phs001412", "1", "  ");
-        consent(3, "phs001412", "2", "HMB");
+        managedInputs("STUDY1,phs000904,Yes");
+        consent(1, "phs000904", "1", "");
+        consent(2, "phs000904", "1", "  ");
+        consent(3, "phs000904", "2", "HMB");
         Path out = tmp.resolve("out.csv");
 
         JobResult result = run(out);
@@ -153,11 +153,11 @@ class GenerateGlobalAllConceptsJobIT extends AbstractIntegrationTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
         assertThat(lines(out)).filteredOn(l -> l.contains("µ_studies_consentsµ"))
                 .containsExactlyInAnyOrder(
-                        row(1, "µ_studies_consentsµphs001412µ", "TRUE"),
-                        row(2, "µ_studies_consentsµphs001412µ", "TRUE"),
-                        row(3, "µ_studies_consentsµphs001412µ", "TRUE"),
-                        row(3, "µ_studies_consentsµphs001412µHMBµ", "TRUE"));
-        assertThat(result.getMetrics()).containsEntry("rowsPerStudy", Map.of("phs001412", 7L));
+                        row(1, "µ_studies_consentsµphs000904µ", "TRUE"),
+                        row(2, "µ_studies_consentsµphs000904µ", "TRUE"),
+                        row(3, "µ_studies_consentsµphs000904µ", "TRUE"),
+                        row(3, "µ_studies_consentsµphs000904µHMBµ", "TRUE"));
+        assertThat(result.getMetrics()).containsEntry("rowsPerStudy", Map.of("phs000904", 7L));
         assertThat(result.getOutputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("EMPTY_CONSENT_ABBREVIATION") && i.message().contains("2 consent(s)"));
     }
@@ -169,18 +169,18 @@ class GenerateGlobalAllConceptsJobIT extends AbstractIntegrationTest {
      */
     @Test
     void writes_each_subject_and_sample_id_once_and_reports_the_studies_it_applies_to() throws IOException {
-        managedInputs("ARIC,phs000280,Yes", "ARIC_TOPMED,phs001211,Yes");
-        consent(1, "phs000280", "1", "HMB");
-        consent(2, "phs000280", "1", "HMB");
-        consent(1, "phs001211", "2", "DS");
+        managedInputs("STUDY2,phs000902,Yes", "STUDY3,phs000903,Yes");
+        consent(1, "phs000902", "1", "HMB");
+        consent(2, "phs000902", "1", "HMB");
+        consent(1, "phs000903", "2", "DS");
         participant(1, "SUBJ1", "DBGap");
         participant(2, "SUBJ2", "DBGap");
-        sample(1, "phs000280", "SRS1", "DBGap");
-        sample(1, "phs000280", "NWD1", "submitted");
-        sample(1, "phs001211", "NWD1", "submitted");
+        sample(1, "phs000902", "SRS1", "DBGap");
+        sample(1, "phs000902", "NWD1", "submitted");
+        sample(1, "phs000903", "NWD1", "submitted");
         // The same id under both sources in one study counts for that study once.
-        sample(1, "phs001211", "NWD9", "DBGap");
-        sample(1, "phs001211", "NWD9", "submitted");
+        sample(1, "phs000903", "NWD9", "DBGap");
+        sample(1, "phs000903", "NWD9", "submitted");
         Path out = tmp.resolve("out.csv");
 
         JobResult result = run(out);
@@ -193,17 +193,17 @@ class GenerateGlobalAllConceptsJobIT extends AbstractIntegrationTest {
                 row(1, "µ_source_sample_idµ", "SRS1"), row(1, "µ_source_sample_idµ", "NWD1"),
                 row(1, "µ_source_sample_idµ", "NWD9"));
         assertThat(rows).filteredOn(l -> l.contains("µ_consentsµ")).containsExactlyInAnyOrder(
-                row(1, "µ_consentsµ", "phs000280.c1"), row(2, "µ_consentsµ", "phs000280.c1"),
-                row(1, "µ_consentsµ", "phs001211.c2"));
+                row(1, "µ_consentsµ", "phs000902.c1"), row(2, "µ_consentsµ", "phs000902.c1"),
+                row(1, "µ_consentsµ", "phs000903.c2"));
 
         assertThat(result.getMetrics())
                 .containsEntry("subjectIdRows", 2L)
                 .containsEntry("subjectIdsByStudyCount", Map.of("1", 1L, "2", 1L))
-                .containsEntry("sharedSubjectIdStudySets", Map.of("phs000280+phs001211", 1L))
+                .containsEntry("sharedSubjectIdStudySets", Map.of("phs000902+phs000903", 1L))
                 .containsEntry("sampleIdRows", 3L)
                 .containsEntry("sampleIdsByStudyCount", Map.of("1", 2L, "2", 1L))
-                .containsEntry("sharedSampleIdStudySets", Map.of("phs000280+phs001211", 1L))
-                .containsEntry("rowsPerStudy", Map.of("phs000280", 6L, "phs001211", 3L));
+                .containsEntry("sharedSampleIdStudySets", Map.of("phs000902+phs000903", 1L))
+                .containsEntry("rowsPerStudy", Map.of("phs000902", 6L, "phs000903", 3L));
         assertThat(result.getOutputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("SHARED_SUBJECT_IDS") && i.message().startsWith("1 of 2 "))
                 .anyMatch(i -> i.code().equals("SHARED_SAMPLE_IDS") && i.message().startsWith("1 of 3 "));
@@ -211,11 +211,57 @@ class GenerateGlobalAllConceptsJobIT extends AbstractIntegrationTest {
         List<String> report = lines(reportsDir.resolve(GenerateGlobalAllConceptsJob.IDENTITY_STUDIES_REPORT));
         assertThat(report.get(0)).isEqualTo("concept,hpds_id,value,study_count,study_ids");
         assertThat(report.subList(1, report.size())).containsExactlyInAnyOrder(
-                "\"µ_source_subject_idµ\",1,\"SUBJ1\",2,\"phs000280;phs001211\"",
-                "\"µ_source_subject_idµ\",2,\"SUBJ2\",1,\"phs000280\"",
-                "\"µ_source_sample_idµ\",1,\"SRS1\",1,\"phs000280\"",
-                "\"µ_source_sample_idµ\",1,\"NWD1\",2,\"phs000280;phs001211\"",
-                "\"µ_source_sample_idµ\",1,\"NWD9\",1,\"phs001211\"");
+                "\"µ_source_subject_idµ\",1,\"SUBJ1\",2,\"phs000902;phs000903\"",
+                "\"µ_source_subject_idµ\",2,\"SUBJ2\",1,\"phs000902\"",
+                "\"µ_source_sample_idµ\",1,\"SRS1\",1,\"phs000902\"",
+                "\"µ_source_sample_idµ\",1,\"NWD1\",2,\"phs000902;phs000903\"",
+                "\"µ_source_sample_idµ\",1,\"NWD9\",1,\"phs000903\"");
+    }
+
+    /**
+     * A sample is listed for the study that loaded it, whether or not its participant has a consent in
+     * that study: samples are attributed by their own study, not through the participant's consents.
+     */
+    @Test
+    void a_sample_is_listed_for_its_own_study_even_without_a_consent_there() throws IOException {
+        managedInputs("STUDY2,phs000902,Yes", "STUDY3,phs000903,Yes");
+        consent(1, "phs000902", "1", "HMB");
+        consent(2, "phs000903", "1", "DS");
+        participant(1, "SUBJ1", "DBGap");
+        participant(2, "SUBJ2", "DBGap");
+        // Participant 1 has no phs000903 consent.
+        sample(1, "phs000903", "NWD5", "submitted");
+        Path out = tmp.resolve("out.csv");
+
+        JobResult result = run(out);
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(lines(out)).contains(row(1, "µ_source_sample_idµ", "NWD5"));
+        assertThat(lines(reportsDir.resolve(GenerateGlobalAllConceptsJob.IDENTITY_STUDIES_REPORT)))
+                .contains("\"µ_source_sample_idµ\",1,\"NWD5\",1,\"phs000903\"");
+    }
+
+    /**
+     * A participant in two studies has each of their subject ids listed for both, a study-local one
+     * (source = one of the studies) included: ids never overlap between studies, and the source is
+     * what aligns them.
+     */
+    @Test
+    void a_study_local_subject_id_is_listed_for_every_study_the_participant_is_in() throws IOException {
+        managedInputs("STUDY2,phs000902,Yes", "STUDY3,phs000903,Yes");
+        consent(1, "phs000902", "1", "HMB");
+        consent(1, "phs000903", "2", "DS");
+        participant(1, "SUBJ1", "DBGap");
+        participant(1, "LOCAL-1", "phs000903");
+        Path out = tmp.resolve("out.csv");
+
+        JobResult result = run(out);
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(lines(out)).contains(row(1, "µ_source_subject_idµ", "LOCAL-1"));
+        assertThat(lines(reportsDir.resolve(GenerateGlobalAllConceptsJob.IDENTITY_STUDIES_REPORT))).contains(
+                "\"µ_source_subject_idµ\",1,\"SUBJ1\",2,\"phs000902;phs000903\"",
+                "\"µ_source_subject_idµ\",1,\"LOCAL-1\",2,\"phs000902;phs000903\"");
     }
 
     /** A participant reached only through a study that is not ready contributes nothing. */

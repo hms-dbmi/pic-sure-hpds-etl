@@ -195,7 +195,7 @@ pooled_foreign_concepts_are_a_warning_listing_their_first_nodes() {
     expect_eq "$(result '.validation.warnings | join(",")')" "job reported SUCCESS_WITH_WARNINGS,no concepts from other studies,no malformed concept paths"
     expect_file_has "$T/out/phs000001/validation.txt" "Bad paths:      4"
     expect_file_has "$T/out/phs000001/validation.txt" "Other studies': 3"
-    expect_file_has "$T/out/phs000001/validation.txt" "phs000280: 2 row(s)"
+    expect_file_has "$T/out/phs000001/validation.txt" "phs000902: 2 row(s)"
 }
 
 report_counts_and_lists_other_studies_concepts() {
@@ -205,7 +205,7 @@ report_counts_and_lists_other_studies_concepts() {
     expect_rc 10
     expect_eq "$(J .metrics.foreignConceptRows)" 3
     expect_file_has "$(MDFILE)" "Rows with concepts from other studies, dropped: 3."
-    expect_file_has "$(MDFILE)" "| 3 (phs000280: 2, DCC Harmonized data set: 1) | 4 |"
+    expect_file_has "$(MDFILE)" "| 3 (phs000902: 2, DCC Harmonized data set: 1) | 4 |"
     expect_eq "$(J .metrics.malformedPathRows)" 4
     expect_file_has "$(MDFILE)" "Rows with malformed concept paths, dropped: 4."
 }

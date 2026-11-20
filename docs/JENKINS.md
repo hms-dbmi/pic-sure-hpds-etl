@@ -82,10 +82,16 @@ orchestrators (see [below](#qa-pipeline-counts-end-of-both-pipelines)), and can 
 
 **Job:** `qa-pipeline-counts` ([`etl-runners/qa-pipeline-counts/`](../etl-runners/qa-pipeline-counts/))
 **Class:** [`QaPipelineCountsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/qa/QaPipelineCountsJob.java)
-**Runs:** as the last stage of both orchestrators, when the run has succeeded so far (or is
-UNSTABLE) and is not a pre-flight; also on its own. The orchestrator writes its final report first,
-for the run's counts, and again in `post` with the final result.
-`QA_PIPELINE_COUNTS_JOB` (blank skips it) names the job in both orchestrators.
+**Runs:** as the last stage of both orchestrators, after the `Back up participant DB` stage, when
+the run has succeeded so far (or is UNSTABLE) and is not a pre-flight; also on its own. A run that
+failed only because some studies failed (`CONTINUE_ON_STUDY_FAILURE`: SSTR loads and per-study
+allConcepts in the permanent pipeline, the split in the migration) never reaches that stage, so QA
+runs from `post`, after the backup; any other failure, or an abort, skips it. The orchestrator
+writes its final report first, for the run's counts, and again in `post` with the final result.
+`QA_PIPELINE_COUNTS_JOB` (blank skips it) names the job in both orchestrators. Both orchestrators
+run it with the same code (`runQaStage` in `etl-runners/common/orchestrator.groovy`), bounded at
+15 h, and add its counts to the build description, e.g. `QA: 3 finding(s) (2 in this run), 41
+unverified, 5 without a summary`.
 
 For **every study marked ready** in `MANAGED_INPUTS` -- the original file, so excluded studies and
 those the run did not process are checked too, as a regression test -- it compares each consent
@@ -100,19 +106,32 @@ group's counts with that study version's dbGaP summary:
 
 The run's counts are collected from `downstream-artifacts/` by
 [`collect-run-counts.py`](../etl-runners/qa-pipeline-counts/collect-run-counts.py) (failed runs and
-blank counts skipped) and passed as `RUN_COUNTS`; the DB counts, the run counts and the cached
-summaries are read in parallel.
+blank counts skipped) and passed as `RUN_COUNTS`: one row per study, consent group and source, plus
+what `participants-migration` loaded each study from (`load_source`). Two counts for one study,
+group and source are an error, never summed. The DB counts, the run counts and the cached summaries
+are read in parallel.
 
-**Summaries.** Read from `{DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json` (e.g.
-`.../phs004477/rawData/phs004477_v1_summary.json`; the file holds the summary's `study` object; the
-API's whole response is read too). Without that file, a `{study}*study_summary.json` in the same folder
-is read instead (the one for the study's version). A study whose summary is not there (or unreadable) depends on
+Each final-report measure repeats a job report's count (`pipeline-report:loaded` is `sstr-load`,
+`pipeline-report:written` is `all-concepts-data-generator`, `migration-report:loaded` is
+`participants-migration`, `migration-report:split` is `split-allconcepts`). Both are compared, so a
+report that differs from its job is caught; but when the report repeats a wrong job count exactly,
+its row is `SAME_AS_JOB` and the job's row is the one finding.
+
+**Summaries.** Read from `{DATA_ROOT}/{study}/qa/{study}_{version}_summary.json`, where QA caches the
+summaries it fetches (e.g. `.../phs000001/qa/phs000001_v1_summary.json`; the file holds the
+summary's `study` object; the API's whole response is read too), apart from the curated source
+data. Without it, the same name under `{study}/rawData/` (where summaries are staged, and where
+earlier runs cached them) is read, else a `{study}*study_summary.json` there (the one for the
+study's version). A file whose `accver` does not name the study's accession and version is
+unusable: one with no version could be for any. A study whose summary is not there (or unusable) depends on
 `FETCH_MISSING_SUMMARIES`, which the orchestrators set from their own `QA_FETCH_MISSING_SUMMARIES`
 (**unchecked by default in the permanent pipeline, checked in the migration pipeline**):
 
 - **off:** dbGaP is not asked. The study fails QA: `SUMMARY_MISSING`, a warning like any other finding.
-- **on:** the summary is asked of the dbGaP SSTR API, and each answer is written there at once
-  (`CACHE_SUMMARIES`), so each study version is fetched once, ever.
+- **on:** the summary is asked of the dbGaP SSTR API, and each answer is written under `qa/` at once
+  (`CACHE_SUMMARIES`), so each study version is fetched once, ever. A new participant set always
+  comes with a new version, so a summary cached by version does not go stale. `DBGAP_BASE_URL` must
+  be `https` (the job quotes what it answers into the report).
 
 When fetching, dbGaP is volatile, so it is asked gently: one study at a time, 2 s apart (the
 gap doubling, up to 60 s, while it answers overloaded), 3 attempts per study (60 s then 120 s
@@ -120,14 +139,19 @@ apart, `Retry-After` honoured), 2 minutes' pause after it cannot be connected to
 after 20 studies in a row get no answer, and none started after **6 hours**
 (`DBGAP_DEADLINE_SECONDS`). A study still without a summary is `UNVERIFIED` (a
 `DBGAP_UNAVAILABLE` warning): the build is UNSTABLE and a later run fetches it. An answer for
-another study version than requested is `VERSION_MISMATCH` and is not cached.
+another study version than requested, or naming none, is `VERSION_MISMATCH` and is not cached.
 
 **Findings** (statuses; each is a WARNING per study and kind, and makes the build UNSTABLE):
 `COUNT_MISMATCH`, `MISSING` (dbGaP lists the group; the source has none of it), `NOT_IN_DBGAP`,
 `DBGAP_COUNT_MISSING`, `NO_VERSION`, `VERSION_NOT_FOUND`, `VERSION_MISMATCH`, `SUMMARY_MISSING`,
 `DBGAP_UNAVAILABLE`.
-`NOT_LOADED_BY_DESIGN` -- dbGaP's consent 0 (not consented) with no participants loaded -- and
-`MATCH` are not findings. The orchestrator also only marks itself UNSTABLE, never FAILED, when QA
+Consent 0 (not consented) is compared like any other group: the SSTR load keeps it. It is
+`NOT_LOADED_BY_DESIGN`, not a finding, only where a source drops it by contract and counts none: a
+study the run loaded from its MULTI files (`load_source` multi; the DB, `participants-migration` and
+`migration-report:loaded`), and the generator and split (`all-concepts-data-generator`,
+`split-allconcepts`, `pipeline-report:written`, `migration-report:split`), which count consented
+participants only. A study loaded from MULTI by an earlier run is not known to be, so its consent 0
+reads `MISSING`. `NOT_LOADED_BY_DESIGN`, `SAME_AS_JOB` and `MATCH` are not findings. The orchestrator also only marks itself UNSTABLE, never FAILED, when QA
 cannot run: the ETL already succeeded. Exit 4 only when fetching and no study has a summary at all
 (none cached, dbGaP answering for none); `RETRY_ON_INFRA` reruns it once. With fetching off, studies
 without a summary file each fail QA instead, and the run is not retried.
@@ -140,16 +164,17 @@ without a summary file each fail QA instead, and the run is not retried.
 |---|---|
 | `qa-pipeline-report.md` | to read: the result and totals, then, per study with discrepancies, a table of its consent groups (rows) by dbGaP's counts and every measure (columns), differing counts in bold with dbGaP's beside them; then version problems, studies not checked, and every study |
 | `qa_pipeline_counts.csv` | one row per study, consent group and measure: `study_id, version, in_run, consent_code, consent_short_name, measure, compared_to, dbgap_count, count, status, note` |
-| `qa_pipeline_discrepancies.csv` | its rows needing follow-up (every status but `MATCH` and `NOT_LOADED_BY_DESIGN`) |
+| `qa_pipeline_discrepancies.csv` | its rows needing follow-up (every status but `MATCH`, `NOT_LOADED_BY_DESIGN` and `SAME_AS_JOB`) |
 | `qa_pipeline_studies.csv` | one row per study: `study_id, abv, version, in_run, summary_source, status, consent_groups, discrepancies, note` |
-| `qa-pipeline-counts-<run-id>.json` | the report: `fetchMissingSummaries`, `studiesChecked`, `studiesInRun`, `studiesVerified`, `countsCompared`, `countsMatching`, `discrepancies`, `discrepanciesByType`, `discrepanciesByMeasure`, `studiesWithDiscrepancies`, `unverifiedStudies`, `summariesFromCache`, `summariesFromApi`, `summariesCached`, `summaryCacheFailures`, `unusableCachedSummaries`, `apiLookups`, `apiAttempts`, `apiRetries`, `runCounts`, `runCountSources` |
+| `qa-pipeline-counts-<run-id>.json` | the report: `fetchMissingSummaries`, `studiesChecked`, `studiesInRun`, `studiesVerified`, `countsCompared`, `countsMatching`, `discrepancies`, `discrepanciesInRun`, `discrepanciesByType`, `discrepanciesByMeasure`, `studiesWithDiscrepancies`, `unverifiedStudies`, `summariesMissing`, `summariesFromCache`, `summariesFromApi`, `summariesCached`, `summaryCacheFailures`, `unusableCachedSummaries`, `apiLookups`, `apiAttempts`, `apiRetries`, `runCounts`, `runCountSources` |
 
 **Run it on its own** (say, after a failed run is re-run, or to re-check every study): give
 `MANAGED_INPUTS` and `DATA_ROOT`, and optionally `RUN_COUNTS` (blank: every study DB vs dbGaP
 only). The participant DB must be up (`participant-db-start`). Its runner needs HTTPS egress to
 `www.ncbi.nlm.nih.gov` (see [network egress](#qa-consent-counts-network-egress)) and write access
-under `DATA_ROOT` only when `FETCH_MISSING_SUMMARIES` is checked (it is unchecked by default), to
-fetch and cache summaries not yet there.
+under `DATA_ROOT` (`{study}/qa/`) only when `FETCH_MISSING_SUMMARIES` is checked (it is unchecked
+by default), to fetch and cache summaries not yet there. Its reports can be copied only by the two
+orchestrators (`copyArtifactPermission`), so run it from the `hpds-etl` folder beside them.
 
 ### `qa-consent-counts` (standalone)
 
@@ -170,20 +195,22 @@ Give exactly one of (pre-flight fails on neither or both):
 
 - `MANAGED_INPUTS`: a managed inputs CSV (`s3://`); its studies marked ready are checked, by
   `Study Identifier` and `Version` (e.g. `v4`). `STUDY_FILTER` narrows them to some study ids.
-- `STUDIES`: the study versions to check, e.g. `phs000956.v6, phs001412.v4`, separated by commas,
+- `STUDIES`: the study versions to check, e.g. `phs000001.v6, phs000002.v4`, separated by commas,
   spaces or new lines; a `.pN` suffix is ignored. The managed inputs are not read, and
   `STUDY_FILTER` must be blank. A malformed entry (`BAD_STUDY`), a study listed with two versions
   (`STUDY_LISTED_TWICE`) or a `STUDY_FILTER` given too (`STUDIES_WITH_FILTER`) fails validation.
 
 `LOAD_COUNTS` is optional: a CSV `study_id,consent_code,participants_loaded[,source]`, other
 columns ignored, so a migration run's `migration_consent_counts.csv` or
-`participants_migration_consent_counts.csv` works as is. Studies it does not list, and groups with
-a blank `participants_loaded` (not loaded that run), are compared DB vs dbGaP only. The MULTI
-fallback drops consent 0 subjects, so for a study loaded from MULTI a consent 0 that dbGaP lists is
-still a discrepancy (`MISSING_IN_DB`), noted "source MULTI drops consent 0".
+`participants_migration_consent_counts.csv` works as is; two rows for one study and consent group
+are an error. Studies it does not list, and groups with a blank `participants_loaded` (not loaded
+that run), are compared DB vs dbGaP only.
 
 Consent codes are matched after normalizing (`c1`, `01` and `1` are one group). A group on one
-side only counts as 0 on the other. Consent 0 is compared like any other code.
+side only counts as 0 on the other. Consent 0 is compared like any other code, as in
+`qa-pipeline-counts`: the SSTR load keeps it, but the MULTI fallback drops it, so for a study whose
+`source` is MULTI a consent 0 the DB has none of is not a discrepancy, noted "source MULTI drops
+consent 0: not loaded by design".
 
 | Status | Meaning |
 |--------|---------|
@@ -195,7 +222,7 @@ side only counts as 0 on the other. Consent 0 is compared like any other code.
 | `REPORT_DB_MISMATCH` | the load report disagrees with the DB |
 | `NO_VERSION` | the study has no usable `Version` in managed inputs; not looked up |
 | `VERSION_NOT_FOUND` | dbGaP has no such study version (HTTP 400, `error_code` 2); never retried |
-| `VERSION_MISMATCH` | dbGaP answered for a different accession or version than requested; its counts are not compared |
+| `VERSION_MISMATCH` | dbGaP answered for a different accession or version than requested, or named none; its counts are not compared |
 | `UNVERIFIED` | dbGaP gave no usable answer after the retries (see below); a warning, not a discrepancy |
 
 A row can carry two findings (`COUNT_MISMATCH;REPORT_DB_MISMATCH`). `study_status` is not checked.
@@ -273,9 +300,10 @@ If your naming differs, change the orchestrator's job-name parameter rather than
 
 The DAG lives in Jenkins, not in the JAR. Each orchestrator stage triggers that job's own
 pipeline, which owns its runner end to end. After the gate, the orchestrator makes sure the
-long-lived participant database is up; `post { always }` backs it up to S3. It is never stopped.
+long-lived participant database is up; the `Back up participant DB` stage, just before QA, backs it
+up to S3 (`post { always }` does instead when the build stops earlier). It is never stopped.
 The permanent orchestrator's stage logic is in `etl-runners/common/orchestrator.groovy`, which
-`/Jenkinsfile` `load`s in its first stage.
+`/Jenkinsfile` `load`s in its first stage; `Jenkinsfile.migration` loads it for the backup and QA.
 
 ```
 /Jenkinsfile  (or /Jenkinsfile.migration)
@@ -288,7 +316,9 @@ The permanent orchestrator's stage logic is in `etl-runners/common/orchestrator.
             Init ▸ Build JAR ▸ Pre-flight ▸ Package image
             ▸ Provision (require-db.sh, terraform apply) ▸ Monitor ▸ Fetch reports ▸ Validate
             post: terraform destroy, archive reports
-  post { always }: build job: participant-db-backup    PROMOTE_BACKUP = build SUCCESS/UNSTABLE (DB stays up)
+  ▸ Back up participant DB                    build job: participant-db-backup  PROMOTE_BACKUP = build SUCCESS/UNSTABLE (DB stays up)
+  ▸ QA pipeline counts                       build job: qa-pipeline-counts (findings: UNSTABLE)
+  post { always }: the backup, if the build stopped before its stage; QA, if only studies failed
                    pipeline-report / migration-report  downstream-artifacts/<report>/ + S3
 ```
 

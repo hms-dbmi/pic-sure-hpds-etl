@@ -31,7 +31,7 @@ final class DbgapParams {
                         "Studies looked up in dbGaP at once (1-" + MAX_CONCURRENCY + "; default "
                                 + defaultConcurrency + "; dbGaP answers 502 when busy)", "1"),
                 ParamSpec.optional("dbgap-base-url",
-                        "dbGaP SSTR study endpoint (default " + d.baseUrl() + ")", d.baseUrl()),
+                        "dbGaP SSTR study endpoint, an https URL (http only to this host, for tests; default " + d.baseUrl() + ")", d.baseUrl()),
                 ParamSpec.optional("dbgap-max-attempts",
                         "Requests per study, retries included (1-20; default " + d.maxAttempts() + ")", "3"),
                 ParamSpec.optional("dbgap-initial-backoff-seconds",
@@ -76,8 +76,8 @@ final class DbgapParams {
         intParam(ctx, report, "dbgap-request-spacing-seconds", 0, 600);
         intParam(ctx, report, "dbgap-deadline-seconds", 1, 86400);
         ctx.get("dbgap-base-url").ifPresent(url -> {
-            if (!isHttpUrl(url.trim())) {
-                report.error("BAD_DBGAP_BASE_URL", "dbgap-base-url must be an http(s) URL, got: " + url,
+            if (!isHttpsUrl(url.trim())) {
+                report.error("BAD_DBGAP_BASE_URL", "dbgap-base-url must be an https URL (or http to localhost), got: " + url,
                         "--dbgap-base-url");
             }
         });
@@ -134,10 +134,15 @@ final class DbgapParams {
         });
     }
 
-    private static boolean isHttpUrl(String url) {
+    /**
+     * https, or http to this host (a test stub): the client quotes what the endpoint answers into the
+     * archived report, so it must not be talked to in the clear across a network.
+     */
+    private static boolean isHttpsUrl(String url) {
         try {
             URI u = URI.create(url);
-            return u.getHost() != null && Arrays.asList("http", "https").contains(u.getScheme());
+            return u.getHost() != null && ("https".equals(u.getScheme())
+                    || ("http".equals(u.getScheme()) && Arrays.asList("localhost", "127.0.0.1").contains(u.getHost())));
         } catch (IllegalArgumentException e) {
             return false;
         }

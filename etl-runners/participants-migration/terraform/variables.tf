@@ -140,6 +140,12 @@ variable "study_filter" {
   description = "--study-filter: comma-separated study ids to process; blank processes every ready study"
 }
 
+variable "include_processed" {
+  type        = string
+  default     = "false"
+  description = "--include-processed: when 'true', studies marked Data Processed are migrated too (migration pipeline)"
+}
+
 variable "resume_from_run_id" {
   type        = string
   default     = ""

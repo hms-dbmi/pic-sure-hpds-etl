@@ -10,6 +10,7 @@
 # Environment:
 #   TF_VAR_managed_inputs_uri   required   the --managed-inputs CSV
 #   TF_VAR_data_folder_uri      required   the --data-folder folder
+#   TF_VAR_include_processed    optional   "true": studies marked Data Processed are migrated too
 #   AWS_REGION                  optional   default us-east-1
 #   PREFLIGHT_PARALLELISM       optional   studies probed at once, default 16
 #
@@ -28,6 +29,7 @@ REGION="${AWS_REGION:-us-east-1}"
 PARALLELISM="${PREFLIGHT_PARALLELISM:-16}"
 
 DATA_FOLDER="${DATA_FOLDER%/}"
+INCLUDE_PROCESSED="$(trim "${TF_VAR_include_processed:-false}")"
 
 uri_exists() {
   local uri="$1"
@@ -77,7 +79,7 @@ read_uri "$MANAGED_INPUTS" > "$MANIFEST"
 
 # Parsed with python3's csv module rather than awk: the study list is a spreadsheet export, so
 # quoted fields containing commas are normal.
-STUDIES=$(python3 - "$MANIFEST" <<'PY'
+STUDIES=$(python3 - "$MANIFEST" "$INCLUDE_PROCESSED" <<'PY'
 import csv, sys
 
 ABV       = "Study Abbreviated Name"
@@ -87,6 +89,17 @@ DATA_TYPE = "Data Type"
 PROCESSED = "Data Processed"
 
 REQUIRED = [ABV, SID, READY, DATA_TYPE, PROCESSED]
+INCLUDE_PROCESSED = sys.argv[2] == "true"
+
+
+def yes_no(row, column, sid):
+    # As ManagedInputsService.parseYesNo: Yes or No (any case), blank is No, anything else fails.
+    value = (row.get(column) or "").strip()
+    if value.lower() in ("yes", "no", ""):
+        return value.lower() == "yes"
+    print(f"BAD_VALUE\t{sid}: '{value}' in '{column}' (expected Yes or No)")
+    sys.exit(0)
+
 
 with open(sys.argv[1], newline="", encoding="utf-8-sig") as fh:
     reader = csv.DictReader(fh)
@@ -99,9 +112,10 @@ with open(sys.argv[1], newline="", encoding="utf-8-sig") as fh:
         sid = (row.get(SID) or "").strip()
         if not abv or not sid:
             continue
-        # Mirrors ParticipantsMigrationJob: ready, and not already marked processed.
-        ready = (row.get(READY) or "").strip().lower() in ("true", "yes", "1")
-        processed = (row.get(PROCESSED) or "").strip().lower() in ("true", "yes", "1")
+        # Mirrors ParticipantsMigrationJob: ready, and not already marked processed unless
+        # processed studies are included.
+        ready = yes_no(row, READY, sid)
+        processed = yes_no(row, PROCESSED, sid) and not INCLUDE_PROCESSED
         print(f"{abv}\t{sid}\t{'processed' if ready and processed else 'ready' if ready else 'skip'}")
 PY
 ) || { fail "could not parse managed-inputs as CSV"; summary; exit 1; }
@@ -113,13 +127,24 @@ if [[ "$STUDIES" == MISSING_COLUMNS* ]]; then
   exit 1
 fi
 
+if [[ "$STUDIES" == *BAD_VALUE* ]]; then
+  fail "managed-inputs has a value that is not Yes or No: ${STUDIES##*BAD_VALUE$'\t'}"
+  summary
+  exit 1
+fi
+
 check "managed-inputs has the required columns" true
 
 READY_COUNT=$(awk -F'\t' '$3=="ready"' <<<"$STUDIES" | grep -c . || true)
 PROCESSED_COUNT=$(awk -F'\t' '$3=="processed"' <<<"$STUDIES" | grep -c . || true)
-check "at least one study is marked ready and not yet processed" test "$READY_COUNT" -gt 0
-note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process and not yet processed"
-note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- not migrated"
+if [[ "$INCLUDE_PROCESSED" == true ]]; then
+  check "at least one study is marked ready" test "$READY_COUNT" -gt 0
+  note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process (those marked 'Data Processed' included)"
+else
+  check "at least one study is marked ready and not yet processed" test "$READY_COUNT" -gt 0
+  note "$READY_COUNT of $(grep -c . <<<"$STUDIES") studies marked ready to process and not yet processed"
+  note "$PROCESSED_COUNT ready study/studies already marked 'Data Processed' -- not migrated"
+fi
 
 # --- per-study files -----------------------------------------------------
 # Layout: {base}/{studyId}/legacy/data/{ABV_UPPERCASE}_PatientMapping.v2.csv

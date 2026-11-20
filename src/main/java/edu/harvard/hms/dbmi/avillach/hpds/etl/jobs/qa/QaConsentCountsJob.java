@@ -26,14 +26,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -47,7 +40,6 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 /**
  * PERMANENT QA, run standalone (not part of either pipeline). For each study to check -- every
@@ -184,7 +176,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
 
         String listed = Strings.trimToNull(ctx.get("studies", ""));
         if (listed != null) {
-            if (!studyFilter(ctx).isEmpty()) {
+            if (!QaSupport.studyFilter(ctx).isEmpty()) {
                 report.error("STUDIES_WITH_FILTER", "--study-filter applies to the managed inputs; with --studies, "
                         + "list only the study versions to check", "--study-filter");
             }
@@ -194,8 +186,8 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
             return;
         }
         List<ManagedInputRow> rows = managedInputsService.read();
-        Set<String> filter = studyFilter(ctx);
-        List<ManagedInputRow> selected = select(rows, filter);
+        Set<String> filter = QaSupport.studyFilter(ctx);
+        List<ManagedInputRow> selected = QaSupport.select(rows, filter);
         Set<String> selectedIds = new LinkedHashSet<>(selected.stream().map(ManagedInputRow::studyId).toList());
         for (String id : filter) {
             if (!selectedIds.contains(id)) {
@@ -281,7 +273,7 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         if (listed != null) {
             return parseStudies(listed, null);
         }
-        return select(managedInputsService.read(), studyFilter(ctx)).stream()
+        return QaSupport.select(managedInputsService.read(), QaSupport.studyFilter(ctx)).stream()
                 .map(r -> new Target(r.studyId(), r.abv(), r.version())).toList();
     }
 
@@ -314,27 +306,6 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
         return List.copyOf(byId.values());
     }
 
-    /** Ready studies (each once), restricted to {@code filter} when it is not empty. */
-    private static List<ManagedInputRow> select(List<ManagedInputRow> rows, Set<String> filter) {
-        Map<String, ManagedInputRow> byId = new LinkedHashMap<>();
-        for (ManagedInputRow row : rows) {
-            if (row.isReady() && (filter.isEmpty() || filter.contains(row.studyId()))) {
-                byId.putIfAbsent(row.studyId(), row);
-            }
-        }
-        return List.copyOf(byId.values());
-    }
-
-    private static Set<String> studyFilter(JobContext ctx) {
-        Set<String> ids = new LinkedHashSet<>();
-        for (String id : ctx.get("study-filter", "").split(",")) {
-            if (!id.isBlank()) {
-                ids.add(id.trim());
-            }
-        }
-        return ids;
-    }
-
     /** Distinct participants per normalized consent code, per study. */
     private Map<String, Map<String, DbConsent>> dbCounts(List<String> studyIds) {
         Map<String, Map<String, DbConsent>> byStudy = new LinkedHashMap<>();
@@ -360,42 +331,30 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
     LoadCounts readLoadCounts(String uri) {
         Map<String, Map<String, Long>> counts = new LinkedHashMap<>();
         Map<String, String> sources = new LinkedHashMap<>();
-        InputStream in = io.openInput(uri);
-        long line = 1;
-        try (Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.COMMA)) {
-            for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
-                line++;
-                if (line == 2) {
-                    List<String> missing = Stream.of(COL_STUDY_ID, COL_CONSENT_CODE, COL_PARTICIPANTS_LOADED)
-                            .filter(c -> !row.containsKey(c)).toList();
-                    if (!missing.isEmpty()) {
-                        throw new DataException("--load-counts " + uri + " is missing column(s) " + missing
-                                + "; found " + row.keySet());
-                    }
-                }
-                String sid = Strings.trimToNull(row.get(COL_STUDY_ID));
-                String code = Strings.trimToNull(row.get(COL_CONSENT_CODE));
-                String n = Strings.trimToNull(row.get(COL_PARTICIPANTS_LOADED));
-                if (sid == null || code == null || (n != null && !n.matches("\\d{1,18}"))) {
-                    throw new DataException("--load-counts " + uri + " line " + line + ": need a study_id, a "
-                            + "consent_code and a whole-number (or blank) participants_loaded, got " + row);
-                }
-                // Blank: this run did not load the consent group (e.g. the migration split a study whose
-                // participants an earlier run loaded), so there is no load count to compare.
-                Long loaded = n == null ? null : Long.parseLong(n);
-                Map<String, Long> byCode = counts.computeIfAbsent(sid, k -> new LinkedHashMap<>());
-                String key = ConsentCountComparison.normalizeConsent(code);
-                if (loaded == null || (byCode.containsKey(key) && byCode.get(key) == null)) {
-                    byCode.put(key, null);
-                } else {
-                    byCode.merge(key, loaded, Long::sum);
-                }
-                String source = Strings.trimToNull(row.get(COL_SOURCE));
-                if (source != null) {
-                    sources.putIfAbsent(sid, source);
-                }
+        String what = "--load-counts " + uri;
+        QaSupport.readCsv(delimitedReader, io.openInput(uri), what,
+                List.of(COL_STUDY_ID, COL_CONSENT_CODE, COL_PARTICIPANTS_LOADED), (line, row) -> {
+            String sid = Strings.trimToNull(row.get(COL_STUDY_ID));
+            String code = Strings.trimToNull(row.get(COL_CONSENT_CODE));
+            String n = Strings.trimToNull(row.get(COL_PARTICIPANTS_LOADED));
+            if (sid == null || code == null || (n != null && !n.matches("\\d{1,18}"))) {
+                throw new DataException(what + " line " + line + ": need a study_id, a consent_code and a "
+                        + "whole-number (or blank) participants_loaded, got " + row);
             }
-        }
+            Map<String, Long> byCode = counts.computeIfAbsent(sid, k -> new LinkedHashMap<>());
+            String key = ConsentCountComparison.normalizeConsent(code);
+            // "1" and "c1" are one group: a second row for it would be counted twice, so it is an error.
+            if (byCode.containsKey(key)) {
+                throw new DataException(what + " line " + line + ": a second row for " + sid + " consent " + key);
+            }
+            // Blank: this run did not load the consent group (e.g. the migration split a study whose
+            // participants an earlier run loaded), so there is no load count to compare.
+            byCode.put(key, n == null ? null : Long.parseLong(n));
+            String source = Strings.trimToNull(row.get(COL_SOURCE));
+            if (source != null) {
+                sources.putIfAbsent(sid, source);
+            }
+        });
         // A study with no count at all was not loaded this run: leave it out, as if it were not listed.
         // Elsewhere an unknown count stays null, so only that consent goes uncompared.
         counts.values().removeIf(byCode -> byCode.values().stream().allMatch(Objects::isNull));
@@ -432,39 +391,17 @@ public class QaConsentCountsJob extends AbstractJob<QaConsentCountsJob.Output> {
                 }
             }
         }
-        writeAtomically(dir, COUNTS_FILE, all.toString());
-        writeAtomically(dir, DISCREPANCIES_FILE, discrepancies.toString());
+        QaSupport.writeAtomically(dir, COUNTS_FILE, all.toString());
+        QaSupport.writeAtomically(dir, DISCREPANCIES_FILE, discrepancies.toString());
     }
 
     private static String csvLine(Row r) {
-        return String.join(",", Stream.of(r.studyId(), r.version(), r.consentCode(), r.consentShortName(),
-                str(r.dbgapSubjects()), String.valueOf(r.dbParticipants()), str(r.loadParticipants()),
-                r.loadSource(), r.status(), r.note())
-                .map(v -> Strings.csvQuote(v == null ? "" : v.replaceAll("[\r\n]+", " "))).toList()) + "\n";
+        return QaSupport.csvLine(r.studyId(), r.version(), r.consentCode(), r.consentShortName(),
+                QaSupport.str(r.dbgapSubjects()), String.valueOf(r.dbParticipants()), QaSupport.str(r.loadParticipants()),
+                r.loadSource(), r.status(), r.note());
     }
 
-    private static String str(Long v) {
-        return v == null ? "" : String.valueOf(v);
-    }
-
-    /** Written aside and renamed: the runner uploads the reports directory while the job runs. */
-    private static void writeAtomically(Path dir, String name, String content) {
-        Path target = dir.resolve(name);
-        Path partial = dir.resolve(name + ".partial");
-        try {
-            Files.createDirectories(dir);
-            Files.writeString(partial, content, StandardCharsets.UTF_8);
-            try {
-                Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (IOException e) {
-            throw new InfrastructureException("Could not write " + target + ": " + e.getMessage(), e);
-        }
-    }
-
-    /** One WARNING per discrepancy -- per study for a study-level finding -- and one ERROR per unverified study. */
+    /** One WARNING per discrepancy -- per study for a study-level finding -- and one per unverified study. */
     private static void addIssues(Output output, ValidationReport report) {
         for (StudyResult r : output.results()) {
             StudyInput in = r.input();

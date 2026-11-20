@@ -78,7 +78,7 @@ import csv, sys
 def rows(path):
     with open(path, newline="", encoding="utf-8") as fh:
         return list(csv.DictReader(fh))
-print(sum(1 for r in rows(sys.argv[1]) if r["status"] not in ("MATCH", "NOT_LOADED_BY_DESIGN")), len(rows(sys.argv[2])))
+print(sum(1 for r in rows(sys.argv[1]) if r["status"] not in ("MATCH", "NOT_LOADED_BY_DESIGN", "SAME_AS_JOB")), len(rows(sys.argv[2])))
 PY
   )
   check "discrepancies are exactly the rows needing follow-up (${FOLLOW_UP:-?} vs ${LISTED:-?})" \

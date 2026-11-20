@@ -85,9 +85,11 @@ done
 # Whatever an earlier run with the same run id left under its report prefix would read as this
 # run's: its sentinel as this run's result, its reports among this run's. Run ids can repeat (the
 # pipelines derive them from the Jenkins build tag), so the prefix is cleared before the task is
-# written, and the sentinel's absence confirmed.
+# written (a failure refuses the dispatch: any report left there would be read as this run's), and
+# the sentinel's absence confirmed.
 STATUS_KEY="$REPORTS_PREFIX/status.json"
-aws s3 rm "s3://$BUCKET/$REPORTS_PREFIX/" --recursive --region "$REGION" --only-show-errors >/dev/null 2>&1
+err=$(aws s3 rm "s3://$BUCKET/$REPORTS_PREFIX/" --recursive --region "$REGION" --only-show-errors 2>&1 >/dev/null) \
+    || die "could not clear the earlier reports under s3://$BUCKET/$REPORTS_PREFIX/; refusing to dispatch over them: $(tr '\n' ' ' <<<"$err")"
 if err=$(aws s3api head-object --bucket "$BUCKET" --key "$STATUS_KEY" --region "$REGION" 2>&1 >/dev/null); then
   die "could not remove the earlier sentinel s3://$BUCKET/$STATUS_KEY; refusing to dispatch over it"
 elif [[ "$err" != *"(404)"* && "$err" != *"Not Found"* ]]; then

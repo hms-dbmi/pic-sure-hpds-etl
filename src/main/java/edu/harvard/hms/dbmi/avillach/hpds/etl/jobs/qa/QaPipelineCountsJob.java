@@ -62,14 +62,15 @@ import java.util.stream.Stream;
  *       give ({@code --run-counts}, collected by the orchestrator), against {@code subject_count}.</li>
  * </ul>
  *
- * <p>Summaries are read from {@code {data-root}/{study_id}/rawData/{study_id}_{version}_summary.json},
- * else from a {@code {study_id}*study_summary.json} there (see {@link SummaryCache}). What to do about a study with no usable summary file is
+ * <p>Summaries are read from {@code {data-root}/{study_id}/qa/{study_id}_{version}_summary.json}, where QA
+ * caches those it fetches, else from the same name or a {@code {study_id}*study_summary.json} under
+ * {@code {study_id}/rawData/}, where they are staged (see {@link SummaryCache}). What to do about a study with no usable summary file is
  * {@code --fetch-missing-summaries}:
  * <ul>
  *   <li>false (the default): nothing is asked of dbGaP, and each such study fails QA (SUMMARY_MISSING);</li>
  *   <li>true: they are asked of dbGaP's SSTR API -- one at a time by default, paced and retried gently
  *       (see {@link DbgapBatchLookup}), until {@code --dbgap-deadline-seconds} -- and each answer is stored
- *       there at once ({@code --cache-summaries}), so a later run does not ask again.</li>
+ *       under {@code qa/} at once ({@code --cache-summaries}), so a later run does not ask again.</li>
  * </ul>
  * The DB counts, the run counts and the summary files are read in parallel.
  *
@@ -109,6 +110,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
     static final String COL_PARTICIPANTS = "participants";
     /** Optional: "subjects" (the default) or "samples", the dbGaP count the source is compared with. */
     static final String COL_KIND = "kind";
+    /** Optional: what the run loaded the study from ("sstr", "multi"); a MULTI load drops consent 0. */
+    static final String COL_LOAD_SOURCE = "load_source";
 
     private final ManagedInputsService managedInputsService;
     private final ConsentRepository consents;
@@ -154,14 +157,15 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         List<ParamSpec> params = new ArrayList<>(List.of(
                 ParamSpec.required("data-root",
                         "Root of the per-study folders: summaries are cached at "
-                                + "{data-root}/{study_id}/rawData/{study_id}_{version}_summary.json (also read: "
-                                + "{study_id}*study_summary.json)",
+                                + "{data-root}/{study_id}/qa/{study_id}_{version}_summary.json (also read: the same "
+                                + "name, or {study_id}*study_summary.json, under {study_id}/rawData/)",
                         "s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing"),
                 ParamSpec.optional("run-counts",
                         "This run's counts per consent group from its job reports and final report: a CSV with "
-                                + "columns study_id,consent_code,source,participants[,kind] (kind: subjects, the "
-                                + "default, or samples). Studies it does not list are compared DB vs dbGaP only. "
-                                + "Blank: every study DB vs dbGaP only",
+                                + "columns study_id,consent_code,source,participants[,kind][,load_source] (kind: "
+                                + "subjects, the default, or samples; load_source: sstr or multi, what the run loaded "
+                                + "the study from). One row per study, consent code and source. Studies it does not "
+                                + "list are compared DB vs dbGaP only. Blank: every study DB vs dbGaP only",
                         "s3://bucket/etl-runner/reports/permanent-pipeline/<tag>/qa_run_counts.csv"),
                 ParamSpec.optional("source-pipeline",
                         "Which pipeline ran: migration or permanent (shown in the report)", "permanent"),
@@ -204,8 +208,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             }
         });
         List<ManagedInputRow> rows = managedInputsService.read();
-        Set<String> filter = studyFilter(ctx);
-        List<ManagedInputRow> selected = select(rows, filter);
+        Set<String> filter = QaSupport.studyFilter(ctx);
+        List<ManagedInputRow> selected = QaSupport.select(rows, filter);
         Set<String> selectedIds = new LinkedHashSet<>(selected.stream().map(ManagedInputRow::studyId).toList());
         for (String id : filter) {
             if (!selectedIds.contains(id)) {
@@ -222,7 +226,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
 
     @Override
     protected Output execute(JobContext ctx) {
-        List<ManagedInputRow> studies = select(managedInputsService.read(), studyFilter(ctx));
+        List<ManagedInputRow> studies = QaSupport.select(managedInputsService.read(), QaSupport.studyFilter(ctx));
         List<String> studyIds = studies.stream().map(ManagedInputRow::studyId).toList();
         // Only a genomic (P/G) study's samples are compared: others are not expected to have any.
         List<String> genomicIds = studies.stream().filter(ManagedInputRow::isGenomic).map(ManagedInputRow::studyId).toList();
@@ -241,7 +245,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         Map<String, Map<String, Long>> dbParticipants = new LinkedHashMap<>();
         Map<String, Map<String, String>> dbAbbreviations = new LinkedHashMap<>();
         Map<String, Map<String, Long>> dbSamples = new LinkedHashMap<>();
-        Map<String, Map<Measure, Map<String, Long>>> runCounts;
+        RunCounts runCounts;
         Map<String, SummaryCache.Entry> cached = new LinkedHashMap<>();
         try {
             CompletableFuture<List<ConsentRepository.ConsentGroupCount>> participantsFuture =
@@ -250,8 +254,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
                     CompletableFuture.supplyAsync(() -> genomicIds.isEmpty() ? List.of()
                             : samples.countSamplesByConsent(genomicIds,
                             SstrPopulateRdsParticipantsJob.SOURCE), pool);
-            CompletableFuture<Map<String, Map<Measure, Map<String, Long>>>> runFuture =
-                    CompletableFuture.supplyAsync(() -> runCountsUri == null ? Map.of() : readRunCounts(runCountsUri), pool);
+            CompletableFuture<RunCounts> runFuture = CompletableFuture.supplyAsync(
+                    () -> runCountsUri == null ? RunCounts.NONE : readRunCounts(runCountsUri), pool);
             Map<String, CompletableFuture<SummaryCache.Entry>> cacheFutures = new LinkedHashMap<>();
             for (ManagedInputRow s : studies) {
                 String version = ConsentCountComparison.normalizeVersion(s.version());
@@ -277,7 +281,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             pool.shutdownNow();
         }
         log.info("Read DB counts for {} study/studies, run counts for {}, and {} cached summary/summaries of {} looked for",
-                dbParticipants.size(), runCounts.size(), cached.values().stream().filter(SummaryCache.Entry::found).count(),
+                dbParticipants.size(), runCounts.counts().size(), cached.values().stream().filter(SummaryCache.Entry::found).count(),
                 cached.size());
 
         boolean fetchMissing = ctx.getBoolean("fetch-missing-summaries", false);
@@ -312,19 +316,19 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             if (s.isGenomic()) {
                 counts.put(PipelineCountComparison.DB_SAMPLES, dbSamples.getOrDefault(sid, Map.of()));
             }
-            runCounts.getOrDefault(sid, Map.of()).forEach((measure, byCode) -> {
+            runCounts.counts().getOrDefault(sid, Map.of()).forEach((measure, byCode) -> {
                 if (s.isGenomic() || measure.kind() != Kind.SAMPLES) {
                     counts.put(measure, byCode);
                 }
             });
             StudyInput in = new StudyInput(sid, s.abv(), ConsentCountComparison.normalizeVersion(s.version()),
-                    s.version(), counts, dbAbbreviations.getOrDefault(sid, Map.of()));
+                    s.version(), counts, dbAbbreviations.getOrDefault(sid, Map.of()), runCounts.loadSources().get(sid));
             results.add(PipelineCountComparison.compare(in, outcome(cached.get(sid), lookups.get(sid), fetchMissing)));
         }
 
         String pipeline = Strings.trimToNull(ctx.get("source-pipeline", ""));
         Output output = new Output(results, pipeline == null ? null : pipeline.toLowerCase(Locale.ROOT), runCountsUri,
-                runCounts.size(), fetchMissing, lookups, Map.copyOf(uploaded), Map.copyOf(uploadFailures), cacheErrors);
+                runCounts.counts().size(), fetchMissing, lookups, Map.copyOf(uploaded), Map.copyOf(uploadFailures), cacheErrors);
         PipelineCountsReport.write(ctx.reportsDir(), ctx.runId(), output);
 
         List<String> unverified = output.unverifiedStudies();
@@ -358,46 +362,26 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
 
     /* ---- Inputs ---- */
 
-    /** Ready studies (each once), restricted to {@code filter} when it is not empty. */
-    private static List<ManagedInputRow> select(List<ManagedInputRow> rows, Set<String> filter) {
-        Map<String, ManagedInputRow> byId = new LinkedHashMap<>();
-        for (ManagedInputRow row : rows) {
-            if (row.isReady() && (filter.isEmpty() || filter.contains(row.studyId()))) {
-                byId.putIfAbsent(row.studyId(), row);
-            }
-        }
-        return List.copyOf(byId.values());
-    }
-
-    private static Set<String> studyFilter(JobContext ctx) {
-        Set<String> ids = new LinkedHashSet<>();
-        for (String id : ctx.get("study-filter", "").split(",")) {
-            if (!id.isBlank()) {
-                ids.add(id.trim());
-            }
-        }
-        return ids;
+    /**
+     * The run's counts: study id to measure (one per source, in first-seen order) to normalized consent
+     * code to count, and each study's load source where given.
+     */
+    record RunCounts(Map<String, Map<Measure, Map<String, Long>>> counts, Map<String, String> loadSources) {
+        static final RunCounts NONE = new RunCounts(Map.of(), Map.of());
     }
 
     /**
-     * The run's counts: study id to measure (one per source, in first-seen order) to normalized consent
-     * code to count. A row with a blank count is skipped (the source did not count that group).
+     * Reads {@code --run-counts}. A row with a blank count is skipped (the source did not count that
+     * group). A second row for a study, consent code and source is an error: summing it would count
+     * the group twice.
      */
-    Map<String, Map<Measure, Map<String, Long>>> readRunCounts(String uri) {
+    RunCounts readRunCounts(String uri) {
         Map<String, Map<Measure, Map<String, Long>>> byStudy = new LinkedHashMap<>();
-        long line = 1;
-        try (InputStream in = io.openInput(uri);
-             Stream<Map<String, String>> stream = delimitedReader.stream(in, DelimitedReader.COMMA)) {
-            for (Map<String, String> row : (Iterable<Map<String, String>>) stream::iterator) {
-                line++;
-                if (line == 2) {
-                    List<String> missing = Stream.of(COL_STUDY_ID, COL_CONSENT_CODE, COL_SOURCE, COL_PARTICIPANTS)
-                            .filter(c -> !row.containsKey(c)).toList();
-                    if (!missing.isEmpty()) {
-                        throw new DataException("--run-counts " + uri + " is missing column(s) " + missing
-                                + "; found " + row.keySet());
-                    }
-                }
+        Map<String, String> loadSources = new LinkedHashMap<>();
+        String what = "--run-counts " + uri;
+        try (InputStream in = io.openInput(uri)) {
+            QaSupport.readCsv(delimitedReader, in, what,
+                    List.of(COL_STUDY_ID, COL_CONSENT_CODE, COL_SOURCE, COL_PARTICIPANTS), (line, row) -> {
                 String sid = Strings.trimToNull(row.get(COL_STUDY_ID));
                 String code = Strings.trimToNull(row.get(COL_CONSENT_CODE));
                 String source = Strings.trimToNull(row.get(COL_SOURCE));
@@ -405,23 +389,31 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
                 String kind = Strings.trimToNull(row.get(COL_KIND));
                 if (sid == null || code == null || source == null || (n != null && !n.matches("\\d{1,18}"))
                         || (kind != null && !List.of("subjects", "samples").contains(kind.toLowerCase(Locale.ROOT)))) {
-                    throw new DataException("--run-counts " + uri + " line " + line + ": need a study_id, a "
-                            + "consent_code, a source, a whole-number (or blank) participants and a kind of subjects "
-                            + "or samples (or blank), got " + row);
+                    throw new DataException(what + " line " + line + ": need a study_id, a consent_code, a source, "
+                            + "a whole-number (or blank) participants and a kind of subjects or samples (or blank), "
+                            + "got " + row);
+                }
+                String loadSource = Strings.trimToNull(row.get(COL_LOAD_SOURCE));
+                if (loadSource != null) {
+                    loadSources.putIfAbsent(sid, loadSource.toLowerCase(Locale.ROOT));
                 }
                 if (n == null) {
-                    continue;
+                    return;
                 }
                 Measure measure = new Measure(source, "samples".equalsIgnoreCase(kind) ? Kind.SAMPLES : Kind.SUBJECTS);
-                byStudy.computeIfAbsent(sid, k -> new LinkedHashMap<>())
-                        .computeIfAbsent(measure, k -> new LinkedHashMap<>())
-                        .merge(ConsentCountComparison.normalizeConsent(code), Long.parseLong(n), Long::sum);
-            }
+                String key = ConsentCountComparison.normalizeConsent(code);
+                Map<String, Long> byCode = byStudy.computeIfAbsent(sid, k -> new LinkedHashMap<>())
+                        .computeIfAbsent(measure, k -> new LinkedHashMap<>());
+                if (byCode.putIfAbsent(key, Long.parseLong(n)) != null) {
+                    throw new DataException(what + " line " + line + ": a second " + source + " count for " + sid
+                            + " consent " + key);
+                }
+            });
         } catch (IOException e) {
             throw new InfrastructureException("Could not read --run-counts " + uri + ": " + e.getMessage(), e);
         }
         log.info("Read run counts for {} study/studies from {}", byStudy.size(), uri);
-        return byStudy;
+        return new RunCounts(byStudy, loadSources);
     }
 
     /* ---- Summaries ---- */
@@ -453,10 +445,9 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             return;
         }
         DbgapStudySummary s = lookup.summary();
-        if ((s.accession() != null && !s.accession().equalsIgnoreCase(request.studyId()))
-                || (s.version() != null && !("v" + s.version()).equals(request.version()))) {
-            log.warn("dbGaP {}.{}: the answer is for {}.v{}; not cached", request.studyId(), request.version(),
-                    s.accession(), s.version());
+        if (!QaSupport.describes(s, request.studyId(), request.version())) {
+            log.warn("dbGaP {}.{}: the answer is for {}; not cached", request.studyId(), request.version(),
+                    QaSupport.named(s));
             return;
         }
         String uri = cache.uri(request.studyId(), request.version());
@@ -552,6 +543,7 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
     static Map<String, Object> metrics(Output output) {
         Map<String, Long> byType = new LinkedHashMap<>();
         Map<String, Long> byMeasure = new LinkedHashMap<>();
+        long inRunDiscrepancies = 0;
         long compared = 0;
         long matching = 0;
         List<String> withDiscrepancies = new ArrayList<>();
@@ -576,6 +568,9 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             }
             if (r.discrepancies() > 0) {
                 withDiscrepancies.add(r.input().studyId());
+                if (r.input().inRun()) {
+                    inRunDiscrepancies += r.discrepancies();
+                }
             }
         }
         int attempts = 0;
@@ -593,10 +588,12 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
         m.put("countsCompared", compared);
         m.put("countsMatching", matching);
         m.put("discrepancies", byType.values().stream().mapToLong(Long::longValue).sum());
+        m.put("discrepanciesInRun", inRunDiscrepancies);
         m.put("discrepanciesByType", byType);
         m.put("discrepanciesByMeasure", byMeasure);
         m.put("studiesWithDiscrepancies", withDiscrepancies);
         m.put("unverifiedStudies", output.unverifiedStudies());
+        m.put("summariesMissing", output.results().stream().filter(r -> r.studyStatus() == Status.SUMMARY_MISSING).count());
         m.put("summariesFromCache", output.results().stream().filter(r -> r.summarySource() == SummarySource.CACHE).count());
         m.put("summariesFromApi", output.results().stream().filter(r -> r.summarySource() == SummarySource.API).count());
         m.put("summariesCached", output.uploaded().size());

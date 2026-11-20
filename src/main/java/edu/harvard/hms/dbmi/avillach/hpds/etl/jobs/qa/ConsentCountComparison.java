@@ -16,7 +16,8 @@ import java.util.regex.Pattern;
  *
  * <p>Consent codes are matched after {@link #normalizeConsent normalizing} ("c1", "01" and 1 are all
  * "1"). A consent present on only one side counts as 0 on the other. Consent 0 is compared like any
- * other code.
+ * other code, except that a study loaded from its MULTI files has none of it by design (see
+ * {@link QaSupport#consentZeroDropped}).
  */
 final class ConsentCountComparison {
 
@@ -148,14 +149,12 @@ final class ConsentCountComparison {
             studyNote = "dbGaP gave no usable answer: " + lookup.message();
         } else {
             DbgapStudySummary s = lookup.summary();
-            boolean otherAccession = s.accession() != null && !s.accession().equalsIgnoreCase(in.studyId());
-            boolean otherVersion = s.version() != null && !("v" + s.version()).equals(in.version());
-            if (otherAccession || otherVersion) {
-                // Its counts describe another study version, so comparing them would mislead.
+            if (!QaSupport.describes(s, in.studyId(), in.version())) {
+                // Its counts describe another study version (or one it does not name), so comparing
+                // them would mislead.
                 studyStatus = Status.VERSION_MISMATCH;
-                studyNote = "requested " + requested + " but dbGaP answered for "
-                        + (s.accession() == null ? in.studyId() : s.accession()) + "."
-                        + (s.version() == null ? in.version() : "v" + s.version()) + "; counts not compared";
+                studyNote = "requested " + requested + " but dbGaP answered for " + QaSupport.named(s)
+                        + "; counts not compared";
             } else {
                 summary = s;
             }
@@ -212,9 +211,12 @@ final class ConsentCountComparison {
                     notes.add("this run's load report says " + loaded + " but the DB holds " + dbCount);
                 }
             }
-            if ("0".equals(code) && "multi".equalsIgnoreCase(in.loadSource())
-                    && (statuses.contains(Status.MISSING_IN_DB) || statuses.contains(Status.COUNT_MISMATCH))) {
-                notes.add("source MULTI drops consent 0");
+            if ("0".equals(code) && QaSupport.consentZeroDropped(false, in.loadSource())) {
+                if (statuses.remove(Status.MISSING_IN_DB)) {
+                    notes.add("source MULTI drops consent 0: not loaded by design");
+                } else if (statuses.contains(Status.COUNT_MISMATCH)) {
+                    notes.add("source MULTI drops consent 0");
+                }
             }
 
             String shortName = group != null && group.shortName() != null ? group.shortName()

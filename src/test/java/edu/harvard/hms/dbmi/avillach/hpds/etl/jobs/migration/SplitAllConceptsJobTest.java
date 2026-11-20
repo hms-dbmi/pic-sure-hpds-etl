@@ -433,16 +433,16 @@ class SplitAllConceptsJobTest {
     @Test
     void drops_rows_whose_concept_belongs_to_another_study() throws Exception {
         long id1 = 1L;
-        String studyId = "phs001211";
+        String studyId = "phs000903";
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µphs001211µageµ\",\"42\",\"\",\"0\"",
-                "\"100\",\"µphs000280µbmiµ\",\"27\",\"\",\"0\"",
-                "\"100\",\"µphs000280µsexµ\",\"\",\"M\",\"0\"",
+                "\"100\",\"µphs000903µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"µphs000902µbmiµ\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs000902µsexµ\",\"\",\"M\",\"0\"",
                 "\"100\",\"µDCC Harmonized data setµheightµ\",\"170\",\"\",\"0\"",
                 // An unmapped id with a foreign concept counts as foreign, not unmapped.
-                "\"999\",\"µphs000280µbmiµ\",\"30\",\"\",\"0\"");
+                "\"999\",\"µphs000902µbmiµ\",\"30\",\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -450,21 +450,21 @@ class SplitAllConceptsJobTest {
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
                 "study-id", studyId,
-                "abbreviation", "ARIC",
+                "abbreviation", "STUDY2",
                 "input", allConceptsCsv.toString(),
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-foreign");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
-                .containsExactly("\"1\",\"µphs001211µageµ\",\"42\",\"\",\"0\"");
+        assertThat(Files.readAllLines(outputDir.resolve("phs000903/allConcepts/c1/phs000903_allConcepts_c1.csv")))
+                .containsExactly("\"1\",\"µphs000903µageµ\",\"42\",\"\",\"0\"");
         assertThat(result.getMetrics())
                 .containsEntry("totalRows", 5L)
                 .containsEntry("foreignConceptRows", 4L)
                 .containsEntry("unmappedIds", 0L)
                 .containsEntry("rowsPerConsent", Map.of("1", 1L));
         assertThat(result.getMetrics().get("foreignFirstNodes"))
-                .isEqualTo(Map.of("phs000280", 3L, "DCC Harmonized data set", 1L));
+                .isEqualTo(Map.of("phs000902", 3L, "DCC Harmonized data set", 1L));
         assertThat(result.getOutputValidation().getIssues())
                 .anyMatch(i -> i.code().equals("FOREIGN_CONCEPTS")
                         && i.message().startsWith("4 row(s) (80.0%)")
@@ -475,17 +475,17 @@ class SplitAllConceptsJobTest {
     @Test
     void fails_when_every_row_belongs_to_another_study() throws Exception {
         long id1 = 1L;
-        String studyId = "phs001211";
+        String studyId = "phs000903";
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
-        Path allConceptsCsv = writeAllConceptsCsv("\"100\",\"µphs000280µbmiµ\",\"27\",\"\",\"0\"");
+        Path allConceptsCsv = writeAllConceptsCsv("\"100\",\"µphs000902µbmiµ\",\"27\",\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
 
         JobResult result = executor.run(job, Map.of(
                 "study-id", studyId,
-                "abbreviation", "ARIC",
+                "abbreviation", "STUDY2",
                 "input", allConceptsCsv.toString(),
                 "mapping", mappingCsv.toString(),
                 "output", tempDir.resolve("output").toString()), "test-all-foreign");
@@ -525,16 +525,16 @@ class SplitAllConceptsJobTest {
     @Test
     void drops_rows_whose_concept_path_has_no_node_structure() throws Exception {
         long id1 = 1L;
-        String studyId = "phs001211";
+        String studyId = "phs000903";
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µphs001211µageµ\",\"42\",\"\",\"0\"",
-                "\"100\",\"phs001211µbmiµ\",\"27\",\"\",\"0\"",
-                "\"100\",\"µphs001211µbmi\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs000903µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"phs000903µbmiµ\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs000903µbmi\",\"27\",\"\",\"0\"",
                 "\"100\",\"\",\"\",\"x\",\"0\"",
                 // Malformed is checked first: a malformed path is never counted as another study's.
-                "\"100\",\"µphs000280µbmi\",\"27\",\"\",\"0\"");
+                "\"100\",\"µphs000902µbmi\",\"27\",\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -542,14 +542,14 @@ class SplitAllConceptsJobTest {
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
                 "study-id", studyId,
-                "abbreviation", "ARIC",
+                "abbreviation", "STUDY2",
                 "input", allConceptsCsv.toString(),
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-malformed-paths");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
-                .containsExactly("\"1\",\"µphs001211µageµ\",\"42\",\"\",\"0\"");
+        assertThat(Files.readAllLines(outputDir.resolve("phs000903/allConcepts/c1/phs000903_allConcepts_c1.csv")))
+                .containsExactly("\"1\",\"µphs000903µageµ\",\"42\",\"\",\"0\"");
         assertThat(result.getMetrics())
                 .containsEntry("malformedPathRows", 4L)
                 .containsEntry("foreignConceptRows", 0L)
@@ -558,7 +558,7 @@ class SplitAllConceptsJobTest {
                 .anyMatch(i -> i.code().equals("MALFORMED_CONCEPT_PATHS")
                         && i.message().startsWith("4 row(s) (80.0%)")
                         && i.context().get("sampleConceptPaths").equals(
-                                List.of("phs001211µbmiµ", "µphs001211µbmi", "", "µphs000280µbmi")))
+                                List.of("phs000903µbmiµ", "µphs000903µbmi", "", "µphs000902µbmi")))
                 .noneMatch(i -> i.code().equals("FOREIGN_CONCEPTS"));
     }
 
@@ -569,26 +569,41 @@ class SplitAllConceptsJobTest {
         assertThat(SplitAllConceptsJob.belongsToStudy("phs000123.v1.p1", "phs000123")).isTrue();
         assertThat(SplitAllConceptsJob.belongsToStudy("phs000123_v2", "phs000123")).isTrue();
         assertThat(SplitAllConceptsJob.belongsToStudy("TOPMed phs000123", "phs000123")).isTrue();
-        // A later occurrence counts when an earlier one runs on into a digit.
-        assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234 phs000123", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123 (phs000123.v2)", "phs000123")).isTrue();
 
         // Another accession, not this study's.
         assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234", "phs000123")).isFalse();
-        assertThat(SplitAllConceptsJob.belongsToStudy("phs000280", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000902", "phs000123")).isFalse();
+        // No accession: globals and harmonized data sets are not a study's own concepts.
         assertThat(SplitAllConceptsJob.belongsToStudy("DCC Harmonized data set", "phs000123")).isFalse();
-        assertThat(SplitAllConceptsJob.belongsToStudy("PHS000123", "phs000123")).as("case-sensitive").isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("_studies_consents", "phs000123")).isFalse();
+    }
+
+    @Test
+    void a_first_node_naming_another_accession_as_well_is_not_the_studys() {
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs0001234 phs000123", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123 (parent phs000902)", "phs000123")).isFalse();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000902 (parent phs000123)", "phs000123")).isFalse();
+    }
+
+    @Test
+    void accessions_match_in_any_case() {
+        assertThat(SplitAllConceptsJob.belongsToStudy("PHS000123", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("Phs000123.v1.p1", "phs000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("phs000123", "PHS000123")).isTrue();
+        assertThat(SplitAllConceptsJob.belongsToStudy("PHS000280", "phs000123")).isFalse();
     }
 
     @Test
     void keeps_rows_whose_first_node_is_a_versioned_study_id() throws Exception {
         long id1 = 1L;
-        String studyId = "phs001211";
+        String studyId = "phs000903";
 
         Path mappingCsv = writeMappingCsv("100," + id1 + ",S1");
         Path allConceptsCsv = writeAllConceptsCsv(
-                "\"100\",\"µphs001211.v1µageµ\",\"42\",\"\",\"0\"",
-                "\"100\",\"\\phs001211.v1.p1\\bmi\\\",\"27\",\"\",\"0\"",
-                "\"100\",\"µphs0012110µbmiµ\",\"27\",\"\",\"0\"");
+                "\"100\",\"µphs000903.v1µageµ\",\"42\",\"\",\"0\"",
+                "\"100\",\"\\phs000903.v1.p1\\bmi\\\",\"27\",\"\",\"0\"",
+                "\"100\",\"µphs0009030µbmiµ\",\"27\",\"\",\"0\"");
 
         when(consentRepository.findByStudyId(studyId)).thenReturn(List.of(
                 new Consent(id1, studyId, "1", "GRU")));
@@ -596,18 +611,18 @@ class SplitAllConceptsJobTest {
         Path outputDir = tempDir.resolve("output");
         JobResult result = executor.run(job, Map.of(
                 "study-id", studyId,
-                "abbreviation", "ARIC",
+                "abbreviation", "STUDY2",
                 "input", allConceptsCsv.toString(),
                 "mapping", mappingCsv.toString(),
                 "output", outputDir.toString()), "test-versioned");
 
-        assertThat(Files.readAllLines(outputDir.resolve("phs001211/allConcepts/c1/phs001211_allConcepts_c1.csv")))
+        assertThat(Files.readAllLines(outputDir.resolve("phs000903/allConcepts/c1/phs000903_allConcepts_c1.csv")))
                 .containsExactly(
-                        "\"1\",\"µphs001211.v1µageµ\",\"42\",\"\",\"0\"",
-                        "\"1\",\"\\phs001211.v1.p1\\bmi\\\",\"27\",\"\",\"0\"");
+                        "\"1\",\"µphs000903.v1µageµ\",\"42\",\"\",\"0\"",
+                        "\"1\",\"\\phs000903.v1.p1\\bmi\\\",\"27\",\"\",\"0\"");
         assertThat(result.getMetrics())
                 .containsEntry("foreignConceptRows", 1L)
-                .containsEntry("foreignFirstNodes", Map.of("phs0012110", 1L));
+                .containsEntry("foreignFirstNodes", Map.of("phs0009030", 1L));
     }
 
     @Test

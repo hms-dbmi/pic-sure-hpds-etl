@@ -39,11 +39,14 @@
 //
 // End of every run: downstream-artifacts/pipeline-report/ (etl-runners/pipeline-report/), archived
 // and uploaded to s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/.
-// The last stage, QA pipeline counts (etl-runners/qa-pipeline-counts/), compares every ready
-// study's counts per consent group -- the DB, and this run's job and final reports -- with its
-// dbGaP summary; findings make the build UNSTABLE. It writes the pipeline report first, to read its
-// counts (post writes it again, final). Its report lands in downstream-artifacts/qa-pipeline-counts/
-// and beside the pipeline report in S3.
+// The participant DB is backed up by the stage before the last (post { always } does it instead when
+// the build stops earlier). The last stage, QA pipeline counts (etl-runners/qa-pipeline-counts/),
+// compares every ready study's counts per consent group -- the DB, and this run's job and final
+// reports -- with its dbGaP summary; findings make the build UNSTABLE, and its counts go in the build
+// description. It writes the pipeline report first, to read its counts (post writes it again,
+// final). A run stopped only by per-study failures (CONTINUE_ON_STUDY_FAILURE) runs QA from post,
+// after the backup. Its report lands in downstream-artifacts/qa-pipeline-counts/ and beside the
+// pipeline report in S3.
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -112,6 +115,8 @@ pipeline {
                description: 'Size-scaled per-study allConcepts timeout (exit 124 when exceeded): this plus GENERATOR_TIMEOUT_SECONDS_PER_GB per GiB of the study\'s decoded data, never less than 7200 (2 h) nor more than 12600 (3.5 h, inside the generator job\'s own 4 h limit).')
         string(name: 'GENERATOR_TIMEOUT_SECONDS_PER_GB', defaultValue: '600',
                description: 'Seconds allowed per GiB of decoded data (default 10 minutes). Raise it if large studies time out while still making progress.')
+        string(name: 'GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '10800',
+               description: 'How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside that job\'s own 4 h limit. Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'MERGE_ALLCONCEPTS_PARALLELISM', defaultValue: '8',
                description: 'merge-allconcepts --parallelism: consent folders merged at once, 1-16')
         string(name: 'MERGE_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '14400',
@@ -125,11 +130,11 @@ pipeline {
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
-               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
+               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run, before QA)')
         string(name: 'QA_PIPELINE_COUNTS_JOB', defaultValue: 'qa-pipeline-counts',
                description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile as the last stage: every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov when QA_FETCH_MISSING_SUMMARIES is checked. Blank skips it.')
         booleanParam(name: 'QA_FETCH_MISSING_SUMMARIES', defaultValue: false,
-               description: 'QA pipeline counts: fetch each summary missing under DATA_ROOT from dbGaP\'s API (and cache it). Unchecked, a study with no summary file fails QA (SUMMARY_MISSING) and dbGaP is not asked.')
+               description: 'QA pipeline counts: fetch each summary missing under DATA_ROOT from dbGaP\'s API (and cache it under {study}/qa/). Unchecked, a study with no summary file fails QA (SUMMARY_MISSING) and dbGaP is not asked.')
         booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
                description: 'Replace the participant database before this run with DB_RESTORE_FROM (blank = the latest clean backup), whether or not one is up. A running database is saved to participant_db_pre_overwrite.tar first.')
         string(name: 'DB_RESTORE_FROM', defaultValue: '',
@@ -147,7 +152,7 @@ pipeline {
 
     stages {
         // Every stage runs inside this one, for its timeout: a backstop for the whole run that,
-        // unlike a pipeline-level one, leaves post { } (the DB backup) its own time. Each child job
+        // unlike a pipeline-level one, leaves post { } (the DB backup, when the stage did not take it) its own time. Each child job
         // has its own, tighter timeout. 72 h: a sweep of ~30 new studies boots two runners per study
         // (SSTR load sequentially by default, then allConcepts), and the merge alone may take 4 h.
         stage('ETL') {
@@ -232,6 +237,7 @@ pipeline {
                     when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             orch().runPerStudyStage(
                                 title: 'SSTR load',
                                 key: 'sstr',
@@ -265,11 +271,13 @@ pipeline {
                     when { expression { !params.PREFLIGHT_ONLY } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             echo 'Generating global_AllConcepts.csv from populated database...'
                             orch().runDownstream(params.ALL_CONCEPTS_JOB, [
                                 string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
                                 string(name: 'MANAGED_INPUTS', value: orch().laterStageManagedInputs()),
                                 string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                                string(name: 'JOB_TIMEOUT_SECONDS', value: params.GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS.trim()),
                                 string(name: 'PREBUILT_IMAGE_TAR', value: orch().ownRunnerImage()),
                                 string(name: 'ENV', value: params.ENV),
                                 booleanParam(name: 'SKIP_TESTS', value: true),
@@ -282,6 +290,7 @@ pipeline {
                     when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             echo 'Creating VCF indexes from genomic data...'
                             orch().runDownstream(params.VCF_INDEXES_JOB, [
                                 string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
@@ -300,6 +309,7 @@ pipeline {
                     when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             orch().runPerStudyStage(
                                 title: 'Per-study allConcepts',
                                 key: 'per-study-all-concepts',
@@ -336,6 +346,7 @@ pipeline {
                     when { expression { !params.PREFLIGHT_ONLY } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             echo 'Merging per-consent allConcepts files where needed...'
                             // A STUDY_ID reload loads that study whatever its ready flag, so merge
                             // exactly it; a sweep merges every ready (and not excluded) study. (The
@@ -365,6 +376,7 @@ pipeline {
                     when { expression { !params.PREFLIGHT_ONLY } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             orch().runDownstream(params.ALLCONCEPTS_MANIFEST_JOB, [
                                 string(name: 'INPUT', value: params.DATA_ROOT.trim()),
                                 string(name: 'GLOBAL_ALLCONCEPTS', value: params.ALL_CONCEPTS_OUTPUT.trim()),
@@ -379,21 +391,27 @@ pipeline {
                     }
                 }
 
+                stage('Back up participant DB') {
+                    // Before QA, so QA's hours (waiting out a dbGaP outage) never delay the backup or
+                    // cut it short. The run is complete, so a SUCCESS or UNSTABLE one is promoted to the
+                    // latest clean backup. post { always } backs up instead when the build stops earlier.
+                    when { expression { !params.PREFLIGHT_ONLY } }
+                    steps {
+                        script { orch().backupParticipantDbOnce(params.DB_BACKUP_JOB, params.ENV) }
+                    }
+                }
+
                 stage('QA pipeline counts') {
                     // Last stage: every ready study's counts per consent group -- the DB, and this run's
                     // job and final reports -- against its dbGaP summary. Only reads the DB. Findings,
-                    // and QA failing to run, make the build UNSTABLE, never FAILED: the ETL succeeded.
+                    // and QA not finishing, make the build UNSTABLE, never FAILED: the ETL succeeded.
+                    // Bounded (QA_TIMEOUT_HOURS): its dbGaP lookups stop after 6 hours; the runner's own
+                    // timeout is 7 h, and RETRY_ON_INFRA may run it twice.
                     when { expression { !params.PREFLIGHT_ONLY && params.QA_PIPELINE_COUNTS_JOB?.trim() } }
                     steps {
                         script {
-                            // Bounded: its dbGaP lookups stop after 6 hours; the runner's own timeout is
-                            // 7 h, and RETRY_ON_INFRA may run it twice.
-                            try {
-                                timeout(time: 15, unit: 'HOURS') {
-                                    orch().runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent')
-                                }
-                            } catch (err) {
-                                unstable("QA pipeline counts did not finish (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own.")
+                            orch().runQaStage(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent') {
+                                orch().writePipelineReport()
                             }
                         }
                     }
@@ -405,14 +423,23 @@ pipeline {
     post {
         always {
             script {
-                // Bounded on its own: the DB backup job has a 3 h timeout of its own.
+                // Unless the 'Back up participant DB' stage took it (the build stopped earlier).
                 try {
-                    timeout(time: 4, unit: 'HOURS') {
-                        orch().backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
-                    }
+                    orch().backupParticipantDbOnce(params.DB_BACKUP_JOB, params.ENV)
                 } catch (err) {
                     currentBuild.result = 'FAILURE'
                     echo "ERROR: the participant DB backup did not finish (${err}). Re-run ${params.DB_BACKUP_JOB} before the next pipeline run."
+                }
+                // A run stopped only by per-study failures never reached the QA stage: QA still checks
+                // every study (orch().qaSkipReason() says when it does not), after the backup.
+                if (env.QA_RAN != 'true' && params.QA_PIPELINE_COUNTS_JOB?.trim()) {
+                    try {
+                        orch().runQaStage(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent') {
+                            orch().writePipelineReport()
+                        }
+                    } catch (err) {
+                        echo "WARNING: QA pipeline counts did not run (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own."
+                    }
                 }
                 // After the backup, so the report carries the build's final result. Never changes it.
                 try {

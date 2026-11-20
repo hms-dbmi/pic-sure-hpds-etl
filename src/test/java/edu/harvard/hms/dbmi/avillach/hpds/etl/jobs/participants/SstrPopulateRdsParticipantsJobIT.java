@@ -138,12 +138,12 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     @Test
     void purges_stale_sample_rows_for_the_study_before_repopulating() {
         run(executor, job, JobTestSupport.tempFile("sstr-old.tsv", HEADER
-                + "SUBJ1\tSAMP_OLD\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"), "it-old");
+                + "SUBJ1\tSAMP_OLD\t1\tGRU\tphs000904.v1.p1.c1\tphs000904.v1.p1.s1\n"), "it-old");
         run(executor, job, JobTestSupport.tempFile("sstr-new.tsv", HEADER
-                + "SUBJ1\tSAMP_NEW\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s2\n"), "it-new");
+                + "SUBJ1\tSAMP_NEW\t1\tGRU\tphs000904.v1.p1.c1\tphs000904.v1.p1.s2\n"), "it-new");
 
         assertThat(jdbc.queryForList("SELECT source_sample_id FROM samples", String.class))
-                .containsExactlyInAnyOrder("SAMP_NEW", "phs001412.v1.p1.s2");
+                .containsExactlyInAnyOrder("SAMP_NEW", "phs000904.v1.p1.s2");
     }
 
     @Test
@@ -207,8 +207,8 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     void reads_the_consent_from_a_consent_code_column() {
         String input = JobTestSupport.tempFile("telemetry_report.tsv",
                 "SUBJECT_ID\tSAMPLE_ID\tconsent_code\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
-                + "SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n"
-                + "SUBJ2\tSAMP2\t2\tHMB\tphs001412.v1.p2.c1\tphs001412.v1.p2.s1\n");
+                + "SUBJ1\tSAMP1\t1\tGRU\tphs000904.v1.p1.c1\tphs000904.v1.p1.s1\n"
+                + "SUBJ2\tSAMP2\t2\tHMB\tphs000904.v1.p2.c1\tphs000904.v1.p2.s1\n");
 
         JobResult result = run(executor, job, input, "it-consent-code");
 
@@ -222,7 +222,7 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     void fails_without_a_consent_or_consent_code_column() {
         String input = JobTestSupport.tempFile("sstr.tsv",
                 "SUBJECT_ID\tSAMPLE_ID\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id\n"
-                + "SUBJ1\tSAMP1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1\n");
+                + "SUBJ1\tSAMP1\tGRU\tphs000904.v1.p1.c1\tphs000904.v1.p1.s1\n");
 
         JobResult result = run(executor, job, input, "it-no-consent-col");
 
@@ -235,7 +235,7 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
     void fails_on_missing_required_column() {
         String input = JobTestSupport.tempFile("sstr.tsv", """
             SUBJECT_ID\tSAMPLE_ID\tCONSENT\tdbgap_subject_id\tdbgap_sample_id
-            SUBJ1\tSAMP1\t1\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
+            SUBJ1\tSAMP1\t1\tphs000904.v1.p1.c1\tphs000904.v1.p1.s1
             """
         );
 
@@ -248,7 +248,7 @@ class SstrPopulateRdsParticipantsJobIT extends AbstractIntegrationTest {
 
     private static final String NO_SAMPLE_ID_COLUMN = """
             SUBJECT_ID\tSAMPLE_ID\tCONSENT\tconsent_abbreviation\tdbgap_subject_id
-            SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1
+            SUBJ1\tSAMP1\t1\tGRU\tphs000904.v1.p1.c1
             """;
 
     @ParameterizedTest

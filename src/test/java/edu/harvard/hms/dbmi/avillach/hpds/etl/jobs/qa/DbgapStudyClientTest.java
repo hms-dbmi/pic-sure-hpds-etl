@@ -66,32 +66,32 @@ class DbgapStudyClientTest {
 
     @Test
     void a_200_is_parsed_into_the_consent_groups_in_one_attempt() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(200, StubDbgapServer.sample()));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(200, StubDbgapServer.sample()));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(lookup.attempts()).isEqualTo(1);
-        assertThat(lookup.summary().accession()).isEqualTo("phs001412");
+        assertThat(lookup.summary().accession()).isEqualTo("phs123456");
         assertThat(lookup.summary().version()).isEqualTo(4);
         assertThat(lookup.summary().consentGroups()).containsExactly(
-                new DbgapStudySummary.ConsentGroup("0", "NRUP", 576L, 0L),
-                new DbgapStudySummary.ConsentGroup("1", "HMB-IRB-NPU", 402L, 400L),
-                new DbgapStudySummary.ConsentGroup("2", "DS-DHD-IRB-NPU", 3L, 3L));
-        assertThat(s.requests()).containsExactly("/study/phs001412.v4/summary");
+                new DbgapStudySummary.ConsentGroup("0", "NRUP", 50L, 0L),
+                new DbgapStudySummary.ConsentGroup("1", "HMB-IRB-NPU", 40L, 38L),
+                new DbgapStudySummary.ConsentGroup("2", "DS-XYZ-IRB-NPU", 3L, 3L));
+        assertThat(s.requests()).containsExactly("/study/phs123456.v4/summary");
         assertThat(waits).isEmpty();
     }
 
     @Test
     void an_unknown_study_version_is_not_found_after_exactly_one_attempt() {
-        StubDbgapServer s = server().on("phs001412.v99", Reply.json(400, notFound("phs001412.v99")));
+        StubDbgapServer s = server().on("phs123456.v99", Reply.json(400, notFound("phs123456.v99")));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v99");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v99");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.NOT_FOUND);
         assertThat(lookup.attempts()).isEqualTo(1);
-        assertThat(lookup.message()).isEqualTo("Invalid or non-existent study with accession phs001412.v99");
-        assertThat(s.requestsFor("phs001412.v99")).isEqualTo(1);
+        assertThat(lookup.message()).isEqualTo("Invalid or non-existent study with accession phs123456.v99");
+        assertThat(s.requestsFor("phs123456.v99")).isEqualTo(1);
         assertThat(waits).isEmpty();
     }
 
@@ -131,11 +131,11 @@ class DbgapStudyClientTest {
 
     @Test
     void a_429_waits_for_its_retry_after_seconds_then_succeeds() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(429, "{}").withHeader("Retry-After", "7"),
                 Reply.json(200, StubDbgapServer.sample()));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(lookup.attempts()).isEqualTo(2);
@@ -144,12 +144,12 @@ class DbgapStudyClientTest {
 
     @Test
     void a_retry_after_http_date_is_honoured_relative_to_the_clock() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(503, "").withHeader("Retry-After", "Tue, 20 Oct 2026 12:00:30 GMT"),
                 Reply.json(503, "").withHeader("Retry-After", "Tue, 20 Oct 2026 11:00:00 GMT"),
                 Reply.json(200, StubDbgapServer.sample()));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         // 30 s ahead of the clock; a date already past means retry now.
@@ -158,35 +158,35 @@ class DbgapStudyClientTest {
 
     @Test
     void an_unreadable_retry_after_falls_back_to_backoff_and_a_huge_one_is_capped() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(503, "").withHeader("Retry-After", "soon"),
                 Reply.json(503, "").withHeader("Retry-After", "86400"),
                 Reply.json(200, StubDbgapServer.sample()));
 
-        client(s.baseUrl()).fetch("phs001412", "v4");
+        client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(waits).containsExactly(Duration.ofSeconds(2), DbgapStudyClient.MAX_RETRY_AFTER);
     }
 
     @Test
     void two_503s_then_a_200_succeeds_on_the_third_attempt_with_exponential_backoff() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(503, "Service Unavailable"), Reply.json(503, "Service Unavailable"),
                 Reply.json(200, StubDbgapServer.sample()));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(lookup.attempts()).isEqualTo(3);
         assertThat(waits).containsExactly(Duration.ofSeconds(2), Duration.ofSeconds(4));
-        assertThat(s.requestsFor("phs001412.v4")).isEqualTo(3);
+        assertThat(s.requestsFor("phs123456.v4")).isEqualTo(3);
     }
 
     @Test
     void five_503s_fail_after_five_attempts() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(503, "Service Unavailable"));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(503, "Service Unavailable"));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(5);
@@ -195,12 +195,12 @@ class DbgapStudyClientTest {
         assertThat(lookup.unreachable()).isFalse();
         assertThat(waits).containsExactly(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(8),
                 Duration.ofSeconds(16));
-        assertThat(s.requestsFor("phs001412.v4")).isEqualTo(5);
+        assertThat(s.requestsFor("phs123456.v4")).isEqualTo(5);
     }
 
     @Test
     void requests_are_spaced_and_a_502_widens_the_spacing() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(502, "Bad Gateway"),
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(502, "Bad Gateway"),
                 Reply.json(200, StubDbgapServer.sample()));
         ManualClock clock = new ManualClock();
         DbgapStudyClient c = new DbgapStudyClient(HttpClient.newHttpClient(),
@@ -212,8 +212,8 @@ class DbgapStudyClientTest {
                 }, clock);
         closeables.add(c);
 
-        DbgapLookup first = c.fetch("phs001412", "v4");
-        DbgapLookup second = c.fetch("phs001412", "v4");
+        DbgapLookup first = c.fetch("phs123456", "v4");
+        DbgapLookup second = c.fetch("phs123456", "v4");
 
         assertThat(first.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(first.attempts()).isEqualTo(2);
@@ -221,16 +221,16 @@ class DbgapStudyClientTest {
         // The 502 widens the gap to 4 s: the 1 s backoff, then 3 s more before the retry. The answer
         // narrows it back to 2 s before the next study's request.
         assertThat(waits).containsExactly(Duration.ofSeconds(1), Duration.ofSeconds(3), Duration.ofSeconds(2));
-        assertThat(s.requestsFor("phs001412.v4")).isEqualTo(3);
+        assertThat(s.requestsFor("phs123456.v4")).isEqualTo(3);
     }
 
     @Test
     void backoff_is_capped_at_the_maximum() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(500, ""));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(500, ""));
         DbgapStudyClient c = client(s.baseUrl(), new DbgapStudyClient.Config(s.baseUrl(), 6, Duration.ofSeconds(2),
                 Duration.ofSeconds(5), Duration.ofSeconds(5)), waits::add);
 
-        c.fetch("phs001412", "v4");
+        c.fetch("phs123456", "v4");
 
         assertThat(waits).containsExactly(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(5),
                 Duration.ofSeconds(5), Duration.ofSeconds(5));
@@ -238,13 +238,13 @@ class DbgapStudyClientTest {
 
     @Test
     void a_timeout_is_retried() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(200, StubDbgapServer.sample()).delayed(2_000),
                 Reply.json(200, StubDbgapServer.sample()));
         DbgapStudyClient c = client(s.baseUrl(), new DbgapStudyClient.Config(s.baseUrl(), 5, Duration.ofSeconds(2),
                 Duration.ofSeconds(60), Duration.ofMillis(300)), waits::add);
 
-        DbgapLookup lookup = c.fetch("phs001412", "v4");
+        DbgapLookup lookup = c.fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(lookup.attempts()).isEqualTo(2);
@@ -261,14 +261,14 @@ class DbgapStudyClientTest {
                 Duration.ofSeconds(60), Duration.ofSeconds(5)), d -> {
             waits.add(d);
             if (started.get() == null) {
-                StubDbgapServer s = new StubDbgapServer(port).on("phs001412.v4",
+                StubDbgapServer s = new StubDbgapServer(port).on("phs123456.v4",
                         Reply.json(200, StubDbgapServer.sample()));
                 closeables.add(s);
                 started.set(s);
             }
         });
 
-        DbgapLookup lookup = c.fetch("phs001412", "v4");
+        DbgapLookup lookup = c.fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(lookup.attempts()).isEqualTo(2);
@@ -279,7 +279,7 @@ class DbgapStudyClientTest {
     void a_persistently_refused_connection_fails_after_every_attempt() throws IOException {
         String baseUrl = "http://127.0.0.1:" + freePort() + "/study";
 
-        DbgapLookup lookup = client(baseUrl).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(baseUrl).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(5);
@@ -290,11 +290,11 @@ class DbgapStudyClientTest {
 
     @Test
     void a_slow_answer_that_times_out_every_time_is_not_unreachable() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(200, StubDbgapServer.sample()).delayed(2_000));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(200, StubDbgapServer.sample()).delayed(2_000));
         DbgapStudyClient c = client(s.baseUrl(), new DbgapStudyClient.Config(s.baseUrl(), 2, Duration.ofSeconds(1),
                 Duration.ofSeconds(1), Duration.ofMillis(300)), waits::add);
 
-        DbgapLookup lookup = c.fetch("phs001412", "v4");
+        DbgapLookup lookup = c.fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.message()).contains("timed out");
@@ -309,10 +309,10 @@ class DbgapStudyClientTest {
         DbgapStudyClient c = client(baseUrl, new DbgapStudyClient.Config(baseUrl, 2, Duration.ofSeconds(1),
                 Duration.ofSeconds(1), Duration.ofSeconds(5)), d -> {
             waits.add(d);
-            closeables.add(new StubDbgapServer(port).on("phs001412.v4", Reply.json(503, "busy")));
+            closeables.add(new StubDbgapServer(port).on("phs123456.v4", Reply.json(503, "busy")));
         });
 
-        DbgapLookup lookup = c.fetch("phs001412", "v4");
+        DbgapLookup lookup = c.fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.message()).contains("HTTP 503");
@@ -321,13 +321,13 @@ class DbgapStudyClientTest {
 
     @Test
     void a_200_with_malformed_json_is_retried() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(200, "<html>upstream proxy error</html>"),
                 Reply.json(200, "{\"study\": [1, 2"),
                 Reply.json(200, "{\"unexpected\": true}"),
                 Reply.json(200, StubDbgapServer.sample()));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FOUND);
         assertThat(lookup.attempts()).isEqualTo(4);
@@ -335,9 +335,9 @@ class DbgapStudyClientTest {
 
     @Test
     void a_200_that_never_becomes_json_fails_after_every_attempt() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(200, "not json"));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(200, "not json"));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(5);
@@ -348,9 +348,9 @@ class DbgapStudyClientTest {
 
     @Test
     void a_403_fails_at_once() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(403, "Forbidden"));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(403, "Forbidden"));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(1);
@@ -360,10 +360,10 @@ class DbgapStudyClientTest {
 
     @Test
     void a_400_with_another_error_code_fails_at_once_rather_than_reading_as_not_found() {
-        StubDbgapServer s = server().on("phs001412.v4",
+        StubDbgapServer s = server().on("phs123456.v4",
                 Reply.json(400, "{\"error\":{\"error_message\":\"Bad request\",\"error_code\":7}}"));
 
-        DbgapLookup lookup = client(s.baseUrl()).fetch("phs001412", "v4");
+        DbgapLookup lookup = client(s.baseUrl()).fetch("phs123456", "v4");
 
         assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
         assertThat(lookup.attempts()).isEqualTo(1);
@@ -372,13 +372,13 @@ class DbgapStudyClientTest {
 
     @Test
     void an_interrupted_wait_stops_retrying_and_keeps_the_interrupt() {
-        StubDbgapServer s = server().on("phs001412.v4", Reply.json(503, ""));
+        StubDbgapServer s = server().on("phs123456.v4", Reply.json(503, ""));
         DbgapStudyClient c = client(s.baseUrl(), new DbgapStudyClient.Config(s.baseUrl(), 5, Duration.ofSeconds(2),
                 Duration.ofSeconds(60), Duration.ofSeconds(5)), d -> {
             throw new InterruptedException();
         });
         try {
-            DbgapLookup lookup = c.fetch("phs001412", "v4");
+            DbgapLookup lookup = c.fetch("phs123456", "v4");
 
             assertThat(lookup.outcome()).isEqualTo(DbgapLookup.Outcome.FAILED);
             assertThat(lookup.attempts()).isEqualTo(1);
@@ -392,8 +392,8 @@ class DbgapStudyClientTest {
     @Test
     void the_summary_url_follows_the_documented_shape() {
         DbgapStudyClient c = client(DbgapStudyClient.DEFAULT_BASE_URL + "/");
-        assertThat(c.summaryUri("phs001412", "v4").toString())
-                .isEqualTo("https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study/phs001412.v4/summary");
+        assertThat(c.summaryUri("phs123456", "v4").toString())
+                .isEqualTo("https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study/phs123456.v4/summary");
     }
 
     private static int freePort() throws IOException {

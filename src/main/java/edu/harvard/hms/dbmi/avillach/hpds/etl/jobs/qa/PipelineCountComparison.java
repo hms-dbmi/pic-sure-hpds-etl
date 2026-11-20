@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 
 /**
@@ -14,7 +15,12 @@ import java.util.TreeSet;
  *
  * <p>Consent codes are matched after {@linkplain ConsentCountComparison#normalizeConsent normalizing}
  * ("c1", "01" and 1 are all "1"). A measure that covers the study but does not list a consent group
- * counts 0 for it.
+ * counts 0 for it. Consent 0 is compared like any other group, except for a measure that drops it by
+ * contract (see {@link QaSupport#consentZeroDropped}).
+ *
+ * <p>A final report's count is taken from a job's report ({@link #REPORT_SOURCES}). When it repeats
+ * that job's count exactly and the job's row is a finding, it is {@link Status#SAME_AS_JOB}, so one
+ * wrong count is one finding, not two.
  */
 final class PipelineCountComparison {
 
@@ -49,11 +55,27 @@ final class PipelineCountComparison {
     /** The study's dbGaP samples ({@code sample_source = 'DBGap'}): what dbGaP's sample_count counts. */
     static final Measure DB_SAMPLES = new Measure("db:samples", Kind.SAMPLES);
 
+    /**
+     * Sources that count only consented participants, so never consent 0: the allConcepts generator and
+     * split, and the final-report columns taken from them.
+     */
+    static final Set<String> CONSENTED_ONLY = Set.of("all-concepts-data-generator", "split-allconcepts",
+            "pipeline-report:written", "migration-report:split");
+
+    /** A final report's count source to the job report source it is taken from. */
+    static final Map<String, String> REPORT_SOURCES = Map.of(
+            "pipeline-report:loaded", "sstr-load",
+            "pipeline-report:written", "all-concepts-data-generator",
+            "migration-report:loaded", "participants-migration",
+            "migration-report:split", "split-allconcepts");
+
     /** A row's finding. */
     enum Status {
         MATCH(false, false),
-        /** dbGaP lists consent 0 (not consented) subjects; loading drops them by design. */
+        /** dbGaP lists consent 0 (not consented) subjects; this source drops them by design. */
         NOT_LOADED_BY_DESIGN(false, false),
+        /** A final report repeating the count of the job report it is taken from, whose row is the finding. */
+        SAME_AS_JOB(false, false),
         /** dbGaP and the source both have the group, with different counts. */
         COUNT_MISMATCH(true, false),
         /** dbGaP lists the group; the source has none of it. */
@@ -81,7 +103,7 @@ final class PipelineCountComparison {
             this.studyLevel = studyLevel;
         }
 
-        /** A finding to follow up; MATCH, NOT_LOADED_BY_DESIGN and UNVERIFIED are not. */
+        /** A finding to follow up; MATCH, NOT_LOADED_BY_DESIGN, SAME_AS_JOB and UNVERIFIED are not. */
         boolean discrepancy() {
             return discrepancy;
         }
@@ -101,9 +123,11 @@ final class PipelineCountComparison {
      * @param counts           per measure, normalized consent code to count; a measure is present only
      *                         when its source covers the study (the DB always does)
      * @param dbAbbreviations  normalized consent code to the DB's abbreviation, for groups dbGaP does not name
+     * @param loadSource       what this run loaded the study from (e.g. "sstr", "multi"), or null when unknown
+     *                         (not loaded this run, or not said): then it is taken to keep consent 0, as SSTR does
      */
     record StudyInput(String studyId, String abv, String version, String rawVersion,
-                      Map<Measure, Map<String, Long>> counts, Map<String, String> dbAbbreviations) {
+                      Map<Measure, Map<String, Long>> counts, Map<String, String> dbAbbreviations, String loadSource) {
 
         /** Counted by a source other than the DB: this run processed the study. */
         boolean inRun() {
@@ -160,18 +184,13 @@ final class PipelineCountComparison {
                     + (in.rawVersion() == null || in.rawVersion().isBlank() ? "blank" : "'" + in.rawVersion().trim() + "'")
                     + " (expected e.g. v4); no summary to compare with";
             summary = null;
-        } else if (summary != null) {
-            boolean otherAccession = summary.accession() != null && !summary.accession().equalsIgnoreCase(in.studyId());
-            boolean otherVersion = summary.version() != null && !("v" + summary.version()).equals(in.version());
-            if (otherAccession || otherVersion) {
-                // Its counts describe another study version, so comparing them would mislead.
-                studyStatus = Status.VERSION_MISMATCH;
-                studyNote = "requested " + requested + " but the " + outcome.source().name().toLowerCase()
-                        + " summary is for " + (summary.accession() == null ? in.studyId() : summary.accession())
-                        + "." + (summary.version() == null ? in.version() : "v" + summary.version())
-                        + "; counts not compared";
-                summary = null;
-            }
+        } else if (summary != null && !QaSupport.describes(summary, in.studyId(), in.version())) {
+            // Its counts describe another study version (or one it does not name), so comparing them
+            // would mislead.
+            studyStatus = Status.VERSION_MISMATCH;
+            studyNote = "requested " + requested + " but the " + outcome.source().name().toLowerCase()
+                    + " summary is for " + QaSupport.named(summary) + "; counts not compared";
+            summary = null;
         }
 
         Map<String, DbgapStudySummary.ConsentGroup> groups = new LinkedHashMap<>();
@@ -187,6 +206,7 @@ final class PipelineCountComparison {
         String version = in.version() != null ? in.version() : blankToNull(in.rawVersion());
         List<Row> rows = new ArrayList<>();
         for (String code : codes) {
+            Map<String, Row> byMeasure = new LinkedHashMap<>();
             DbgapStudySummary.ConsentGroup group = groups.get(code);
             String shortName = group != null && group.shortName() != null ? group.shortName()
                     : blankToNull(in.dbAbbreviations().get(code));
@@ -196,15 +216,15 @@ final class PipelineCountComparison {
                 long count = counted == null ? 0 : counted;
                 if (summary == null) {
                     if (count != 0) {
-                        rows.add(new Row(in.studyId(), version, code, shortName, measure, null, count,
-                                studyStatus, studyNote));
+                        byMeasure.put(measure.name(), new Row(in.studyId(), version, code, shortName, measure, null,
+                                count, studyStatus, studyNote));
                     }
                     continue;
                 }
                 if (group == null) {
                     if (count != 0) {
-                        rows.add(new Row(in.studyId(), version, code, shortName, measure, 0L, count,
-                                Status.NOT_IN_DBGAP, "dbGaP does not list consent group " + code));
+                        byMeasure.put(measure.name(), new Row(in.studyId(), version, code, shortName, measure, 0L,
+                                count, Status.NOT_IN_DBGAP, "dbGaP does not list consent group " + code));
                     }
                     continue;
                 }
@@ -216,9 +236,12 @@ final class PipelineCountComparison {
                     note = "dbGaP lists the group without a " + measure.kind().summaryField();
                 } else if (expected == count) {
                     status = Status.MATCH;
-                } else if (count == 0 && "0".equals(code)) {
+                } else if (count == 0 && "0".equals(code)
+                        && QaSupport.consentZeroDropped(CONSENTED_ONLY.contains(measure.name()), in.loadSource())) {
                     status = Status.NOT_LOADED_BY_DESIGN;
-                    note = "consent 0 (not consented) is not loaded";
+                    note = CONSENTED_ONLY.contains(measure.name())
+                            ? "consent 0 (not consented): " + measure.name() + " counts consented participants only"
+                            : "consent 0 (not consented): the study's MULTI load drops it";
                 } else if (count == 0) {
                     status = Status.MISSING;
                     note = measure.name() + " has none of dbGaP's " + expected;
@@ -227,7 +250,16 @@ final class PipelineCountComparison {
                     note = measure.name() + " " + count + " vs dbGaP " + expected
                             + " (" + (count > expected ? "+" : "") + (count - expected) + ")";
                 }
-                rows.add(new Row(in.studyId(), version, code, shortName, measure, expected, count, status, note));
+                byMeasure.put(measure.name(), new Row(in.studyId(), version, code, shortName, measure, expected,
+                        count, status, note));
+            }
+            for (Row row : byMeasure.values()) {
+                Row job = byMeasure.get(REPORT_SOURCES.get(row.measure().name()));
+                boolean repeats = job != null && row.status().discrepancy() && !row.status().studyLevel()
+                        && job.status().discrepancy() && job.count() != null && job.count().equals(row.count());
+                rows.add(repeats ? new Row(row.studyId(), row.version(), row.consentCode(), row.consentShortName(),
+                        row.measure(), row.dbgapCount(), row.count(), Status.SAME_AS_JOB,
+                        "same count as " + job.measure().name() + ", whose row is the finding") : row);
             }
         }
         if (rows.isEmpty()) {

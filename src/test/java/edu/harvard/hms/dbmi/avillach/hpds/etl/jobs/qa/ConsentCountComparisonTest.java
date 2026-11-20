@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** The comparison rules, one per test, with no I/O. */
 class ConsentCountComparisonTest {
 
-    private static final String SID = "phs001412";
+    private static final String SID = "phs123456";
 
     private static Map<String, DbConsent> db(Object... codeAndCount) {
         Map<String, DbConsent> m = new LinkedHashMap<>();
@@ -45,7 +45,7 @@ class ConsentCountComparisonTest {
     }
 
     private static StudyInput study(Map<String, DbConsent> db, Map<String, Long> load, String source) {
-        return new StudyInput(SID, "DHS", "v4", "v4", db, load, source);
+        return new StudyInput(SID, "ABC", "v4", "v4", db, load, source);
     }
 
     private static Row row(StudyResult r, String code) {
@@ -139,19 +139,28 @@ class ConsentCountComparisonTest {
     }
 
     @Test
-    void consent_0_dropped_by_a_multi_load_is_still_a_discrepancy_but_says_why() {
+    void consent_0_dropped_by_a_multi_load_is_not_a_discrepancy_but_says_why() {
         StudyResult r = ConsentCountComparison.compare(study(db("1", 402), load("1", 402), "multi"),
                 dbgap(4, "0", 576, "1", 402));
 
-        assertThat(row(r, "0").statuses()).containsExactly(Status.MISSING_IN_DB);
-        assertThat(row(r, "0").note()).isEqualTo("source MULTI drops consent 0");
+        assertThat(row(r, "0").matches()).isTrue();
+        assertThat(row(r, "0").note()).isEqualTo("source MULTI drops consent 0: not loaded by design");
         assertThat(row(r, "1").matches()).isTrue();
+    }
+
+    @Test
+    void consent_0_missing_from_an_sstr_load_is_a_discrepancy() {
+        StudyResult r = ConsentCountComparison.compare(study(db("1", 402), load("1", 402), "sstr"),
+                dbgap(4, "0", 576, "1", 402));
+
+        assertThat(row(r, "0").statuses()).containsExactly(Status.MISSING_IN_DB);
+        assertThat(row(r, "0").note()).isNull();
     }
 
     @Test
     void no_usable_version_is_no_version_on_every_db_row() {
         StudyResult r = ConsentCountComparison.compare(
-                new StudyInput(SID, "DHS", null, "four", db("1", 402, "2", 3), null, null), null);
+                new StudyInput(SID, "ABC", null, "four", db("1", 402, "2", 3), null, null), null);
 
         assertThat(r.studyStatus()).isEqualTo(Status.NO_VERSION);
         assertThat(r.rows()).hasSize(2).allMatch(x -> x.statuses().equals(List.of(Status.NO_VERSION)));
@@ -162,7 +171,7 @@ class ConsentCountComparisonTest {
     @Test
     void a_study_with_nothing_anywhere_still_gets_one_row() {
         StudyResult r = ConsentCountComparison.compare(
-                new StudyInput(SID, "DHS", null, "", Map.of(), null, null), null);
+                new StudyInput(SID, "ABC", null, "", Map.of(), null, null), null);
 
         assertThat(r.rows()).singleElement().satisfies(x -> {
             assertThat(x.consentCode()).isEmpty();
@@ -174,7 +183,7 @@ class ConsentCountComparisonTest {
     @Test
     void an_unknown_study_version_is_version_not_found() {
         StudyResult r = ConsentCountComparison.compare(study(db("1", 402), null, null),
-                DbgapLookup.notFound("Invalid or non-existent study with accession phs001412.v4", 1));
+                DbgapLookup.notFound("Invalid or non-existent study with accession phs123456.v4", 1));
 
         assertThat(r.studyStatus()).isEqualTo(Status.VERSION_NOT_FOUND);
         assertThat(row(r, "1").statuses()).containsExactly(Status.VERSION_NOT_FOUND);
@@ -187,7 +196,7 @@ class ConsentCountComparisonTest {
         StudyResult r = ConsentCountComparison.compare(study(db("1", 1), null, null), dbgap(5, "1", 402));
 
         assertThat(r.studyStatus()).isEqualTo(Status.VERSION_MISMATCH);
-        assertThat(r.studyNote()).contains("requested phs001412.v4").contains("phs001412.v5");
+        assertThat(r.studyNote()).contains("requested phs123456.v4").contains("phs123456.v5");
         assertThat(row(r, "1").statuses()).containsExactly(Status.VERSION_MISMATCH);
         assertThat(row(r, "1").dbgapSubjects()).isNull();
     }

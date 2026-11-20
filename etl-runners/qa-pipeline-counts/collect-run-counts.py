@@ -19,17 +19,21 @@ run, after the final report is written.
     pipeline-report:loaded          pipeline-report/pipeline_consent_counts.csv participants_loaded
     pipeline-report:written         ... participants_written
 
-Writes <out-csv>: study_id,consent_code,source,participants -- one row per (study, consent code,
-source) a source reported a count for. A missing input is skipped (the stage did not run, or did
-not get that far): every study is then still compared DB vs dbGaP.
+Writes <out-csv>: study_id,consent_code,source,participants,load_source -- one row per (study,
+consent code, source) a source reported a count for. load_source is what participants-migration
+loaded the study from (sstr or multi; a MULTI load drops consent 0), on its rows; blank elsewhere.
+A missing input is skipped (the stage did not run, or did not get that far): every study is then
+still compared DB vs dbGaP. Two counts for one study, consent code ("1" and "c1" are one) and
+source are an error, not summed: one of the stage's reports is wrong.
 
 Usage: collect-run-counts.py <migration|permanent> <artifacts-dir> <out-csv>
-Exit:  0 written (possibly with no rows) | 1 could not be written | 64 usage
+Exit:  0 written (possibly with no rows) | 1 could not be written, or a duplicate count | 64 usage
 """
 import csv
 import glob
 import json
 import os
+import re
 import sys
 
 FAILED = ("FAILED",)
@@ -64,24 +68,31 @@ def whole(v):
     return int(s) if s.isdigit() else None
 
 
+def consent_key(code):
+    """The consent group a code names, as qa-pipeline-counts matches them: "c1", "01" and "1" are "1"."""
+    m = re.fullmatch(r"[cC]?(\d{1,18})", code.strip())
+    return str(int(m.group(1))) if m else code.strip()
+
+
 def from_metrics(rows, source, sid, per_consent):
     if isinstance(per_consent, dict):
         for code, n in per_consent.items():
             if whole(n) is not None:
-                rows.append((sid, str(code), source, whole(n)))
+                rows.append((sid, str(code), source, whole(n), ""))
 
 
-def from_csv(rows, path, columns):
-    """columns: (csv column, source) pairs."""
+def from_csv(rows, path, columns, load_source_column=None):
+    """columns: (csv column, source) pairs. load_source_column: the column naming what the study was loaded from."""
     for r in load_csv(path):
         sid = (r.get("study_id") or "").strip()
         code = (r.get("consent_code") or "").strip()
         if not sid or not code:
             continue
+        loaded_from = (r.get(load_source_column) or "").strip().lower() if load_source_column else ""
         for column, source in columns:
             n = whole(r.get(column))
             if n is not None:
-                rows.append((sid, code, source, n))
+                rows.append((sid, code, source, n, loaded_from if loaded_from in ("sstr", "multi") else ""))
 
 
 def per_study_reports(rows, art, key, pattern, metric, source):
@@ -99,7 +110,7 @@ def collect(pipeline, art):
     rows = []
     if pipeline == "migration":
         from_csv(rows, os.path.join(art, "participants-migration", "participants_migration_consent_counts.csv"),
-                 [("participants_loaded", "participants-migration")])
+                 [("participants_loaded", "participants-migration")], load_source_column="source")
         split = load_json(newest(os.path.join(art, "split-allconcepts-report-*.json"))) or {}
         for s in split.get("studies") or []:
             if s.get("outcome") in ("SUCCESS", "SUCCESS_WITH_WARNINGS") and s.get("studyId"):
@@ -117,24 +128,41 @@ def collect(pipeline, art):
     return rows
 
 
+def duplicates(rows):
+    """Each (study, consent group, source) counted more than once, as 'study c<code> source'."""
+    seen, dups = set(), []
+    for sid, code, source, _, _ in rows:
+        key = (sid, consent_key(code), source)
+        if key in seen:
+            dups.append(f"{sid} c{key[1]} {source}")
+        seen.add(key)
+    return dups
+
+
 def main(argv):
     if len(argv) != 4 or argv[1] not in ("migration", "permanent"):
         print("usage: collect-run-counts.py <migration|permanent> <artifacts-dir> <out-csv>", file=sys.stderr)
         return 64
     pipeline, art, out = argv[1], argv[2], argv[3]
     rows = collect(pipeline, art)
+    dups = duplicates(rows)
+    if dups:
+        print("collect-run-counts: more than one count for " + ", ".join(dups[:20])
+              + (" ..." if len(dups) > 20 else "") + "; not written (QA then compares the DB with dbGaP only)",
+              file=sys.stderr)
+        return 1
     try:
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
         with open(out + ".partial", "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh, lineterminator="\n")
-            w.writerow(["study_id", "consent_code", "source", "participants"])
+            w.writerow(["study_id", "consent_code", "source", "participants", "load_source"])
             w.writerows(rows)
         os.replace(out + ".partial", out)
     except OSError as e:
         print(f"collect-run-counts: could not write {out}: {e}", file=sys.stderr)
         return 1
     by_source = {}
-    for sid, _, source, _ in rows:
+    for sid, _, source, _, _ in rows:
         by_source.setdefault(source, set()).add(sid)
     print(f"collect-run-counts ({pipeline}): {len(rows)} count(s) -- "
           + (", ".join(f"{s}: {len(ids)} study/studies" for s, ids in by_source.items()) or "none found"))

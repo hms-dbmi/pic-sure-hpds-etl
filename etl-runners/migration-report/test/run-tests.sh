@@ -45,10 +45,10 @@ fi
 base "$TMP/foreign"
 cat > "$TMP/foreign/split-allconcepts-report-t.json" <<'JSON'
 {"jobName":"split-allconcepts-stage","runId":"t","exitCode":"SUCCESS_WITH_WARNINGS","status":"SUCCESS","metrics":{"excludedStudyIds":[]},
- "studies":[{"studyId":"phs000002","abbreviation":"TWO","outcome":"SUCCESS_WITH_WARNINGS","job":{"metrics":{"totalRows":12,"unmappedIds":0,"noConsentRows":0,"malformedRows":0,"malformedPathRows":1,"foreignConceptRows":2,"foreignFirstNodes":{"phs000280":2},"rowsPerConsent":{"1":10},"participantsPerConsent":{"1":10}}}}]}
+ "studies":[{"studyId":"phs000002","abbreviation":"TWO","outcome":"SUCCESS_WITH_WARNINGS","job":{"metrics":{"totalRows":12,"unmappedIds":0,"noConsentRows":0,"malformedRows":0,"malformedPathRows":1,"foreignConceptRows":2,"foreignFirstNodes":{"phs000902":2},"rowsPerConsent":{"1":10},"participantsPerConsent":{"1":10}}}}]}
 JSON
 if run foreign \
-   && grep -q '^phs000002,TWO,MIGRATED_WITH_GAPS,split-allconcepts,PARTIAL_DATA,SPLIT_FOREIGN_CONCEPTS,2 allConcepts row(s) with another study.s concept (first node phs000280: 2) were dropped,' \
+   && grep -q '^phs000002,TWO,MIGRATED_WITH_GAPS,split-allconcepts,PARTIAL_DATA,SPLIT_FOREIGN_CONCEPTS,2 allConcepts row(s) with another study.s concept (first node phs000902: 2) were dropped,' \
         "$TMP/foreign-out/migration_review.csv" \
    && grep -q '^phs000002,TWO,MIGRATED_WITH_GAPS,split-allconcepts,PARTIAL_DATA,SPLIT_MALFORMED_CONCEPT_PATHS,1 allConcepts row(s) with a concept path not starting and ending with µ or \\ were dropped,' \
         "$TMP/foreign-out/migration_review.csv"; then

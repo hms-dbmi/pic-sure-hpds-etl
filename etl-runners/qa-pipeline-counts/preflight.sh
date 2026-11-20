@@ -65,8 +65,9 @@ fi
 check "FETCH_MISSING_SUMMARIES is true or false ($FETCH)" test "$FETCH" = true -o "$FETCH" = false
 if [[ "$FETCH" != true ]]; then
   note "dbGaP is not asked: fetching missing summaries is off"
-elif [[ "$DBGAP" != http://* && "$DBGAP" != https://* ]]; then
-  fail "DBGAP_BASE_URL must be an http(s) URL, got: $DBGAP"
+elif ! [[ "$DBGAP" =~ ^https:// || "$DBGAP" =~ ^http://(localhost|127\.0\.0\.1)(:|/|$) ]]; then
+  # https only (http just to this host, a test stub): the job quotes dbGaP's answers into its report.
+  fail "DBGAP_BASE_URL must be an https URL, got: $DBGAP"
 elif command -v curl >/dev/null 2>&1; then
   # Any HTTP answer (an unknown study is a 400) shows the API is up. Only summaries not yet cached
   # need it, and the job waits out an outage up to its deadline, so this is only a warning. This is

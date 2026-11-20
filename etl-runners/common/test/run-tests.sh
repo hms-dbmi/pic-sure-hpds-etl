@@ -122,7 +122,19 @@ dispatch_refuses_when_a_stale_sentinel_cannot_be_removed() {
     touch "$STUB_STATE/rm_error"
     dispatch "$WORKER" "$MAILBOX" m j r
     expect_rc 1
-    expect_out "could not remove the earlier sentinel"
+    expect_out "could not clear the earlier reports"
+    expect_no_task
+}
+
+# Not only the sentinel: any report left under the prefix would be read as this run's.
+dispatch_refuses_when_earlier_reports_cannot_be_cleared() {
+    local stale="$STUB_STATE/s3/bucket/etl-runner/reports/m/r/phs000007_hpds_id_mapping.csv"
+    mkdir -p "$(dirname "$stale")"; touch "$stale"
+    touch "$STUB_STATE/rm_error"
+    dispatch "$WORKER" "$MAILBOX" m j r
+    expect_rc 1
+    expect_out "could not clear the earlier reports under s3://bucket/etl-runner/reports/m/r/"
+    expect_out "AccessDenied"
     expect_no_task
 }
 

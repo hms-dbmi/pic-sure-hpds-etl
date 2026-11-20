@@ -33,9 +33,9 @@ derived artifacts from newly migrated data.
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Merge AllConcepts](#stage-7-merge-allconcepts)
 - [Stage 8: AllConcepts Manifest](#stage-8-allconcepts-manifest)
-- [Stage 9: QA Pipeline Counts](#stage-9-qa-pipeline-counts)
+- [Stage 9: Back Up Participant DB](#stage-9-back-up-participant-db)
+- [Stage 10: QA Pipeline Counts](#stage-10-qa-pipeline-counts)
 - [Post: Migration Report](#post-migration-report)
-- [Post: Back Up Participant DB](#post-back-up-participant-db)
 - [Data Flow Summary](#data-flow-summary)
 - [Parameters](#parameters)
 - [Exit Codes](#exit-codes)
@@ -85,11 +85,17 @@ Build ▸ Tests
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
+│  Back up participant DB  │  stops the runner pool; pg_dump to S3, DB stays up;
+│                          │  participant_db.tar overwritten only on SUCCESS/UNSTABLE
+└────────────┬────────────┘
+             ▼
+┌─────────────────────────┐
 │  QA pipeline counts      │  every ready study vs its dbGaP summary (findings: UNSTABLE)
 └─────────────────────────┘
 
 post { always }:  migration-report       (downstream-artifacts/migration-report/)
-                  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+                  participant-db-backup  (only when the build stopped before its stage)
+                  qa-pipeline-counts     (only when the run stopped because some split studies failed)
 ```
 
 Stage ordering is strict: each stage runs only if the previous stage succeeded (UNSTABLE
@@ -98,9 +104,12 @@ The global AllConcepts and VCF index stages read the tables populated by
 `participants-migration`. The participant database exists only for the run; see
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
-The per-study stages (participants, split, VCF indexes) run only studies marked **ready** that
-are **not yet marked "Data Processed"** in managed inputs, like the permanent pipeline's loads. The
-global AllConcepts, merge and manifest stages cover every ready study.
+The per-study stages (participants, split, VCF indexes) run every study marked **ready** in managed
+inputs, those marked **"Data Processed"** included: the migration sheet marks the studies the legacy
+system already processed, which are what the migration regenerates (`INCLUDE_PROCESSED`, default
+checked). Uncheck it only to re-run over a sheet this pipeline has since marked processed: the
+per-study stages then skip those studies, like the permanent pipeline's loads. The global
+AllConcepts, merge and manifest stages cover every ready study either way.
 
 `STUDY_FILTER` limits the participants and split stages to the listed studies; the global
 AllConcepts stage always covers all ready studies from the database, so a filtered rerun still
@@ -167,8 +176,10 @@ jobs skip tests. It also runs `make -C etl-runners/participant-db test`,
 is up, and saves its connection details on the Jenkins server for the runners. A clean running
 database is kept. `OVERWRITE_DB` replaces it from `DB_RESTORE_FROM` (blank = the latest clean
 backup), and after a failed run `IF_LAST_RUN_FAILED` decides between restoring the clean backup
-and continuing. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial seed
-dump of the legacy RDS database must be placed.
+and continuing. A start that comes up with a warning (`Notice:` in its build description, e.g.
+sample rows the one-off per-study samples migration could not attribute) marks the run UNSTABLE.
+See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial seed dump of the legacy
+RDS database must be placed.
 
 ---
 
@@ -176,7 +187,7 @@ dump of the legacy RDS database must be placed.
 
 **Job:** `participants-migration`
 **Class:** [`ParticipantsMigrationJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/ParticipantsMigrationJob.java)
-**Runs:** once, processing every ready study not yet marked "Data Processed" (or `STUDY_FILTER`) internally
+**Runs:** once, processing every ready study (only those not yet marked "Data Processed" with `INCLUDE_PROCESSED` unchecked; or `STUDY_FILTER`) internally
 
 ### Input
 
@@ -334,7 +345,7 @@ artifacts.
 
 **Job:** `split-allconcepts`
 **Class:** [`SplitAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/SplitAllConceptsJob.java)
-**Runs:** once per ready study not yet marked "Data Processed". The stage is planned, then run in two lanes in parallel, largest
+**Runs:** once per ready study (with `INCLUDE_PROCESSED` unchecked, not yet marked "Data Processed"). The stage is planned, then run in two lanes in parallel, largest
 studies first, then consolidated into one report. Every step is a script under
 [`etl-runners/split-allconcepts/`](../etl-runners/split-allconcepts/) with its own tests
 (`make -C etl-runners/split-allconcepts test`, also run in the Tests stage).
@@ -462,7 +473,7 @@ Read legacy allConcepts CSV (streaming)
         ▼
 For each row:
   ├─ Drop it if its concept path does not start and end with the same µ or \ delimiter
-  ├─ Drop it unless its concept path's first node is the study id (µ{study_id}µ…)
+  ├─ Drop it unless every accession in its concept path's first node is the study id (µ{study_id}µ…)
   ├─ Replace the legacy HPDS id with the new hpds_id (via mapping)
   └─ Look up the patient's consent group
         │
@@ -494,11 +505,14 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
   paths. Checked first, so these rows are never counted as other studies' (below). `validate.sh`
   soft-fails "no malformed concept paths", the split report totals them, and the migration report
   lists the study for review (`SPLIT_MALFORMED_CONCEPT_PATHS`, `PARTIAL_DATA`)
-- Rows whose concept path's first node does not include the study id are dropped, with a
+- Rows whose concept path's first node is not the study's are dropped, with a
   `FOREIGN_CONCEPTS` warning. Some legacy allConcepts files carry other studies' concepts for the
   participants they share. The first node is the text up to the path's second delimiter. It
-  belongs to the study when it contains the study id (case-sensitive) not followed by another
-  digit: `phs000123`, `phs000123.v1.p1` and `phs000123_v2` are kept, `phs0001234` is not. The job's metrics have
+  belongs to the study when it names at least one accession (`phs` and digits, any case) and every
+  accession it names is the study id: `phs000123`, `PHS000123.v1.p1` and `phs000123_v2` are kept;
+  `phs0001234`, and `phs000123 (parent phs000280)`, are not. A first node with no accession is
+  dropped too: `\_…\` globals have their own allConcepts, and harmonized data sets are handled
+  separately. The job's metrics have
   `foreignConceptRows` and `foreignFirstNodes` (rows per first node, the 50 largest, the rest under
   `(other)`); the warning also carries up to 10 of the dropped paths. These rows are not counted as
   unmapped or without consent. The study's `validate.sh` soft-fails "no concepts from other
@@ -534,8 +548,8 @@ reused here to generate the global AllConcepts from the newly migrated data. Wri
 
 The same job as the permanent pipeline (see
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-6-create-vcf-indexes)), run with
-`INCLUDE_PROCESSED=false`: like the other per-study stages, it covers only ready studies not yet
-marked "Data Processed". Writes
+the pipeline's `INCLUDE_PROCESSED`: like the other per-study stages, it covers every ready study,
+or only those not yet marked "Data Processed" when that is unchecked. Writes
 `{studyId}.c{code}_vcfIndex.tsv` and `{studyId}.c{code}_SampleIds.csv` to
 `VCF_INDEXES_OUTPUT`.
 
@@ -572,12 +586,28 @@ global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consen
 
 ---
 
-## Stage 9: QA Pipeline Counts
+## Stage 9: Back Up Participant DB
+
+**Job:** `participant-db-backup`, skipped under `PREFLIGHT_ONLY`. Once the run is complete, this
+stage stops the runner pool and backs the database up, before QA, so QA's hours (waiting out a
+dbGaP outage) never delay the backup or, under the pipeline's 72 h timeout, cut it short. When the
+build stops earlier, `post { always }` does both instead, whenever this build's start succeeded.
+Dumps the database to S3 and leaves it running. The dump becomes `participant_db.tar` only if the
+build is SUCCESS or UNSTABLE; otherwise it goes to `participant_db_not_promoted.tar`, and the next
+start acts on `IF_LAST_RUN_FAILED`. A backup that fails, or does not finish in 4 h, fails the build.
+See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+
+---
+
+## Stage 10: QA Pipeline Counts
 
 **Job:** [`qa-pipeline-counts`](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines)
-(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, skipped under `PREFLIGHT_ONLY`. It
-first writes the [migration report](#post-migration-report), whose counts it reads (`post` writes it
-again with the final result). It only reads the database (it writes only cached dbGaP summaries).
+(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, after the backup, skipped under
+`PREFLIGHT_ONLY`. A run stopped only because some split studies failed (`CONTINUE_ON_STUDY_FAILURE`)
+never reaches it, so it runs from `post`, after the backup; any other failure skips it. It first
+writes the [migration report](#post-migration-report), whose counts it reads (`post` writes it again
+with the final result). It only reads the database (it writes only cached dbGaP summaries). It is
+the same code as the permanent pipeline's (`etl-runners/common/orchestrator.groovy`).
 
 For **every study marked ready** in `MANAGED_INPUTS` -- excluded studies and those this run did not
 process included, as a regression check -- it compares each consent group's counts with that study
@@ -586,13 +616,21 @@ version's dbGaP summary: the participant DB for every study (distinct participan
 processed, what `participants-migration` loaded, the split's `participantsPerConsent`, and the migration report's `participants_loaded` and `participants_split` (vs `subject_count`), collected from `downstream-artifacts/` by
 `etl-runners/qa-pipeline-counts/collect-run-counts.py`.
 
-Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json`, or else
-from a `{study_id}*study_summary.json` there for the study's version, when there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
-none started after 6 hours), and cached there at once. A study still without one is
-`UNVERIFIED` and is fetched by a later run.
+Consent 0 is compared like any other group, except where it is dropped by design: a study
+`participants-migration` loaded from its MULTI files (the DB and the load counts), and the split,
+which counts consented participants only. A migration-report count that repeats its job's wrong
+count is `SAME_AS_JOB`, not a second finding. See
+[JENKINS.md](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines).
+
+Summaries are read from `{DATA_ROOT}/{study_id}/qa/{study_id}_{version}_summary.json` (where QA
+caches those it fetches), else the same name or a `{study_id}*study_summary.json` for the study's
+version under `{study_id}/rawData/` (where they are staged); only the rest are fetched from the
+dbGaP SSTR API, gently (one at a time, paced and retried, none started after 6 hours), and cached
+under `qa/` at once. A study still without one is `UNVERIFIED` and is fetched by a later run.
 
 Any discrepancy, or a study without a summary, makes the build **UNSTABLE**; so does QA failing to
-run (never FAILED: the ETL itself succeeded). The readable `qa-pipeline-report.md` and its CSVs are
+run (never FAILED: the ETL itself succeeded). The counts go in the build description, e.g.
+`QA: 3 finding(s) (2 in this run), 41 unverified, 5 without a summary`. The readable `qa-pipeline-report.md` and its CSVs are
 in `downstream-artifacts/qa-pipeline-counts/` and under
 `s3://<DATA_ROOT bucket>/etl-runner/reports/migration-pipeline/<build-tag>/qa-pipeline-counts/`.
 
@@ -627,16 +665,6 @@ sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DAT
 [`qa-consent-counts`](JENKINS.md#qa-consent-counts-standalone) job as `LOAD_COUNTS`, to check the
 participant DB against dbGaP and against what this run loaded. Tests:
 `make -C etl-runners/migration-report test`.
-
----
-
-## Post: Back Up Participant DB
-
-**Job:** `participant-db-backup`, in `post { always }` whenever this build's start succeeded.
-Dumps the database to S3 and leaves it running. The dump becomes `participant_db.tar` only if the
-build is SUCCESS or UNSTABLE; otherwise it goes to `participant_db_not_promoted.tar`, and the next
-start acts on `IF_LAST_RUN_FAILED`. A failed backup fails the build. See
-[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -686,7 +714,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MANAGED_INPUTS` | `…/__migration__/managed_inputs.csv` | Study list CSV |
 | `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders (see [S3 Layout](#s3-layout)); passed to `participants-migration` as `DATA_FOLDER`, used for the split input, mapping uploads, and split output (must be `s3://`) |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
-| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready, unprocessed |
+| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready (unprocessed only with `INCLUDE_PROCESSED` unchecked) |
+| `INCLUDE_PROCESSED` | `true` | The participants, split and VCF stages also run studies marked "Data Processed" (the legacy system's mark). Unchecked, they skip them; global AllConcepts, merge and manifest cover every ready study either way |
 | `PARTICIPANTS_PARALLELISM` | `4` | Studies migrated at once (1-8). Each wants about a vCPU on the participants runner, whose size is that job's `INSTANCE_TYPE` |
 | `PARTICIPANTS_RESUME_FROM_RUN_ID` | (blank) | Run id of an earlier participants-migration run over the same `DATA_ROOT` (e.g. `<build-tag>-participants` of one that timed out); studies it migrated are copied, not loaded again |
 | `PARTICIPANTS_TIMEOUT_SECONDS` | `43200` | How long participants-migration waits for its runner. Passed explicitly: a downstream job gets a parameter left out of the build call from its previous build, not its current Jenkinsfile |
@@ -696,6 +725,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `ALL_CONCEPTS_OUTPUT` | `…/__migration__/global_allconcepts/` | Output for global AllConcepts (must be `s3://`) |
 | `VCF_INDEXES_JOB` | `create-vcf-indexes` | VCF index runner job |
 | `VCF_INDEXES_OUTPUT` | `…/__migration__/vcf_indexes/` | Output for VCF indexes (must be `s3://`) |
+| `GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS` | `10800` | How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside its own 4 h limit |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
 | `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
@@ -703,7 +733,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
-| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-9-qa-pipeline-counts) run last; blank skips it |
+| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-10-qa-pipeline-counts) run last; blank skips it |
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
 | `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
 | `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |

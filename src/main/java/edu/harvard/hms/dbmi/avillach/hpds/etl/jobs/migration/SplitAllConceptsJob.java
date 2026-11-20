@@ -32,6 +32,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -334,19 +336,26 @@ public class SplitAllConceptsJob extends AbstractJob<SplitAllConceptsJob.Output>
         return conceptPath.substring(1, conceptPath.indexOf(delimiter, 1));
     }
 
+    private static final Pattern ACCESSION = Pattern.compile("phs\\d+", Pattern.CASE_INSENSITIVE);
+
     /**
-     * True when a first node includes the study id, so a versioned or decorated node
-     * ({@code phs000123.v1.p1}, {@code phs000123_v2}) still belongs to the study. The id must not run
-     * on into another digit: {@code phs0001234} is a different accession, not {@code phs000123}.
+     * True when every accession ({@code phs} and digits, any case) in a first node is the study id,
+     * and there is at least one, so a versioned or decorated node ({@code phs000123.v1.p1},
+     * {@code phs000123_v2}) still belongs to the study. {@code phs0001234} is a different accession,
+     * and a node naming another study as well ({@code phs000123 (parent phs000280)}) is not only
+     * this study's. A node without an accession ({@code \_...\} globals, which have their own
+     * allConcepts; harmonized data sets, handled separately) is not the study's either.
      */
     static boolean belongsToStudy(String firstNode, String studyId) {
-        for (int i = firstNode.indexOf(studyId); i >= 0; i = firstNode.indexOf(studyId, i + 1)) {
-            int after = i + studyId.length();
-            if (after == firstNode.length() || !Character.isDigit(firstNode.charAt(after))) {
-                return true;
+        Matcher m = ACCESSION.matcher(firstNode);
+        boolean any = false;
+        while (m.find()) {
+            if (!m.group().equalsIgnoreCase(studyId)) {
+                return false;
             }
+            any = true;
         }
-        return false;
+        return any;
     }
 
     /** The {@link #FOREIGN_NODES_REPORTED} largest counts, largest first, the rest summed under {@link #OTHER_NODES}. */

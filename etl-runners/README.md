@@ -40,7 +40,7 @@ etl-runners/
 ├── merge-allconcepts/                  PERMANENT (JobType.PERMANENT), no DB
 ├── generate-allconcepts-manifest/      PERMANENT (JobType.PERMANENT), no DB, after the merge in both orchestrators
 ├── qa-consent-counts/                  PERMANENT (JobType.PERMANENT), reads the DB and calls dbGaP, standalone (in neither orchestrator)
-├── qa-pipeline-counts/                 PERMANENT (JobType.PERMANENT), reads the DB, caches dbGaP summaries under DATA_ROOT; last in both orchestrators
+├── qa-pipeline-counts/                 PERMANENT (JobType.PERMANENT), reads the DB, caches dbGaP summaries under DATA_ROOT/{study}/qa/; last in both orchestrators
 ├── all-concepts-data-generator/        PERMANENT (JobType.PERMANENT), per study from /Jenkinsfile
 └── generate-identity-consent-mapping/  PERMANENT (JobType.PERMANENT), standalone, no DB
 ```
@@ -62,7 +62,7 @@ container on the Jenkins host through its podman socket. No Terraform, no JAR. S
 | `common/require-db.sh`      | Run on the agent before provisioning a DB-backed runner: fails in seconds if no usable participant DB credentials are published in SSM, the container is not up, or they do not log in. |
 | `common/db-credentials-path.sh` | Prints the name of the SSM SecureString holding the participant DB credentials (`/hpds-etl/<env>/participant-db/app-credentials`), which `participant-db-start` publishes and DB-backed runners read at boot. No copy is kept on the Jenkins server. |
 | `common/validate-report.sh` | Assertions true of every `JobResult` report, independent of which job produced it.                                                      |
-| `common/orchestrator.groovy` | The permanent orchestrator's stage logic, `load`ed by `/Jenkinsfile`: study resolution and exclusion, per-study stage runner, downstream calls, DB start/backup, report. |
+| `common/orchestrator.groovy` | The permanent orchestrator's stage logic, `load`ed by `/Jenkinsfile`: study resolution and exclusion, per-study stage runner, downstream calls, DB start/backup, report. `Jenkinsfile.migration` loads it too, for the end-of-run backup and QA pipeline counts, which both pipelines share. |
 | `common/probe-study-inputs.sh` | Probes every study's SSTR, decoded data and mapping in S3, 16 at a time, for `Resolve studies`; writes one TSV row per study.        |
 | `pipeline-report/`          | `pipeline-report.py` (python3 stdlib) builds the permanent run's report from `downstream-artifacts/`; `make -C etl-runners/pipeline-report test`. |
 

@@ -14,6 +14,7 @@ import edu.harvard.hms.dbmi.avillach.hpds.etl.core.report.ReportWriter;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.participants.SstrPopulateRdsParticipantsJob;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Consent;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.model.Sample;
+import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputRow;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.service.ManagedInputsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -296,6 +297,48 @@ class ParticipantsMigrationJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L)
                 .containsEntry("skippedStudyIds", List.of());
+    }
+
+    /** The migration pipeline's default: its sheet marks what the legacy system processed. */
+    @Test
+    void include_processed_migrates_studies_already_marked_processed() {
+        String managed = tempFile("managed_inputs.csv",
+                "Study Abbreviated Name,Study Identifier,Data is ready to process,Data Processed\n"
+                        + "DONE,phs000003,Yes,Yes\n");
+        String folder = baseUri(Map.of(
+                "phs000003/rawData/sstr_phs000003.v1.txt", SSTR,
+                "phs000003/legacy/data/DONE_PatientMapping.v2.csv", "1001,DONE,2002\n"));
+
+        JobResult result = executor.run(newJob(managed),
+                Map.of("data-folder", folder, "include-processed", "true"), "unit-include-processed");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("readyStudies", 1L).containsEntry("succeededStudies", 1L);
+    }
+
+    @Test
+    void rejects_an_include_processed_that_is_not_a_boolean() {
+        JobResult result = executor.run(newJob("/unused.csv"),
+                Map.of("data-folder", "/unused", "include-processed", "maybe"), "unit-include-processed-bad");
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.VALIDATION_FAILED);
+    }
+
+    /** A blank Data Type is unknown, which the SSTR job treats as genomic: --genomic is left out. */
+    @Test
+    void passes_genomic_to_the_sstr_job_only_when_data_type_is_set() {
+        assertThat(ParticipantsMigrationJob.sstrParams(row(""), "s.txt", 10))
+                .doesNotContainKey(SstrPopulateRdsParticipantsJob.PARAM_GENOMIC)
+                .containsEntry("input", "s.txt").containsEntry("study-id", STUDY).containsEntry("batch-size", "10");
+        assertThat(ParticipantsMigrationJob.sstrParams(row("P"), "s.txt", 10))
+                .containsEntry(SstrPopulateRdsParticipantsJob.PARAM_GENOMIC, "false");
+        assertThat(ParticipantsMigrationJob.sstrParams(row("P/G"), "s.txt", 10))
+                .containsEntry(SstrPopulateRdsParticipantsJob.PARAM_GENOMIC, "true");
+    }
+
+    private static ManagedInputRow row(String dataType) {
+        return new ManagedInputRow(ABV, STUDY, "v1", "", "", "", "", "", "", "", dataType, "", "", "", "", "", "",
+                "", "", "", "", "", "", true, false);
     }
 
     @Test
@@ -878,6 +921,20 @@ class ParticipantsMigrationJobTest {
         assertThat(ParticipantsMigrationJob.unmatchedConsents(matched)).containsExactly("3");
     }
 
+    /** The count is every unresolved row; the examples only the first few. */
+    @Test
+    void data_review_counts_every_unresolved_row_and_keeps_a_few_examples() {
+        StringBuilder mapping = new StringBuilder();
+        for (int i = 0; i < 25; i++) {
+            mapping.append("NOPE").append(i).append(",FHS,").append(9000 + i).append('\n');
+        }
+        runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI), mapping.toString());
+
+        Map<String, String> issue = issueRow(STUDY, "NEEDS_DATA_REVIEW");
+        assertThat(issue).containsEntry("count", "25");
+        assertThat(issue.get("examples").split(" ")).hasSize(10);
+    }
+
     @Test
     void a_study_whose_patient_mapping_resolves_no_subject_is_skipped_for_data_review() {
         JobResult result = runOneStudy(Map.of(SUBJECT_MULTI_NAME, SUBJECT_MULTI), "NOPE,FHS,9998\nGONE,FHS,9999\n");
@@ -907,7 +964,7 @@ class ParticipantsMigrationJobTest {
         assertThat(sourcesRow(STUDY)).containsEntry("outcome", "needs_review").containsEntry("source", "multi")
                 .containsEntry("mapping_rows", "0");
         assertThat(issueRow(STUDY, "NEEDS_DATA_REVIEW")).containsEntry("severity", "WARNING")
-                .containsEntry("examples", "9998 9999");
+                .containsEntry("count", "2").containsEntry("examples", "9998 9999");
         // Participants were loaded, though none mapped: the counts say what the file held.
         assertThat(report(ParticipantsMigrationJob.CONSENT_COUNTS_REPORT)).isEqualTo(
                 "study_id,abv,outcome,source,consent_code,participants_loaded\n"

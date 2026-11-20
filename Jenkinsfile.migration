@@ -8,7 +8,10 @@
 // The last stage, QA pipeline counts (etl-runners/qa-pipeline-counts/, a PERMANENT job that stays),
 // compares every ready study's counts per consent group -- the DB, and this run's
 // participants-migration, split and migration-report counts -- with its dbGaP summary; findings make
-// the build UNSTABLE.
+// the build UNSTABLE, and its counts go in the build description. The stage before it backs up the
+// participant DB and stops the runner pool. A run stopped only by per-study split failures
+// (CONTINUE_ON_STUDY_FAILURE) runs QA from post, after the backup. The backup and QA come from
+// etl-runners/common/orchestrator.groovy, shared with /Jenkinsfile.
 //
 // When the migration is complete, delete:
 //   - this file
@@ -26,8 +29,9 @@
 //
 // The participant database is a long-lived PostgreSQL 16 container on the Jenkins host.
 // 'Start participant DB' makes sure it is up (see OVERWRITE_DB, DB_RESTORE_FROM and
-// IF_LAST_RUN_FAILED) after the tests, and post { always } backs it up to S3 -- as the latest
-// clean backup only when this build succeeded. It is never torn down. See
+// IF_LAST_RUN_FAILED) after the tests, and 'Back up participant DB' backs it up to S3 before QA --
+// as the latest clean backup only when this build succeeded; post { always } does instead when the
+// build stopped earlier. It is never torn down. See
 // docs/PARTICIPANT_DB.md.
 //
 // Build and test run here once, as the gate for the whole run. Downstream jobs are invoked with
@@ -50,6 +54,9 @@
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
 // =============================================================================
+
+// The loaded etl-runners/common/orchestrator.groovy, for the backup and QA (loaded on first use).
+ORCH = null
 
 pipeline {
     agent any
@@ -85,7 +92,9 @@ pipeline {
         string(name: 'PARTICIPANTS_TIMEOUT_SECONDS', defaultValue: '43200',
                description: 'How long participants-migration waits for its runner before giving up (exit 124). Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'STUDY_FILTER', defaultValue: '',
-               description: 'Comma-separated study ids; blank runs every study that is ready and not yet marked Data Processed. Applies to the participants and split stages only -- the VCF stage covers every ready, unprocessed study and the global AllConcepts stage ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
+               description: 'Comma-separated study ids; blank runs every ready study (with INCLUDE_PROCESSED unchecked, every ready study not yet marked Data Processed). Applies to the participants and split stages only -- the VCF stage covers every selected study and the global AllConcepts, merge and manifest stages ALL ready studies, so a filtered rerun still ends with complete artifacts.')
+        booleanParam(name: 'INCLUDE_PROCESSED', defaultValue: true,
+               description: 'Migrate, split and index studies marked Data Processed too. The migration sheet marks the studies the legacy system already processed, which are exactly what the migration regenerates; without this it sees no work. Uncheck only to re-run over a sheet this pipeline has since marked processed: the participants, split and VCF stages then skip those studies, and the global AllConcepts, merge and manifest stages still cover every ready study, from their earlier artifacts.')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
@@ -100,6 +109,8 @@ pipeline {
                description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI.')
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
+        string(name: 'GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '10800',
+               description: 'How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside that job\'s own 4 h limit. Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'MERGE_ALLCONCEPTS_PARALLELISM', defaultValue: '8',
                description: 'merge-allconcepts --parallelism: consent folders merged at once, 1-16')
         string(name: 'MERGE_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '14400',
@@ -111,11 +122,11 @@ pipeline {
         string(name: 'DB_START_JOB', defaultValue: 'participant-db-start',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.start')
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
-               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
+               description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run, before QA)')
         string(name: 'QA_PIPELINE_COUNTS_JOB', defaultValue: 'qa-pipeline-counts',
                description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile as the last stage: every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov when QA_FETCH_MISSING_SUMMARIES is checked. Blank skips it.')
         booleanParam(name: 'QA_FETCH_MISSING_SUMMARIES', defaultValue: true,
-               description: 'QA pipeline counts: fetch each summary missing under DATA_ROOT from dbGaP\'s API (and cache it). Unchecked, a study with no summary file fails QA (SUMMARY_MISSING) and dbGaP is not asked.')
+               description: 'QA pipeline counts: fetch each summary missing under DATA_ROOT from dbGaP\'s API (and cache it under {study}/qa/). Unchecked, a study with no summary file fails QA (SUMMARY_MISSING) and dbGaP is not asked.')
         booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
                description: 'Replace the participant database before this run with DB_RESTORE_FROM (blank = the latest clean backup), whether or not one is up. A running database is saved to participant_db_pre_overwrite.tar first.')
         string(name: 'DB_RESTORE_FROM', defaultValue: '',
@@ -217,6 +228,10 @@ pipeline {
                         error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the participant " +
                               'database did not come up -- see that job\'s console.')
                     }
+                    def description = downstream.description ?: ''
+                    if (description.startsWith('Notice: ')) {
+                        unstable("${params.DB_START_JOB} #${downstream.number}: ${description.substring('Notice: '.length())}")
+                    }
                     // Only now does post { always } own the end-of-run backup. A failed start changed
                     // nothing worth saving.
                     env.DB_STARTED = 'true'
@@ -250,6 +265,7 @@ pipeline {
                             string(name: 'JOB_TIMEOUT_SECONDS', value: params.PARTICIPANTS_TIMEOUT_SECONDS ?: '43200'),
                             string(name: 'RESUME_FROM_RUN_ID', value: params.PARTICIPANTS_RESUME_FROM_RUN_ID ?: ''),
                             string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
+                            booleanParam(name: 'INCLUDE_PROCESSED', value: params.INCLUDE_PROCESSED),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
                             string(name: 'ENV',            value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS',     value: true),
@@ -313,6 +329,7 @@ pipeline {
                     def conceptParams = [
                         string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                        string(name: 'JOB_TIMEOUT_SECONDS', value: params.GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS?.trim() ?: '10800'),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
@@ -354,8 +371,8 @@ pipeline {
 
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
-                        // Only studies not yet marked "Data Processed", like every per-study stage.
-                        booleanParam(name: 'INCLUDE_PROCESSED', value: false),
+                        // As every per-study stage: studies marked "Data Processed" only with INCLUDE_PROCESSED.
+                        booleanParam(name: 'INCLUDE_PROCESSED', value: params.INCLUDE_PROCESSED),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -483,20 +500,30 @@ pipeline {
             }
         }
 
+        stage('Back up participant DB') {
+            // Before QA, inside the pipeline's 72 h timeout but ahead of QA's hours (waiting out a
+            // dbGaP outage), so they never delay the backup or cut it short; the runner pool is not
+            // left up for them either. The run is complete, so a SUCCESS or UNSTABLE one is promoted to
+            // the latest clean backup. post { always } does both instead when the build stops earlier.
+            when { expression { !params.PREFLIGHT_ONLY } }
+            steps {
+                script {
+                    stopRunnerPool()
+                    orch().backupParticipantDbOnce(params.DB_BACKUP_JOB, params.ENV)
+                }
+            }
+        }
+
         stage('QA pipeline counts') {
             // Last stage: every ready study's counts per consent group -- the DB, and this run's
             // participants-migration, split and migration-report counts -- against its dbGaP summary.
-            // Only reads the DB. Findings, and QA failing to run, make the build UNSTABLE, never FAILED.
+            // Only reads the DB. Findings, and QA not finishing (QA_TIMEOUT_HOURS: two runner attempts
+            // of up to 7 h each, plus provisioning), make the build UNSTABLE, never FAILED.
             when { expression { !params.PREFLIGHT_ONLY && params.QA_PIPELINE_COUNTS_JOB?.trim() } }
             steps {
                 script {
-                    try {
-                        // Two runner attempts of up to 7 h each (RETRY_ON_INFRA), plus provisioning.
-                        timeout(time: 15, unit: 'HOURS') {
-                            runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim())
-                        }
-                    } catch (err) {
-                        unstable("QA pipeline counts did not finish (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own.")
+                    orch().runQaStage(params.QA_PIPELINE_COUNTS_JOB.trim(), 'migration') {
+                        writeMigrationReport()
                     }
                 }
             }
@@ -508,8 +535,25 @@ pipeline {
             script {
                 // First: a failed backup fails the build loudly, and the report must exist regardless.
                 writeMigrationReport()
-                backupParticipantDb(params.DB_BACKUP_JOB, params.ENV)
                 stopRunnerPool()
+                // Unless the 'Back up participant DB' stage took it (the build stopped earlier).
+                try {
+                    orch().backupParticipantDbOnce(params.DB_BACKUP_JOB, params.ENV)
+                } catch (err) {
+                    currentBuild.result = 'FAILURE'
+                    echo "ERROR: the participant DB backup did not finish (${err}). Re-run ${params.DB_BACKUP_JOB} before the next pipeline run."
+                }
+                // A run stopped only by per-study split failures never reached the QA stage: QA still
+                // checks every study (orch().qaSkipReason() says when it does not), after the backup.
+                if (env.QA_RAN != 'true' && params.QA_PIPELINE_COUNTS_JOB?.trim()) {
+                    try {
+                        orch().runQaStage(params.QA_PIPELINE_COUNTS_JOB.trim(), 'migration') {
+                            writeMigrationReport()
+                        }
+                    } catch (err) {
+                        echo "WARNING: QA pipeline counts did not run (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own."
+                    }
+                }
                 removeRunnerImage()
             }
             archiveArtifacts artifacts: 'downstream-artifacts/**', allowEmptyArchive: true
@@ -529,106 +573,6 @@ pipeline {
             echo 'Migration pipeline completed. Every migration stage passed its own output validation.'
         }
     }
-}
-
-// The pipeline's last stage: every study marked
-// ready in MANAGED_INPUTS -- excluded ones and those this run did not process included, as a
-// regression check -- compared with its dbGaP summary (cached under DATA_ROOT; one missing there is
-// fetched and cached when QA_FETCH_MISSING_SUMMARIES, the default here, else the study fails QA), against the participant DB and this run's per-consent counts (participants-migration, the
-// split and the migration report; qaRunCounts). Read-only but for the cached summaries. It writes the
-// migration report first, for this run's counts; post writes it again with the final result. Skipped for a
-// pre-flight run, when the DB never started, or when the run failed (its counts would be partial).
-// Findings, and QA failing to run, make the build UNSTABLE, never FAILED. Its reports land in
-// downstream-artifacts/qa-pipeline-counts/ and beside the migration report in S3. Mirrors
-// runQaPipelineCounts in etl-runners/common/orchestrator.groovy, which this file does not load.
-def runQaPipelineCounts(String job) {
-    if (params.PREFLIGHT_ONLY) {
-        return
-    }
-    if (env.DB_STARTED != 'true') {
-        echo 'QA pipeline counts skipped: the participant database was never started.'
-        return
-    }
-    if (!(currentBuild.currentResult in ['SUCCESS', 'UNSTABLE'])) {
-        echo "QA pipeline counts skipped: the run ended ${currentBuild.currentResult}, so its counts are partial. " +
-             "Run ${job} on its own once it has been re-run."
-        return
-    }
-    def tag = env.BUILD_TAG.replaceAll(/[^A-Za-z0-9._-]/, '-')
-    def reportPrefix = "s3://${params.DATA_ROOT.trim().substring('s3://'.length()).split('/')[0]}" +
-                       "/etl-runner/reports/migration-pipeline/${tag}"
-    writeMigrationReport()
-    def downstream = build(job: job, wait: true, propagate: false, parameters: [
-        string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS.trim()),
-        string(name: 'DATA_ROOT', value: params.DATA_ROOT.trim()),
-        string(name: 'RUN_COUNTS', value: qaRunCounts("${reportPrefix}/qa_run_counts.csv")),
-        string(name: 'PIPELINE', value: 'migration'),
-        string(name: 'STUDY_FILTER', value: ''),
-        string(name: 'CACHE_CONCURRENCY', value: '8'),
-        booleanParam(name: 'FETCH_MISSING_SUMMARIES', value: params.QA_FETCH_MISSING_SUMMARIES),
-        booleanParam(name: 'CACHE_SUMMARIES', value: true),
-        // One dbGaP request at a time, 2 s apart (widening while dbGaP is overloaded), 3 attempts
-        // each (60 s then 120 s apart), none started after 6 hours: an outage is waited out that
-        // long, then the studies still without a summary are UNVERIFIED and a later run fetches them.
-        // The runner gets 7 h (the deadline, the in-flight study's retries, and the DB and cache reads).
-        string(name: 'CONCURRENCY', value: '1'),
-        string(name: 'DBGAP_REQUEST_SPACING_SECONDS', value: '2'),
-        string(name: 'DBGAP_BASE_URL', value: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study'),
-        string(name: 'DBGAP_MAX_ATTEMPTS', value: '3'),
-        string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', value: '60'),
-        string(name: 'DBGAP_MAX_BACKOFF_SECONDS', value: '120'),
-        string(name: 'DBGAP_TIMEOUT_SECONDS', value: '60'),
-        string(name: 'DBGAP_GIVE_UP_AFTER', value: '20'),
-        string(name: 'DBGAP_UNREACHABLE_PAUSE_SECONDS', value: '120'),
-        string(name: 'DBGAP_DEADLINE_SECONDS', value: '21600'),
-        string(name: 'RUN_ID', value: "${tag}-qa-pipeline-counts"),
-        string(name: 'INSTANCE_TYPE', value: 't3.medium'),
-        string(name: 'JOB_TIMEOUT_SECONDS', value: '25200'),
-        string(name: 'PREBUILT_IMAGE_TAR', value: ownRunnerImage()),
-        booleanParam(name: 'SKIP_TESTS', value: true),
-        booleanParam(name: 'RETRY_ON_INFRA', value: true),
-        string(name: 'ENV', value: params.ENV),
-    ])
-    try {
-        copyArtifacts(projectName: job, selector: specific("${downstream.number}"),
-                      target: 'downstream-artifacts/qa-pipeline-counts', optional: true)
-    } catch (err) {
-        rethrowIfInterrupted(err)
-        echo "Could not copy artifacts of ${job} #${downstream.number} (${err.message}); they remain on that build."
-    }
-    withEnv(["QA_DEST=${reportPrefix}/qa-pipeline-counts/"]) {
-        sh(returnStatus: true, script: '''
-            [ -d downstream-artifacts/qa-pipeline-counts ] || exit 0
-            aws s3 cp downstream-artifacts/qa-pipeline-counts "$QA_DEST" --recursive --no-progress --only-show-errors \
-              && echo "QA report uploaded to $QA_DEST"
-        ''')
-    }
-    if (downstream.result == 'UNSTABLE') {
-        unstable("${job} #${downstream.number}: consent counts disagree with dbGaP, or some studies have no summary " +
-                 'yet; downstream-artifacts/qa-pipeline-counts/**/qa-pipeline-report.md lists each')
-    } else if (downstream.result != 'SUCCESS') {
-        unstable("${job} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the consent " +
-                 "counts were not checked against dbGaP. Run ${job} on its own (a dbGaP outage, exit 4, is retryable).")
-    }
-}
-
-// This run's per-consent counts from participants-migration, the split and the migration report
-// (etl-runners/qa-pipeline-counts/collect-run-counts.py), uploaded to dest for the runner to read.
-// '' (every study DB vs dbGaP only) when they cannot be collected or uploaded.
-def qaRunCounts(String dest) {
-    def local = 'downstream-artifacts/qa-pipeline-counts-input/qa_run_counts.csv'
-    int rc
-    withEnv(["QA_LOCAL=${local}", "QA_DEST=${dest}"]) {
-        rc = sh(returnStatus: true, script: '''
-            python3 etl-runners/qa-pipeline-counts/collect-run-counts.py migration downstream-artifacts "$QA_LOCAL" &&
-              aws s3 cp "$QA_LOCAL" "$QA_DEST" --only-show-errors
-        ''')
-    }
-    if (rc != 0) {
-        echo "WARNING: could not collect or upload this run's counts (rc=${rc}); QA compares the DB with dbGaP only."
-        return ''
-    }
-    return dest
 }
 
 // The run's final report (etl-runners/migration-report/migration-report.py), written whatever stage
@@ -657,33 +601,6 @@ def writeMigrationReport() {
         } else if (rc != 0) {
             echo "WARNING: the migration report was written (downstream-artifacts/migration-report/) but not uploaded to ${dest}."
         }
-    }
-}
-
-// Dumps the participant DB to S3 at the end of the run, if this build's start succeeded. The
-// database stays up. A SUCCESS or UNSTABLE build overwrites participant_db.tar, the latest clean
-// backup; a failed or aborted one writes participant_db_not_promoted.tar instead and marks the live
-// database as holding a failed run (the next start acts on IF_LAST_RUN_FAILED). A failed backup
-// fails the build loudly: this run's writes then exist only in the live database.
-def backupParticipantDb(String backupJob, String envName) {
-    if (env.DB_STARTED != 'true') {
-        return
-    }
-    boolean promote = currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']
-    echo "Backing up the participant database (promote: ${promote})"
-    def downstream = build(
-        job: backupJob,
-        wait: true,
-        propagate: false,
-        parameters: [
-            booleanParam(name: 'PROMOTE_BACKUP', value: promote),
-            string(name: 'ENV', value: envName),
-        ])
-    if (downstream.result != 'SUCCESS') {
-        currentBuild.result = 'FAILURE'
-        echo "ERROR: ${backupJob} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: this run's writes are in the " +
-             "live participant database but in no verified backup. Re-run ${backupJob} " +
-             "(PROMOTE_BACKUP=${promote}) before the next pipeline run."
     }
 }
 
@@ -1000,9 +917,11 @@ def runSplitAllConcepts() {
             ? cols[header.indexOf('Data is ready to process')].trim() : ''
         def processedRaw = cols.size() > header.indexOf('Data Processed') && header.indexOf('Data Processed') >= 0
             ? cols[header.indexOf('Data Processed')].trim() : ''
-        // As participants-migration: a study already marked "Data Processed" is not split again.
+        // As participants-migration: a study already marked "Data Processed" is split only with
+        // INCLUDE_PROCESSED.
+        boolean processed = parseYesNo(processedRaw, 'Data Processed', studyId)
         if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)
-                && !parseYesNo(processedRaw, 'Data Processed', studyId)) {
+                && (params.INCLUDE_PROCESSED || !processed)) {
             studies << [studyId: studyId, abv: abv]
         }
     }
@@ -1014,7 +933,7 @@ def runSplitAllConcepts() {
     }
 
     if (studies.isEmpty()) {
-        error('No studies ready and not yet processed found in managed inputs for Split AllConcepts.')
+        error('No ready studies' + (params.INCLUDE_PROCESSED ? '' : ' not yet processed') + ' found in managed inputs for Split AllConcepts.')
     }
 
     echo "Split AllConcepts: ${studies.size()} study/studies to process"
@@ -1300,7 +1219,19 @@ def runSplitAllConcepts() {
         unstable("Split AllConcepts completed with warnings; see ${reportMd} (archived on this build).")
     } else if (reportRc != 0) {
         def summary = reportRc == 1 ? sh(returnStdout: true, script: "jq -r '.errorMessage // empty' 'downstream-artifacts/split-allconcepts-report-${runBase}.json' 2>/dev/null || true").trim() : ''
+        if (summary && params.CONTINUE_ON_STUDY_FAILURE) {
+            // Every other study ran: QA pipeline counts still checks the run (orch().qaSkipReason()).
+            env.FAILED_ONLY_FOR_STUDIES = 'true'
+        }
         error("Split AllConcepts failed: ${summary ?: "the report could not be written (split-report.sh exit ${reportRc})"}. " +
               "Each failed study's reason, logs and re-run setting are in ${reportMd} (archived on this build).")
     }
+}
+
+// The loaded etl-runners/common/orchestrator.groovy (loaded on first use).
+def orch() {
+    if (ORCH == null) {
+        ORCH = load 'etl-runners/common/orchestrator.groovy'
+    }
+    return ORCH
 }

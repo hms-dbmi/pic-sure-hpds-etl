@@ -1,19 +1,12 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa;
 
-import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.InfrastructureException;
-import edu.harvard.hms.dbmi.avillach.hpds.etl.core.util.Strings;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa.PipelineCountComparison.Measure;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa.PipelineCountComparison.Row;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa.PipelineCountComparison.Status;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa.PipelineCountComparison.StudyResult;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.jobs.qa.PipelineCountComparison.SummarySource;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -21,7 +14,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.stream.Stream;
 
 /**
  * The files {@link QaPipelineCountsJob} writes into the reports directory: three CSVs for machines
@@ -31,7 +23,7 @@ final class PipelineCountsReport {
 
     /** One row per (study, consent group, measure). */
     static final String COUNTS_FILE = "qa_pipeline_counts.csv";
-    /** Its rows that need follow-up: every status but MATCH and NOT_LOADED_BY_DESIGN. */
+    /** Its rows that need follow-up: every status but MATCH, NOT_LOADED_BY_DESIGN and SAME_AS_JOB. */
     static final String DISCREPANCIES_FILE = "qa_pipeline_discrepancies.csv";
     /** One row per study. */
     static final String STUDIES_FILE = "qa_pipeline_studies.csv";
@@ -64,15 +56,15 @@ final class PipelineCountsReport {
                     r.summarySource().name(), studyStatus(r), String.valueOf(consentGroups(r).size()),
                     String.valueOf(r.discrepancies()), r.studyNote()));
         }
-        writeAtomically(dir, COUNTS_FILE, all.toString());
-        writeAtomically(dir, DISCREPANCIES_FILE, discrepancies.toString());
-        writeAtomically(dir, STUDIES_FILE, studies.toString());
-        writeAtomically(dir, MARKDOWN_FILE, markdown(runId, output));
+        QaSupport.writeAtomically(dir, COUNTS_FILE, all.toString());
+        QaSupport.writeAtomically(dir, DISCREPANCIES_FILE, discrepancies.toString());
+        QaSupport.writeAtomically(dir, STUDIES_FILE, studies.toString());
+        QaSupport.writeAtomically(dir, MARKDOWN_FILE, markdown(runId, output));
     }
 
     /** A row to follow up: a discrepancy, or a study with no summary. */
     static boolean needsFollowUp(Status s) {
-        return s != Status.MATCH && s != Status.NOT_LOADED_BY_DESIGN;
+        return s != Status.MATCH && s != Status.NOT_LOADED_BY_DESIGN && s != Status.SAME_AS_JOB;
     }
 
     /** MATCH, DISCREPANCIES, UNVERIFIED, or the study-level finding. */
@@ -86,16 +78,11 @@ final class PipelineCountsReport {
     private static String countsLine(StudyResult r, Row row) {
         return csv(row.studyId(), row.version(), String.valueOf(r.input().inRun()), row.consentCode(),
                 row.consentShortName(), row.measure().name(), row.measure().kind().summaryField(),
-                str(row.dbgapCount()), str(row.count()), row.status().name(), row.note());
+                QaSupport.str(row.dbgapCount()), QaSupport.str(row.count()), row.status().name(), row.note());
     }
 
     private static String csv(String... values) {
-        return String.join(",", Stream.of(values)
-                .map(v -> Strings.csvQuote(v == null ? "" : v.replaceAll("[\r\n]+", " "))).toList()) + "\n";
-    }
-
-    private static String str(Long v) {
-        return v == null ? "" : String.valueOf(v);
+        return QaSupport.csvLine(values);
     }
 
     private static String version(StudyResult r) {
@@ -161,7 +148,9 @@ final class PipelineCountsReport {
                 .append(". `db:*` cover every study; the rest only the studies this run processed")
                 .append(output.runCountsUri() == null ? " (no run counts were given)" : "").append(".\n\n");
         md.append("Legend: a count that differs from dbGaP is shown as **count** (dbGaP n); `-` is not counted by that "
-                + "source. Consent 0 (not consented) subjects are not loaded by design.\n\n");
+                + "source. Consent 0 (not consented) is compared like any other group, except for a source that drops it by "
+                + "design (a MULTI load, the allConcepts generator and split). A final report's count that repeats "
+                + "the job report it is taken from is SAME_AS_JOB: that job's row is the finding.\n\n");
 
         if (!withDiscrepancies.isEmpty()) {
             md.append("## Count discrepancies\n\n");
@@ -264,22 +253,5 @@ final class PipelineCountsReport {
     /** Safe in a markdown table cell. */
     private static String cell(String s) {
         return s == null ? "" : s.replace("|", "\\|").replaceAll("[\r\n]+", " ");
-    }
-
-    /** Written aside and renamed: the runner uploads the reports directory while the job runs. */
-    private static void writeAtomically(Path dir, String name, String content) {
-        Path target = dir.resolve(name);
-        Path partial = dir.resolve(name + ".partial");
-        try {
-            Files.createDirectories(dir);
-            Files.writeString(partial, content, StandardCharsets.UTF_8);
-            try {
-                Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (IOException e) {
-            throw new InfrastructureException("Could not write " + target + ": " + e.getMessage(), e);
-        }
     }
 }

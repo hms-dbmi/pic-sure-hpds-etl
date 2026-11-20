@@ -112,6 +112,21 @@ if jq -e '.summary.heldBackVcfGroups == 2 and .heldBackVcfGroups[0].deletedFiles
 else
   fail "held-back VCF groups: $(jq -c '.heldBackVcfGroups' "$TMP/heldback-out/pipeline-report.json"); phs000001 $(report_row "$TMP/heldback-out" phs000001)"
 fi
+# A consent group with more participants written than loaded, or written but never loaded, is a
+# review item (rows landed in the wrong group); fewer written than loaded is not.
+cp -R "$HERE/fixture/downstream-artifacts" "$TMP/consents"
+GEN=$(find "$TMP/consents/per-study-all-concepts/phs000001" -name 'all-concepts-data-generator-*.json')
+jq '.metrics.participantsPerConsent = {"1": 9, "2": 2, "3": 1}' "$GEN" > "$GEN.tmp" && mv "$GEN.tmp" "$GEN"
+python3 "$ROOT/etl-runners/pipeline-report/pipeline-report.py" "$TMP/consents" run "$TMP/consents-out" SUCCESS >/dev/null 2>&1
+if jq -e '[.review[] | select(.studyId == "phs000001" and (.code | startswith("CONSENT_WRITTEN")))]
+          | length == 2 and .[0].code == "CONSENT_WRITTEN_EXCEEDS_LOADED" and (.[0].detail | contains("consent 1: 9"))
+            and .[1].code == "CONSENT_WRITTEN_NOT_LOADED" and (.[1].detail | contains("consent 3"))' \
+     "$TMP/consents-out/pipeline-report.json" >/dev/null \
+   && ! jq -e '.review[] | select(.code | startswith("CONSENT_WRITTEN"))' "$TMP/report/pipeline-report.json" >/dev/null; then
+  pass "consent groups with more written than loaded, or written but not loaded, are review items"
+else
+  fail "consent count review items: $(jq -c '[.review[] | select(.code | startswith("CONSENT_WRITTEN"))]' "$TMP/consents-out/pipeline-report.json")"
+fi
 python3 "$ROOT/etl-runners/pipeline-report/pipeline-report.py" >/dev/null 2>&1
 [ $? -eq 64 ] && pass "usage error exits 64" || fail "usage error did not exit 64"
 

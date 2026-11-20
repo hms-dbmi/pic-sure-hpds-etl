@@ -1,8 +1,8 @@
 // =============================================================================
 // PERMANENT QA -- qa-pipeline-counts (JobType.PERMANENT)
 //
-// The last step of both pipelines (/Jenkinsfile and Jenkinsfile.migration, after the final report
-// and the participant DB backup), and runnable on its own. For EVERY study marked ready in
+// The last stage of both pipelines (/Jenkinsfile and Jenkinsfile.migration), after the participant
+// DB backup stage, and runnable on its own. For EVERY study marked ready in
 // MANAGED_INPUTS -- not only those the run processed, so it doubles as a regression check --
 // compares each consent group's counts with the study version's dbGaP summary:
 //   - the participant DB, every study: distinct participants vs subject_count, and for a genomic
@@ -10,20 +10,25 @@
 //   - RUN_COUNTS, the studies the run processed: every per-consent count its job reports and final
 //     report give (etl-runners/qa-pipeline-counts/collect-run-counts.py), vs subject_count.
 //
-// Summaries: read from {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json, else from a
-// {study}*study_summary.json there (the one for the study's version). A study with no
+// Summaries: read from {DATA_ROOT}/{study}/qa/{study}_{version}_summary.json, where fetched ones are
+// cached, else from the same name or a {study}*study_summary.json (the one for the study's version)
+// under {study}/rawData/, where they are staged. A file whose accver does not name the study's
+// accession and version is unusable. A study with no
 // usable summary file depends on FETCH_MISSING_SUMMARIES:
 //   false (the default; the permanent pipeline): dbGaP is not asked, and the study fails QA
 //     (SUMMARY_MISSING, a warning like any other finding);
 //   true (the migration pipeline): it is asked of dbGaP's SSTR API (GET {DBGAP_BASE_URL}/{phs}.{v}/summary)
 //     -- one at a time, at least DBGAP_REQUEST_SPACING_SECONDS apart (widening while dbGaP answers
 //     overloaded), retried gently, and none started after DBGAP_DEADLINE_SECONDS (default 6 hours) --
-//     and each answer is cached there at once (CACHE_SUMMARIES), so dbGaP is asked for a study version
+//     and each answer is cached under qa/ at once (CACHE_SUMMARIES), so dbGaP is asked for a study version
 //     once. A study still without a summary is UNVERIFIED (a warning: a later run fetches it).
 //
 // Findings (each a WARNING; the build is UNSTABLE): COUNT_MISMATCH, MISSING (dbGaP lists the group,
 // the source has none of it), NOT_IN_DBGAP, DBGAP_COUNT_MISSING, NO_VERSION, VERSION_NOT_FOUND,
-// VERSION_MISMATCH, SUMMARY_MISSING, DBGAP_UNAVAILABLE (UNVERIFIED). Consent 0 not loaded is by design, not a finding.
+// VERSION_MISMATCH, SUMMARY_MISSING, DBGAP_UNAVAILABLE (UNVERIFIED). Consent 0 is compared like any
+// group, except where it is dropped by design (NOT_LOADED_BY_DESIGN): a study loaded from its MULTI
+// files, and the generator and split, which count consented participants only. A final report's
+// count repeating the job report it comes from is SAME_AS_JOB, not a second finding.
 //
 // Network: the runner's security group must allow HTTPS (443) egress to www.ncbi.nlm.nih.gov,
 // besides the participant DB and S3 (read and write under DATA_ROOT, for the summary cache).
@@ -35,8 +40,8 @@
 //     count,status,note
 //   qa_pipeline_studies.csv           one row per study
 //   qa-pipeline-counts-<runId>.json   report: studiesChecked, studiesInRun, studiesVerified,
-//     countsCompared, countsMatching, discrepancies(ByType/ByMeasure), studiesWithDiscrepancies,
-//     unverifiedStudies, summariesFromCache, summariesFromApi, summariesCached, apiAttempts, ...
+//     countsCompared, countsMatching, discrepancies(InRun/ByType/ByMeasure), studiesWithDiscrepancies,
+//     unverifiedStudies, summariesMissing, summariesFromCache, summariesFromApi, summariesCached, apiAttempts, ...
 //
 // Exit codes (see ExitCode.java)
 //   0 success (discrepancies make the build UNSTABLE) | 1 unknown | 2 validation (bad parameter) |
@@ -58,8 +63,9 @@ pipeline {
 
     options {
         timestamps()
-        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports.
-        copyArtifactPermission('*')
+        // Lets the orchestrators (/Jenkinsfile and Jenkinsfile.migration) copy this job's reports. Names
+        // relative to this job's folder (hpds-etl), as the orchestrators' own job names are.
+        copyArtifactPermission('hpds-etl-pipeline,new-hpds-etl-participant-migration-pipeline')
         buildDiscarder(logRotator(numToKeepStr: '50', artifactNumToKeepStr: '50'))
         disableConcurrentBuilds()
         // Two attempts of up to JOB_TIMEOUT_SECONDS (default 7 h) each (RETRY_ON_INFRA), plus provisioning.
@@ -70,9 +76,9 @@ pipeline {
         string(name: 'MANAGED_INPUTS', defaultValue: '',
                description: 'REQUIRED. --managed-inputs: CSV whose studies marked ready are checked, by Study Identifier and Version (s3://). The pipelines pass their original MANAGED_INPUTS: every ready study, excluded ones included.')
         string(name: 'DATA_ROOT', defaultValue: 's3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/BAM_testing',
-               description: 'REQUIRED. --data-root: root of the per-study folders. Summaries are read from, and fetched ones cached to, {DATA_ROOT}/{study}/rawData/{study}_{version}_summary.json.')
+               description: 'REQUIRED. --data-root: root of the per-study folders. Summaries are read from {DATA_ROOT}/{study}/qa/ (where fetched ones are cached) and {study}/rawData/ (where they are staged), as {study}_{version}_summary.json.')
         string(name: 'RUN_COUNTS', defaultValue: '',
-               description: '--run-counts: this run\'s counts per consent group, a CSV study_id,consent_code,source,participants[,kind] (s3://), as collect-run-counts.py writes it. Blank compares every study DB vs dbGaP only.')
+               description: '--run-counts: this run\'s counts per consent group, a CSV study_id,consent_code,source,participants[,kind][,load_source] (s3://), one row per study, consent code and source, as collect-run-counts.py writes it. Blank compares every study DB vs dbGaP only.')
         choice(name: 'PIPELINE', choices: ['', 'permanent', 'migration'],
                description: '--source-pipeline: which pipeline ran, shown in the report. Blank when run on its own.')
         string(name: 'STUDY_FILTER', defaultValue: '',
@@ -88,7 +94,7 @@ pipeline {
         string(name: 'DBGAP_REQUEST_SPACING_SECONDS', defaultValue: '2',
                description: '--dbgap-request-spacing-seconds: least gap between dbGaP requests, 0-600 (0: none). Doubles, up to 60 s, while dbGaP answers overloaded.')
         string(name: 'DBGAP_BASE_URL', defaultValue: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study',
-               description: '--dbgap-base-url: the dbGaP SSTR study endpoint; {phs}.{v}/summary is appended.')
+               description: '--dbgap-base-url: the dbGaP SSTR study endpoint, an https URL; {phs}.{v}/summary is appended.')
         string(name: 'DBGAP_MAX_ATTEMPTS', defaultValue: '3',
                description: '--dbgap-max-attempts: requests per study, retries included, 1-20.')
         string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', defaultValue: '60',

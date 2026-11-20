@@ -21,7 +21,7 @@ import java.util.concurrent.Executors;
 
 /**
  * A local stand-in for the dbGaP SSTR API (no network, no new dependency): per accession
- * ("phs001412.v4") a queue of canned responses, served in order; the last one repeats. Records every
+ * ("phs123456.v4") a queue of canned responses, served in order; the last one repeats. Records every
  * request path.
  */
 final class StubDbgapServer implements AutoCloseable {
@@ -86,7 +86,7 @@ final class StubDbgapServer implements AutoCloseable {
     }
 
     static String sample() {
-        try (InputStream in = StubDbgapServer.class.getResourceAsStream("/qa/phs001412.v4.json")) {
+        try (InputStream in = StubDbgapServer.class.getResourceAsStream("/qa/phs123456.v4.json")) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
