@@ -33,9 +33,9 @@ derived artifacts from newly migrated data.
 - [Stage 6: Create VCF Indexes](#stage-6-create-vcf-indexes)
 - [Stage 7: Merge AllConcepts](#stage-7-merge-allconcepts)
 - [Stage 8: AllConcepts Manifest](#stage-8-allconcepts-manifest)
-- [Stage 9: QA Pipeline Counts](#stage-9-qa-pipeline-counts)
+- [Stage 9: Back Up Participant DB](#stage-9-back-up-participant-db)
+- [Stage 10: QA Pipeline Counts](#stage-10-qa-pipeline-counts)
 - [Post: Migration Report](#post-migration-report)
-- [Post: Back Up Participant DB](#post-back-up-participant-db)
 - [Data Flow Summary](#data-flow-summary)
 - [Parameters](#parameters)
 - [Exit Codes](#exit-codes)
@@ -85,11 +85,17 @@ Build ▸ Tests
 └────────────┬────────────┘
              ▼
 ┌─────────────────────────┐
+│  Back up participant DB  │  stops the runner pool; pg_dump to S3, DB stays up;
+│                          │  participant_db.tar overwritten only on SUCCESS/UNSTABLE
+└────────────┬────────────┘
+             ▼
+┌─────────────────────────┐
 │  QA pipeline counts      │  every ready study vs its dbGaP summary (findings: UNSTABLE)
 └─────────────────────────┘
 
 post { always }:  migration-report       (downstream-artifacts/migration-report/)
-                  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+                  participant-db-backup  (only when the build stopped before its stage)
+                  qa-pipeline-counts     (only when the run stopped because some split studies failed)
 ```
 
 Stage ordering is strict: each stage runs only if the previous stage succeeded (UNSTABLE
@@ -580,12 +586,28 @@ global file first and `{study_id}.c{code}` (e.g. `phs000001.c1`) for each consen
 
 ---
 
-## Stage 9: QA Pipeline Counts
+## Stage 9: Back Up Participant DB
+
+**Job:** `participant-db-backup`, skipped under `PREFLIGHT_ONLY`. Once the run is complete, this
+stage stops the runner pool and backs the database up, before QA, so QA's hours (waiting out a
+dbGaP outage) never delay the backup or, under the pipeline's 72 h timeout, cut it short. When the
+build stops earlier, `post { always }` does both instead, whenever this build's start succeeded.
+Dumps the database to S3 and leaves it running. The dump becomes `participant_db.tar` only if the
+build is SUCCESS or UNSTABLE; otherwise it goes to `participant_db_not_promoted.tar`, and the next
+start acts on `IF_LAST_RUN_FAILED`. A backup that fails, or does not finish in 4 h, fails the build.
+See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+
+---
+
+## Stage 10: QA Pipeline Counts
 
 **Job:** [`qa-pipeline-counts`](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines)
-(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, skipped under `PREFLIGHT_ONLY`. It
-first writes the [migration report](#post-migration-report), whose counts it reads (`post` writes it
-again with the final result). It only reads the database (it writes only cached dbGaP summaries).
+(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, after the backup, skipped under
+`PREFLIGHT_ONLY`. A run stopped only because some split studies failed (`CONTINUE_ON_STUDY_FAILURE`)
+never reaches it, so it runs from `post`, after the backup; any other failure skips it. It first
+writes the [migration report](#post-migration-report), whose counts it reads (`post` writes it again
+with the final result). It only reads the database (it writes only cached dbGaP summaries). It is
+the same code as the permanent pipeline's (`etl-runners/common/orchestrator.groovy`).
 
 For **every study marked ready** in `MANAGED_INPUTS` -- excluded studies and those this run did not
 process included, as a regression check -- it compares each consent group's counts with that study
@@ -594,13 +616,21 @@ version's dbGaP summary: the participant DB for every study (distinct participan
 processed, what `participants-migration` loaded, the split's `participantsPerConsent`, and the migration report's `participants_loaded` and `participants_split` (vs `subject_count`), collected from `downstream-artifacts/` by
 `etl-runners/qa-pipeline-counts/collect-run-counts.py`.
 
-Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json`, or else
-from a `{study_id}*study_summary.json` there for the study's version, when there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
-none started after 6 hours), and cached there at once. A study still without one is
-`UNVERIFIED` and is fetched by a later run.
+Consent 0 is compared like any other group, except where it is dropped by design: a study
+`participants-migration` loaded from its MULTI files (the DB and the load counts), and the split,
+which counts consented participants only. A migration-report count that repeats its job's wrong
+count is `SAME_AS_JOB`, not a second finding. See
+[JENKINS.md](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines).
+
+Summaries are read from `{DATA_ROOT}/{study_id}/qa/{study_id}_{version}_summary.json` (where QA
+caches those it fetches), else the same name or a `{study_id}*study_summary.json` for the study's
+version under `{study_id}/rawData/` (where they are staged); only the rest are fetched from the
+dbGaP SSTR API, gently (one at a time, paced and retried, none started after 6 hours), and cached
+under `qa/` at once. A study still without one is `UNVERIFIED` and is fetched by a later run.
 
 Any discrepancy, or a study without a summary, makes the build **UNSTABLE**; so does QA failing to
-run (never FAILED: the ETL itself succeeded). The readable `qa-pipeline-report.md` and its CSVs are
+run (never FAILED: the ETL itself succeeded). The counts go in the build description, e.g.
+`QA: 3 finding(s) (2 in this run), 41 unverified, 5 without a summary`. The readable `qa-pipeline-report.md` and its CSVs are
 in `downstream-artifacts/qa-pipeline-counts/` and under
 `s3://<DATA_ROOT bucket>/etl-runner/reports/migration-pipeline/<build-tag>/qa-pipeline-counts/`.
 
@@ -635,16 +665,6 @@ sign-off), `MIGRATED`. Review `category`: `MISSING_DATA`, `MALFORMED_DATA`, `DAT
 [`qa-consent-counts`](JENKINS.md#qa-consent-counts-standalone) job as `LOAD_COUNTS`, to check the
 participant DB against dbGaP and against what this run loaded. Tests:
 `make -C etl-runners/migration-report test`.
-
----
-
-## Post: Back Up Participant DB
-
-**Job:** `participant-db-backup`, in `post { always }` whenever this build's start succeeded.
-Dumps the database to S3 and leaves it running. The dump becomes `participant_db.tar` only if the
-build is SUCCESS or UNSTABLE; otherwise it goes to `participant_db_not_promoted.tar`, and the next
-start acts on `IF_LAST_RUN_FAILED`. A failed backup fails the build. See
-[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -713,7 +733,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
-| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-9-qa-pipeline-counts) run last; blank skips it |
+| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-10-qa-pipeline-counts) run last; blank skips it |
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
 | `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
 | `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |

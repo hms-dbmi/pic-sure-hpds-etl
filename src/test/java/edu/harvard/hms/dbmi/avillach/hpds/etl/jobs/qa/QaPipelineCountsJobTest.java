@@ -131,7 +131,13 @@ class QaPipelineCountsJobTest {
                 + ",\"participant_set\":1},\"name\":\"A study\",\"consent_groups\":[" + g + "]}");
     }
 
+    /** Where QA caches the summaries it fetches. */
     private Path cacheFile(String studyId, String version) {
+        return dataRoot.resolve(studyId).resolve("qa").resolve(studyId + "_" + version + "_summary.json");
+    }
+
+    /** The same name where summaries are staged (and where earlier runs cached them). */
+    private Path stagedFile(String studyId, String version) {
         return dataRoot.resolve(studyId).resolve("rawData").resolve(studyId + "_" + version + "_summary.json");
     }
 
@@ -198,24 +204,24 @@ class QaPipelineCountsJobTest {
                 .contains("**Result: every count matches dbGaP.**");
     }
 
-    /** The file layout and shape in the data bucket: {@code phs004477/rawData/phs004477_v1_summary.json}. */
+    /** A summary staged in the data bucket: {@code phs000000/rawData/phs000000_v1_summary.json}. */
     @Test
     void reads_a_real_cached_summary_file() throws IOException {
-        managedInputs(study("HEIRS", "phs004477", "v1", true));
-        Files.createDirectories(cacheFile("phs004477", "v1").getParent());
-        try (var in = getClass().getResourceAsStream("/qa/phs004477_v1_summary.json")) {
-            Files.copy(in, cacheFile("phs004477", "v1"));
+        managedInputs(study("NINE", "phs000000", "v1", true));
+        Files.createDirectories(stagedFile("phs000000", "v1").getParent());
+        try (var in = getClass().getResourceAsStream("/qa/phs000000_v1_summary.json")) {
+            Files.copy(in, stagedFile("phs000000", "v1"));
         }
-        dbParticipants("phs004477", "1", 102689);
-        dbSamples("phs004477", "1", 102689);
+        dbParticipants("phs000000", "1", 1234);
+        dbSamples("phs000000", "1", 1234);
 
         JobResult result = run(Map.of());
 
         assertThat(asked).isEmpty();
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(file(PipelineCountsReport.COUNTS_FILE)).contains(
-                "phs004477,v1,false,1,DS-HH-MDS-RD,db:participants,subject_count,102689,102689,MATCH,",
-                "phs004477,v1,false,1,DS-HH-MDS-RD,db:samples,sample_count,102689,102689,MATCH,");
+                "phs000000,v1,false,1,DS-XYZ-MDS-RD,db:participants,subject_count,1234,1234,MATCH,",
+                "phs000000,v1,false,1,DS-XYZ-MDS-RD,db:samples,sample_count,1234,1234,MATCH,");
     }
 
     private void stagedAs(String studyId, String fileName, JsonNode study) throws IOException {
@@ -280,9 +286,25 @@ class QaPipelineCountsJobTest {
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
         assertThat(asked).containsExactly("phs000001.v1");
         assertThat(mapper.readTree(cacheFile("phs000001", "v1").toFile())).isEqualTo(study);
+        assertThat(stagedFile("phs000001", "v1")).doesNotExist();
         assertThat(result.getMetrics())
                 .containsEntry("summariesFromApi", 1L)
                 .containsEntry("summariesCached", 1);
+    }
+
+    @Test
+    void a_cached_summary_that_names_no_version_is_unusable() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        Files.createDirectories(cacheFile("phs000001", "v1").getParent());
+        Files.writeString(cacheFile("phs000001", "v1"), "{\"accver\":{\"accession\":\"phs000001\"},"
+                + "\"consent_groups\":[{\"code\":1,\"subject_count\":10}]}");
+        dbParticipants("phs000001", "1", 10);
+
+        JobResult result = run(Map.of());
+
+        assertThat(codes(result)).contains("WARNING:SUMMARY_MISSING");
+        assertThat(String.valueOf(result.getMetrics().get("unusableCachedSummaries"))).contains("names no study version");
+        assertThat(result.getMetrics()).containsEntry("summariesMissing", 1L);
     }
 
     @Test
@@ -417,7 +439,7 @@ class QaPipelineCountsJobTest {
     }
 
     @Test
-    void consent_0_not_loaded_is_by_design_and_a_group_dbgap_lacks_is_flagged() throws IOException {
+    void consent_0_missing_from_the_db_of_an_sstr_study_is_a_discrepancy() throws IOException {
         managedInputs(study("ONE", "phs000001", "v1", true));
         cached("phs000001", "v1", studyJson("phs000001", 1, 0, 576, 0, 1, 10, 0));
         dbParticipants("phs000001", "1", 10, "phs000001", "7", 2);
@@ -425,11 +447,74 @@ class QaPipelineCountsJobTest {
         JobResult result = run(Map.of());
 
         assertThat(file(PipelineCountsReport.COUNTS_FILE)).contains(
-                "phs000001,v1,false,0,G0,db:participants,subject_count,576,0,NOT_LOADED_BY_DESIGN,"
-                        + "consent 0 (not consented) is not loaded",
+                "phs000001,v1,false,0,G0,db:participants,subject_count,576,0,MISSING,"
+                        + "db:participants has none of dbGaP's 576",
                 "phs000001,v1,false,7,ABV7,db:participants,subject_count,0,2,NOT_IN_DBGAP,"
                         + "dbGaP does not list consent group 7");
-        assertThat(result.getMetrics()).containsEntry("discrepanciesByType", Map.of("NOT_IN_DBGAP", 1L));
+        assertThat(result.getMetrics()).containsEntry("discrepanciesByType", Map.of("MISSING", 1L, "NOT_IN_DBGAP", 1L));
+    }
+
+    @Test
+    void consent_0_is_not_loaded_by_design_for_a_multi_load_and_for_consented_only_sources() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        cached("phs000001", "v1", studyJson("phs000001", 1, 0, 576, 0, 1, 10, 0));
+        dbParticipants("phs000001", "1", 10);
+        Path counts = tempDir.resolve("run_counts.csv");
+        Files.writeString(counts, "study_id,consent_code,source,participants,kind,load_source\n"
+                + "phs000001,1,participants-migration,10,,multi\nphs000001,1,split-allconcepts,10,,\n");
+
+        JobResult result = run(Map.of("run-counts", counts.toString()));
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(file(PipelineCountsReport.COUNTS_FILE)).contains(
+                "phs000001,v1,true,0,G0,db:participants,subject_count,576,0,NOT_LOADED_BY_DESIGN,"
+                        + "consent 0 (not consented): the study's MULTI load drops it",
+                "phs000001,v1,true,0,G0,split-allconcepts,subject_count,576,0,NOT_LOADED_BY_DESIGN,"
+                        + "consent 0 (not consented): split-allconcepts counts consented participants only");
+    }
+
+    @Test
+    void a_final_report_repeating_a_job_reports_wrong_count_is_one_finding() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        cached("phs000001", "v1", studyJson("phs000001", 1, 1, 10, 0));
+        dbParticipants("phs000001", "1", 10);
+        Path counts = runCounts("phs000001,1,sstr-load,9", "phs000001,1,pipeline-report:loaded,9");
+
+        JobResult result = run(Map.of("run-counts", counts.toString()));
+
+        assertThat(result.getMetrics()).containsEntry("discrepancies", 1L)
+                .containsEntry("discrepanciesByMeasure", Map.of("sstr-load", 1L))
+                .containsEntry("discrepanciesInRun", 1L);
+        assertThat(file(PipelineCountsReport.COUNTS_FILE)).contains(
+                "phs000001,v1,true,1,G1,pipeline-report:loaded,subject_count,10,9,SAME_AS_JOB,"
+                        + "\"same count as sstr-load, whose row is the finding\"");
+        assertThat(file(PipelineCountsReport.DISCREPANCIES_FILE)).hasSize(2);
+    }
+
+    @Test
+    void a_second_run_count_for_the_same_group_and_source_is_rejected() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        cached("phs000001", "v1", studyJson("phs000001", 1, 1, 10, 0));
+        dbParticipants("phs000001", "1", 10);
+        Path counts = runCounts("phs000001,1,sstr-load,5", "phs000001,c1,sstr-load,5");
+
+        JobResult result = run(Map.of("run-counts", counts.toString()));
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("line 3: a second sstr-load count for phs000001 consent 1");
+    }
+
+    @Test
+    void a_run_counts_file_with_only_a_wrong_header_is_rejected() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true));
+        cached("phs000001", "v1", studyJson("phs000001", 1, 1, 10, 0));
+        dbParticipants("phs000001", "1", 10);
+        Path counts = Files.writeString(tempDir.resolve("header_only.csv"), "study,consent\n");
+
+        JobResult result = run(Map.of("run-counts", counts.toString()));
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.DATA_ERROR);
+        assertThat(result.getErrorMessage()).contains("is missing column(s) [study_id, consent_code, source, participants]");
     }
 
     /* ---- dbGaP unavailable ---- */

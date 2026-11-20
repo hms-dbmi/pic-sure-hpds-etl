@@ -13,16 +13,17 @@ import java.util.Locale;
 import java.util.regex.Pattern;
 
 /**
- * dbGaP study summaries kept beside each study's raw data, so the volatile SSTR API is asked for a
- * study version only once: {@code {root}/{study_id}/rawData/{study_id}_{version}_summary.json}, e.g.
- * {@code .../phs004477/rawData/phs004477_v1_summary.json}. A file holds the summary's {@code study}
- * object (or the API's whole response; both are read). Thread-safe.
+ * dbGaP study summaries kept with each study, so the volatile SSTR API is asked for a study version
+ * only once. Summaries fetched by QA are written to {@code {root}/{study_id}/qa/{study_id}_{version}_summary.json}
+ * (e.g. {@code .../phs000001/qa/phs000001_v1_summary.json}), apart from the curated source data. A file
+ * holds the summary's {@code study} object (or the API's whole response; both are read). Thread-safe.
  *
- * <p>Without that file, a summary staged under the alternative name {@code {study_id}*study_summary.json}
- * in the same folder is read instead (the same document, named differently). Those names need not
- * carry the version, so the one used is the first, those naming the version first, whose
- * {@code accver} does not describe another study or version. Fetched summaries are always written
- * under the canonical name.
+ * <p>Read, in order: that file; the same name under {@code {root}/{study_id}/rawData/} (where
+ * summaries are staged, and where earlier runs cached them); else a summary staged there under the
+ * alternative name {@code {study_id}*study_summary.json} (the same document, named differently).
+ * Those names need not carry the version, so the one used is the first, those naming the version
+ * first, that describes the study version. A file is usable only if its {@code accver} names the
+ * study's accession and version: one that names no version could be for any.
  */
 final class SummaryCache {
 
@@ -49,9 +50,18 @@ final class SummaryCache {
         this.root = root.endsWith("/") ? root : root + "/";
     }
 
-    /** e.g. {@code s3://bucket/root/phs004477/rawData/phs004477_v1_summary.json} for ("phs004477", "v1"). */
+    /** Where a fetched summary is cached: e.g. {@code s3://bucket/root/phs000001/qa/phs000001_v1_summary.json}. */
     String uri(String studyId, String version) {
-        return root + studyId + "/rawData/" + studyId + "_" + version + "_summary.json";
+        return root + studyId + "/qa/" + fileName(studyId, version);
+    }
+
+    /** The same name under the study's rawData folder, where summaries are staged. */
+    String stagedUri(String studyId, String version) {
+        return root + studyId + "/rawData/" + fileName(studyId, version);
+    }
+
+    private static String fileName(String studyId, String version) {
+        return studyId + "_" + version + "_summary.json";
     }
 
     /** {@code {study_id}*study_summary.json}, case-insensitively: the alternative summary name. */
@@ -61,15 +71,17 @@ final class SummaryCache {
     }
 
     /**
-     * Never throws: a missing file is not found, any failure is an {@link Entry#error}. The canonical
-     * file when it exists, else the first usable alternatively named one; when none is usable, the
-     * first one's error.
+     * Never throws: a missing file is not found, any failure is an {@link Entry#error}. The first of the
+     * files named above that exists, else the first usable alternatively named one; when none is usable,
+     * the first one's error.
      */
     Entry read(String studyId, String version) {
         String uri = uri(studyId, version);
         try {
-            if (io.exists(uri)) {
-                return readFile(uri);
+            for (String canonical : List.of(uri, stagedUri(studyId, version))) {
+                if (io.exists(canonical)) {
+                    return readFile(canonical, studyId, version);
+                }
             }
             String dir = root + studyId + "/rawData/";
             // "v1" is named by "phs004477.v1." or "_v1_", not by "v12".
@@ -82,16 +94,9 @@ final class SummaryCache {
                     .toList();
             List<Entry> unusable = new ArrayList<>();
             for (String name : alternatives) {
-                Entry entry = readFile(dir + name);
+                Entry entry = readFile(dir + name, studyId, version);
                 if (entry.found()) {
-                    DbgapStudySummary s = DbgapStudySummary.fromDocument(entry.document());
-                    if ((s.accession() != null && !s.accession().equalsIgnoreCase(studyId))
-                            || (s.version() != null && !("v" + s.version()).equalsIgnoreCase(version))) {
-                        entry = new Entry(entry.uri(), null, "describes " + s.accession() + ".v" + s.version()
-                                + ", not " + studyId + "." + version);
-                    } else {
-                        return entry;
-                    }
+                    return entry;
                 }
                 unusable.add(entry);
             }
@@ -101,12 +106,20 @@ final class SummaryCache {
         }
     }
 
-    private Entry readFile(String uri) {
+    /** The file at uri, usable only as a summary of studyId.version. */
+    private Entry readFile(String uri, String studyId, String version) {
         try (InputStream in = io.openInput(uri)) {
             JsonNode doc = mapper.readTree(in);
             if (doc == null || !DbgapStudySummary.studyObject(doc).isObject()
                     || !DbgapStudySummary.studyObject(doc).has("consent_groups")) {
                 return new Entry(uri, null, "not a study summary (no consent_groups)");
+            }
+            DbgapStudySummary s = DbgapStudySummary.fromDocument(doc);
+            if (!QaSupport.describes(s, studyId, version)) {
+                return new Entry(uri, null, s.accession() == null || s.version() == null
+                        ? "names no study version (accver accession " + s.accession() + ", version " + s.version()
+                                + "), so it could be for any"
+                        : "describes " + QaSupport.named(s) + ", not " + studyId + "." + version);
             }
             return new Entry(uri, doc, null);
         } catch (IOException e) {

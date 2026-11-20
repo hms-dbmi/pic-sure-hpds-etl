@@ -140,10 +140,10 @@ class QaConsentCountsJobTest {
 
     @Test
     void every_consent_matching_exits_0_with_no_warnings_and_an_empty_discrepancy_file() throws IOException {
-        managedInputs(study("DHS", "phs001412", "v4", true), study("FHS", "phs000007", "v33", true));
-        dbCounts("phs001412", "0", 576, "phs001412", "1", 402, "phs001412", "2", 3, "phs000007", "1", 10);
-        answers.put("phs001412.v4", found("phs001412", 4, 0, 576, 1, 402, 2, 3));
-        answers.put("phs000007.v33", found("phs000007", 33, 1, 10));
+        managedInputs(study("ABC", "phs123456", "v4", true), study("SEVEN", "phs000007", "v3", true));
+        dbCounts("phs123456", "0", 576, "phs123456", "1", 402, "phs123456", "2", 3, "phs000007", "1", 10);
+        answers.put("phs123456.v4", found("phs123456", 4, 0, 576, 1, 402, 2, 3));
+        answers.put("phs000007.v3", found("phs000007", 3, 1, 10));
 
         JobResult r = run(job(), Map.of());
 
@@ -151,10 +151,10 @@ class QaConsentCountsJobTest {
         assertThat(codes(r)).isEmpty();
         assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(
                 QaConsentCountsJob.CSV_HEADER,
-                "phs001412,v4,0,G0,576,576,,,MATCH,",
-                "phs001412,v4,1,G1,402,402,,,MATCH,",
-                "phs001412,v4,2,G2,3,3,,,MATCH,",
-                "phs000007,v33,1,G1,10,10,,,MATCH,");
+                "phs123456,v4,0,G0,576,576,,,MATCH,",
+                "phs123456,v4,1,G1,402,402,,,MATCH,",
+                "phs123456,v4,2,G2,3,3,,,MATCH,",
+                "phs000007,v3,1,G1,10,10,,,MATCH,");
         assertThat(csv(QaConsentCountsJob.DISCREPANCIES_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER);
         JsonNode m = reportJson().get("metrics");
         assertThat(m.get("studiesChecked").asInt()).isEqualTo(2);
@@ -217,10 +217,10 @@ class QaConsentCountsJobTest {
         run(job(), Map.of());
         assertThat(configUsed.get()).isEqualTo(DbgapStudyClient.Config.defaults());
 
-        run(job(), Map.of("dbgap-base-url", "http://stub.local/study/", "dbgap-max-attempts", "3",
+        run(job(), Map.of("dbgap-base-url", "http://localhost/study/", "dbgap-max-attempts", "3",
                 "dbgap-initial-backoff-seconds", "1", "dbgap-max-backoff-seconds", "9", "dbgap-timeout-seconds", "7",
                 "dbgap-request-spacing-seconds", "5"));
-        assertThat(configUsed.get()).isEqualTo(new DbgapStudyClient.Config("http://stub.local/study", 3,
+        assertThat(configUsed.get()).isEqualTo(new DbgapStudyClient.Config("http://localhost/study", 3,
                 Duration.ofSeconds(1), Duration.ofSeconds(9), Duration.ofSeconds(7), Duration.ofSeconds(5)));
     }
 
@@ -273,8 +273,8 @@ class QaConsentCountsJobTest {
         answers.put("phs000005.v1", found("phs000005", 2, 1, 1));
         String loadCounts = Files.writeString(tempDir.resolve("load.csv"),
                 "study_id,abv,outcome,source,consent_code,participants_loaded\n"
-                        + "phs000001,MIS,success,multi,1,400\n"
-                        + "phs000001,MIS,success,multi,7,5\n"
+                        + "phs000001,MIS,success,sstr,1,400\n"
+                        + "phs000001,MIS,success,sstr,7,5\n"
                         + "phs000002,REP,success,sstr,c1,9\n"
                         + "phs999999,OTHER,success,sstr,1,1\n").toString();
 
@@ -289,9 +289,9 @@ class QaConsentCountsJobTest {
         List<String> discrepancies = csv(QaConsentCountsJob.DISCREPANCIES_FILE);
         assertThat(discrepancies).containsExactly(
                 QaConsentCountsJob.CSV_HEADER,
-                "phs000001,v1,0,G0,576,0,0,multi,MISSING_IN_DB,source MULTI drops consent 0",
-                "phs000001,v1,1,G1,402,400,400,multi,COUNT_MISMATCH,",
-                "phs000001,v1,7,abv,0,5,5,multi,MISSING_IN_DBGAP,",
+                "phs000001,v1,0,G0,576,0,0,sstr,MISSING_IN_DB,",
+                "phs000001,v1,1,G1,402,400,400,sstr,COUNT_MISMATCH,",
+                "phs000001,v1,7,abv,0,5,5,sstr,MISSING_IN_DBGAP,",
                 "phs000002,v2,1,G1,10,10,9,sstr,REPORT_DB_MISMATCH,this run's load report says 9 but the DB holds 10",
                 "phs000003,,1,abv,,1,,,NO_VERSION,managed inputs Version is blank (expected e.g. v4); not checked against dbGaP",
                 "phs000004,v9,1,abv,,1,,,VERSION_NOT_FOUND,dbGaP has no phs000004.v9: Invalid or non-existent study",
@@ -594,17 +594,17 @@ class QaConsentCountsJobTest {
 
     @Test
     void listed_studies_are_checked_without_reading_the_managed_inputs() throws IOException {
-        dbCounts("phs000956", "1", 5, "phs001412", "1", 7);
-        answers.put("phs000956.v6", found("phs000956", 6, 1, 5));
-        answers.put("phs001412.v4", found("phs001412", 4, 1, 7));
+        dbCounts("phs654321", "1", 5, "phs123456", "1", 7);
+        answers.put("phs654321.v6", found("phs654321", 6, 1, 5));
+        answers.put("phs123456.v4", found("phs123456", 4, 1, 7));
 
-        JobResult r = run(job(), Map.of("studies", " PHS000956.v6.p1, phs001412.v4;phs000956.v6 "));
+        JobResult r = run(job(), Map.of("studies", " PHS654321.v6.p1, phs123456.v4;phs654321.v6 "));
 
         assertThat(r.getExitCode()).isEqualTo(ExitCode.SUCCESS);
-        assertThat(asked).containsExactly("phs000956.v6", "phs001412.v4");
+        assertThat(asked).containsExactly("phs654321.v6", "phs123456.v4");
         org.mockito.Mockito.verifyNoInteractions(managedInputs);
         assertThat(csv(QaConsentCountsJob.COUNTS_FILE)).containsExactly(QaConsentCountsJob.CSV_HEADER,
-                "phs000956,v6,1,G1,5,5,,,MATCH,", "phs001412,v4,1,G1,7,7,,,MATCH,");
+                "phs654321,v6,1,G1,5,5,,,MATCH,", "phs123456,v4,1,G1,7,7,,,MATCH,");
     }
 
     @Test
@@ -697,6 +697,8 @@ class QaConsentCountsJobTest {
         Map<String, String> files = new HashMap<>();
         files.put("no-columns.csv", "study,consent\nphs000001,1\n");
         files.put("bad-count.csv", "study_id,consent_code,participants_loaded\nphs000001,1,many\n");
+        files.put("header-only.csv", "study,consent\n");
+        files.put("same-group-twice.csv", "study_id,consent_code,participants_loaded\nphs000001,1,2\nphs000001,c1,3\n");
         for (Map.Entry<String, String> f : files.entrySet()) {
             String path = Files.writeString(tempDir.resolve(f.getKey()), f.getValue()).toString();
 

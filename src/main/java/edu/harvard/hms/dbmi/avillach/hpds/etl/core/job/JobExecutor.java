@@ -89,11 +89,13 @@ public class JobExecutor {
             return b.build();
         } catch (EtlException e) {
             log.error("Job '{}' raised {}: {}", job.name(), e.getClass().getSimpleName(), e.getMessage(), e);
-            // Whatever the job had established before failing (see EtlException#withPartialResult).
+            // Whatever the job had established before failing (see EtlException#withPartialResult),
+            // and the input validation it had passed.
             return JobResult.builder(job.name(), job.type(), ctx.runId())
                     .startedAt(start).finishedAt(Instant.now())
                     .exitCode(e.exitCode()).errorMessage(e.getMessage())
                     .metrics(e.partialMetrics())
+                    .inputValidation(e.inputValidation())
                     .outputValidation(e.partialOutputValidation())
                     .build();
         } catch (Exception e) {

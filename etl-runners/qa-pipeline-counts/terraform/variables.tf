@@ -104,7 +104,7 @@ variable "managed_inputs_uri" {
 
 variable "data_root_uri" {
   type        = string
-  description = "--data-root: root of the per-study folders; summaries are cached at {root}/{study}/rawData/{study}_{version}_summary.json. Required."
+  description = "--data-root: root of the per-study folders; summaries are cached at {root}/{study}/qa/{study}_{version}_summary.json (staged ones are read from {study}/rawData/ too). Required."
 }
 
 variable "run_counts_uri" {

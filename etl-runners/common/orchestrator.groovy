@@ -1,6 +1,8 @@
 // =============================================================================
 // Helpers for the permanent ETL orchestrator (/Jenkinsfile), loaded once per build with
 //   ORCH = load 'etl-runners/common/orchestrator.groovy'
+// Jenkinsfile.migration loads it too, for what both pipelines end with: the participant DB backup
+// and QA pipeline counts.
 //
 // Why a loaded file: declarative compiles the whole pipeline {} block into one JVM method, which
 // has a 64 KB limit ("Method too large"). Stage logic lives here; /Jenkinsfile keeps the DAG.
@@ -22,6 +24,10 @@ MERGE_TIMEOUT_MAX_SECONDS     = 28800
 GENERATOR_TIMEOUT_MIN_SECONDS = 7200    // all-concepts-data-generator's own default
 GENERATOR_TIMEOUT_MAX_SECONDS = 12600   // all-concepts-data-generator: 4 h Jenkins timeout
 STUDY_CONCURRENCY_MAX         = 50
+// QA pipeline counts: two runner attempts of up to 7 h each (RETRY_ON_INFRA), plus provisioning.
+QA_TIMEOUT_HOURS              = 15
+// The end-of-run participant DB backup: the backup job's own 3 h timeout, plus provisioning.
+BACKUP_TIMEOUT_HOURS          = 4
 
 // The managed-inputs columns this pipeline (and ManagedInputsService) reads.
 MANAGED_INPUTS_COLUMNS = ['Study Abbreviated Name', 'Study Identifier', 'Data is ready to process', 'Data Processed']
@@ -387,6 +393,10 @@ def runPerStudyStage(Map cfg) {
     echo '======================================================'
 
     if (failed) {
+        if (params.CONTINUE_ON_STUDY_FAILURE) {
+            // Every other study ran: QA pipeline counts still checks the run (see qaSkipReason).
+            env.FAILED_ONLY_FOR_STUDIES = 'true'
+        }
         error(onFailure.call(failed.collect { "${it.studyId}${it.reason ?: ''}" }.join('; ')))
     }
     if (warned) {
@@ -474,6 +484,24 @@ def rethrowIfInterrupted(err) {
     }
 }
 
+// Runs body under its own timeout of `hours`. Returns null when body finished, else what ended it:
+// its own failure, or this timeout. An abort, or an outer timeout, is rethrown. timeout() ends its
+// block with the same interrupt an abort does, so the two are told apart by when it came.
+def withOwnTimeout(int hours, Closure body) {
+    long started = System.currentTimeMillis()
+    try {
+        timeout(time: hours, unit: 'HOURS') {
+            body.call()
+        }
+        return null
+    } catch (err) {
+        if (System.currentTimeMillis() - started < hours * 3600000L) {
+            rethrowIfInterrupted(err)
+        }
+        return err
+    }
+}
+
 // Why a downstream build failed, as its own post-failure block recorded it in its description
 // (the job's exit meaning, or that it stopped before writing a report): " -- <reason>", or "".
 def failureDetail(downstream) {
@@ -525,8 +553,8 @@ static long scaledTimeout(long bytes, long base, long perGb, long min, long max)
 // -----------------------------------------------------------------------------
 
 // Makes sure the long-lived participant database is up (see OVERWRITE_DB, DB_RESTORE_FROM and
-// IF_LAST_RUN_FAILED). Only once it is does post { always } own the end-of-run backup: a failed
-// start changed nothing worth saving.
+// IF_LAST_RUN_FAILED). Only once it is is there an end-of-run backup (backupParticipantDbOnce): a
+// failed start changed nothing worth saving.
 def startParticipantDb() {
     def downstream = build(
         job: params.DB_START_JOB,
@@ -545,6 +573,24 @@ def startParticipantDb() {
     }
     warnOnDbStartNotice(downstream)
     env.DB_STARTED = 'true'
+}
+
+// The end-of-run backup, taken once: by the 'Back up participant DB' stage before QA, so QA's hours
+// never delay it or cut it short, or by post { always } when the build stopped before that stage.
+// A backup that does not finish in BACKUP_TIMEOUT_HOURS fails the build loudly; an abort is rethrown
+// (from the stage, post then takes the backup).
+def backupParticipantDbOnce(String backupJob, String envName) {
+    if (env.DB_BACKED_UP == 'true') {
+        return
+    }
+    def err = withOwnTimeout(BACKUP_TIMEOUT_HOURS) {
+        backupParticipantDb(backupJob, envName)
+    }
+    env.DB_BACKED_UP = 'true'
+    if (err != null) {
+        currentBuild.result = 'FAILURE'
+        echo "ERROR: the participant DB backup did not finish (${err}). Re-run ${backupJob} before the next pipeline run."
+    }
 }
 
 // The start job's description holds "Notice: ..." when it came up with a warning (e.g. sample rows
@@ -654,35 +700,60 @@ def writePipelineReport() {
 }
 
 // -----------------------------------------------------------------------------
-// QA pipeline counts
+// QA pipeline counts (both pipelines)
 // -----------------------------------------------------------------------------
 
-// The pipeline's last stage: every study
-// marked ready in MANAGED_INPUTS -- excluded ones and those this run did not process included, as a
-// regression check -- compared with its dbGaP summary (cached under DATA_ROOT; one missing there is
-// fetched and cached when QA_FETCH_MISSING_SUMMARIES, else the study fails QA), against the participant DB and this run's per-consent counts (qaRunCounts). Read-only but
-// for the cached summaries. It writes the pipeline report first, for this run's counts; post writes it
-// again with the final result. Skipped for a pre-flight run, when the DB
-// never started, or when the run failed (its counts would be partial; run qa-pipeline-counts on its
-// own after a re-run). Findings, and QA failing to run, make the build UNSTABLE, never FAILED: the
-// ETL itself already succeeded. Its reports land in downstream-artifacts/qa-pipeline-counts/ and
-// beside the run's report in S3.
-def runQaPipelineCounts(String job, String pipeline) {
+// QA pipeline counts, the last stage of both pipelines -- or, for a run stopped only by per-study
+// failures (CONTINUE_ON_STUDY_FAILURE), run from post { always } after the backup, since declarative
+// skips every stage after a failed one. Every study marked ready in MANAGED_INPUTS -- excluded ones
+// and those this run did not process included, as a regression check -- compared with its dbGaP
+// summary (cached under DATA_ROOT; one missing there is fetched and cached when
+// QA_FETCH_MISSING_SUMMARIES, else the study fails QA), against the participant DB and this run's
+// per-consent counts (qaRunCounts). Read-only but for the cached summaries. writeReport writes the
+// pipeline's final report (writePipelineReport, or the migration's writeMigrationReport), which QA
+// reads for this run's counts; post writes it again with the final result. Findings, and QA not
+// finishing within QA_TIMEOUT_HOURS, make the build UNSTABLE, never FAILED; an abort is rethrown.
+// Its reports land in downstream-artifacts/qa-pipeline-counts/ and beside the run's report in S3,
+// and its counts in the build description.
+def runQaStage(String job, String pipeline, Closure writeReport) {
+    env.QA_RAN = 'true'
+    def err = withOwnTimeout(QA_TIMEOUT_HOURS) {
+        runQaPipelineCounts(job, pipeline, writeReport)
+    }
+    if (err != null) {
+        unstable("QA pipeline counts did not finish (${err}); run ${job} on its own.")
+    }
+}
+
+// Why QA pipeline counts does not run now, or '' when it does: not for a pre-flight, when the DB
+// never started, or when the run failed other than by per-study failures (its counts would be
+// partial; run qa-pipeline-counts on its own after a re-run) or was aborted.
+def qaSkipReason() {
     if (params.PREFLIGHT_ONLY) {
-        return
+        return 'this is a pre-flight run'
     }
     if (env.DB_STARTED != 'true') {
-        echo 'QA pipeline counts skipped: the participant database was never started.'
+        return 'the participant database was never started'
+    }
+    if (currentBuild.currentResult in ['SUCCESS', 'UNSTABLE']
+            || (currentBuild.currentResult == 'FAILURE' && env.FAILED_ONLY_FOR_STUDIES == 'true')) {
+        return ''
+    }
+    return "the run ended ${currentBuild.currentResult}, so its counts are partial. Run it on its own once the run has been re-run"
+}
+
+def runQaPipelineCounts(String job, String pipeline, Closure writeReport) {
+    def skip = qaSkipReason()
+    if (skip) {
+        echo "QA pipeline counts skipped: ${skip}."
         return
     }
-    if (!(currentBuild.currentResult in ['SUCCESS', 'UNSTABLE'])) {
-        echo "QA pipeline counts skipped: the run ended ${currentBuild.currentResult}, so its counts are partial. " +
-             "Run ${job} on its own once it has been re-run."
-        return
+    if (currentBuild.currentResult == 'FAILURE') {
+        echo 'The run failed only for some studies (CONTINUE_ON_STUDY_FAILURE): QA checks every ready study anyway.'
     }
     def reportPrefix = "s3://${params.DATA_ROOT.trim().substring('s3://'.length()).split('/')[0]}" +
                        "/etl-runner/reports/${pipeline}-pipeline/${runTag()}"
-    writePipelineReport()
+    writeReport.call()
     def downstream = build(job: job, wait: true, propagate: false, parameters: [
         string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS.trim()),
         string(name: 'DATA_ROOT', value: params.DATA_ROOT.trim()),
@@ -719,10 +790,11 @@ def runQaPipelineCounts(String job, String pipeline) {
     withEnv(["QA_DEST=${reportPrefix}/qa-pipeline-counts/"]) {
         sh(returnStatus: true, script: '''
             [ -d downstream-artifacts/qa-pipeline-counts ] || exit 0
-            aws s3 cp downstream-artifacts/qa-pipeline-counts "$QA_DEST" --recursive --no-progress --only-show-errors \
+            aws s3 cp downstream-artifacts/qa-pipeline-counts "$QA_DEST" --recursive --no-progress --only-show-errors \\
               && echo "QA report uploaded to $QA_DEST"
         ''')
     }
+    describeQa(job, downstream)
     if (downstream.result == 'UNSTABLE') {
         unstable("${job} #${downstream.number}: consent counts disagree with dbGaP, or some studies have no summary " +
                  'yet; downstream-artifacts/qa-pipeline-counts/**/qa-pipeline-report.md lists each')
@@ -730,6 +802,18 @@ def runQaPipelineCounts(String job, String pipeline) {
         unstable("${job} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the consent " +
                  "counts were not checked against dbGaP. Run ${job} on its own (a dbGaP outage, exit 4, is retryable).")
     }
+}
+
+// Adds QA's counts to the build description, e.g. "QA: 3 finding(s) (2 in this run), 41 unverified,
+// 5 without a summary", so a real mismatch stands out from a run's other warnings.
+def describeQa(String job, downstream) {
+    def counts = sh(returnStdout: true, script: '''
+        f=$(find downstream-artifacts/qa-pipeline-counts -name 'qa-pipeline-counts-*.json' 2>/dev/null | head -1)
+        [ -n "$f" ] || exit 0
+        jq -r '.metrics | "\\(.discrepancies // 0) finding(s) (\\(.discrepanciesInRun // 0) in this run), \\((.unverifiedStudies // []) | length) unverified, \\(.summariesMissing // 0) without a summary"' "$f" 2>/dev/null || true
+    ''').trim()
+    def qa = "QA: ${counts ?: "${job} #${downstream.number} ended ${downstream.result}, no report"}"
+    currentBuild.description = currentBuild.description ? "${currentBuild.description}; ${qa}" : qa
 }
 
 // This run's per-consent counts from its stages' reports and final report

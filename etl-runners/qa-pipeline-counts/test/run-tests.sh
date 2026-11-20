@@ -38,14 +38,14 @@ printf 'study_id,abv,consent_code,participants_loaded,participants_written\nphs0
   > "$A/pipeline-report/pipeline_consent_counts.csv"
 python3 "$RUNNER/collect-run-counts.py" permanent "$A" "$TMP/permanent.csv" >"$TMP/c.log" 2>&1
 same "permanent: SSTR loads, the generator and the pipeline report; a failed load and blank counts skipped" \
-  "$TMP/permanent.csv" "study_id,consent_code,source,participants
-phs000001,1,sstr-load,7
-phs000001,2,sstr-load,3
-phs000001,c1,all-concepts-data-generator,7
-phs000001,c2,all-concepts-data-generator,2
-phs000001,1,pipeline-report:loaded,7
-phs000001,1,pipeline-report:written,7
-phs000001,2,pipeline-report:loaded,3"
+  "$TMP/permanent.csv" "study_id,consent_code,source,participants,load_source
+phs000001,1,sstr-load,7,
+phs000001,2,sstr-load,3,
+phs000001,c1,all-concepts-data-generator,7,
+phs000001,c2,all-concepts-data-generator,2,
+phs000001,1,pipeline-report:loaded,7,
+phs000001,1,pipeline-report:written,7,
+phs000001,2,pipeline-report:loaded,3,"
 
 M="$TMP/migration"
 mkdir -p "$M/participants-migration" "$M/migration-report"
@@ -59,15 +59,22 @@ printf 'study_id,abv,consent_code,partition,participants_loaded,participants_spl
   > "$M/migration-report/migration_consent_counts.csv"
 python3 "$RUNNER/collect-run-counts.py" migration "$M" "$TMP/migration.csv" >"$TMP/c.log" 2>&1
 same "migration: the participants load, the split and the migration report; a failed split skipped" \
-  "$TMP/migration.csv" "study_id,consent_code,source,participants
-phs000001,1,participants-migration,402
-phs000001,1,split-allconcepts,400
-phs000001,1,migration-report:loaded,402
-phs000001,1,migration-report:split,400"
+  "$TMP/migration.csv" "study_id,consent_code,source,participants,load_source
+phs000001,1,participants-migration,402,multi
+phs000001,1,split-allconcepts,400,
+phs000001,1,migration-report:loaded,402,
+phs000001,1,migration-report:split,400,"
 grep -q 'migration-report:split: 1 study' "$TMP/c.log" && pass "summarizes what it found" || { fail "no summary"; cat "$TMP/c.log"; }
 
 python3 "$RUNNER/collect-run-counts.py" permanent "$TMP/nothing" "$TMP/empty.csv" >/dev/null 2>&1
-same "no artifacts: a header-only file" "$TMP/empty.csv" "study_id,consent_code,source,participants"
+same "no artifacts: a header-only file" "$TMP/empty.csv" "study_id,consent_code,source,participants,load_source"
+D="$TMP/duplicate"
+report "$D/per-study-all-concepts/phs000001/etl-runners/all-concepts-data-generator/reports/all-concepts-data-generator-t.json" \
+  SUCCESS '{"participantsPerConsent":{"1":7,"c1":7}}'
+python3 "$RUNNER/collect-run-counts.py" permanent "$D" "$TMP/duplicate.csv" >"$TMP/c.log" 2>&1
+rc=$?
+[ $rc -eq 1 ] && [ ! -f "$TMP/duplicate.csv" ] && grep -q 'more than one count for phs000001 c1 all-concepts-data-generator' "$TMP/c.log" \
+  && pass "two counts for one group and source: exit 1, nothing written" || { fail "duplicate count: exit $rc"; cat "$TMP/c.log"; }
 python3 "$RUNNER/collect-run-counts.py" nightly "$A" "$TMP/x.csv" >/dev/null 2>&1
 [ $? -eq 64 ] && pass "an unknown pipeline exits 64" || fail "an unknown pipeline did not exit 64"
 
@@ -90,11 +97,12 @@ expect_rc() {   # <label> <want> <dir>
   [ "$rc" -eq "$2" ] && pass "$1 (exit $rc)" || { fail "$1: exit $rc, want $2"; cat "$TMP/v.log"; }
 }
 MATCH='phs000001,v4,true,1,G1,db:participants,subject_count,402,402,MATCH,\n'
-BYDESIGN='phs000001,v4,true,0,G0,db:participants,subject_count,576,0,NOT_LOADED_BY_DESIGN,consent 0 (not consented) is not loaded\n'
+BYDESIGN='phs000001,v4,true,0,G0,split-allconcepts,subject_count,576,0,NOT_LOADED_BY_DESIGN,consent 0 (not consented): split-allconcepts counts consented participants only\n'
+SAMEASJOB='phs000001,v4,true,2,G2,migration-report:split,subject_count,3,2,SAME_AS_JOB,"same count as split-allconcepts, whose row is the finding"\n'
 MISMATCH='phs000001,v4,true,2,G2,db:participants,subject_count,3,2,COUNT_MISMATCH,"a note, with a comma"\n'
 qa_run "$TMP/ok" SUCCESS SUCCESS 0 '[]' "$MATCH$BYDESIGN" ''
 expect_rc "every count matching passes (consent 0 not loaded is not a finding)" 0 "$TMP/ok"
-qa_run "$TMP/warn" SUCCESS_WITH_WARNINGS SUCCESS 1 '[]' "$MATCH$MISMATCH" "$MISMATCH"
+qa_run "$TMP/warn" SUCCESS_WITH_WARNINGS SUCCESS 1 '[]' "$MATCH$MISMATCH$SAMEASJOB" "$MISMATCH"
 expect_rc "discrepancies are warnings" 10 "$TMP/warn"
 grep -q 'phs000001 v4 c2 G2, db:participants: 2 vs 3 COUNT_MISMATCH -- a note, with a comma' "$TMP/v.log" \
   && pass "lists each discrepancy" || { fail "discrepancy not listed"; cat "$TMP/v.log"; }

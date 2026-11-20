@@ -91,8 +91,8 @@ orchestrator (/Jenkinsfile or /Jenkinsfile.migration)
   │     publish host/port/dbname/username/password to SSM (SecureString, overwritten)
   │     record the live database dirty: "run <RUN_ID> in progress"
   ▸ … DB-backed runner stages (each runner fetches the credentials from SSM at boot) …
-  post { always }
-  ▸ participant-db-backup   (only if this build's start succeeded)
+  ▸ Back up participant DB  (the stage before QA; post { always } instead when the build stopped earlier)
+  ▸ participant-db-backup   (only if this build's start succeeded; once per build)
         pg_dump --format=d ▸ tar ▸ upload ▸ verify size and dumped-at
              SUCCESS or UNSTABLE:  overwrite participant_db.tar               (latest clean backup)
              otherwise:            overwrite participant_db_not_promoted.tar  (failed or aborted run)

@@ -56,6 +56,30 @@ class JobExecutorTest {
     }
 
     @Test
+    void a_failure_while_executing_keeps_the_input_validations_warnings() throws Exception {
+        Job job = new AbstractJob<Void>() {
+            public String name() { return "failing"; }
+            public JobType type() { return JobType.PERMANENT; }
+            public JobExpectations expectations() { return JobExpectations.of(List.of(), List.of()); }
+            protected void validateInput(JobContext ctx, ValidationReport report) {
+                report.warning("STUDY_FILTER_UNMATCHED", "phs000009 is not a ready study");
+            }
+            protected Void execute(JobContext ctx) {
+                throw new InfrastructureException("API down").withPartialResult(Map.of("checked", 3), null);
+            }
+            protected void validateOutput(Void output, JobContext ctx, ValidationReport report) {
+            }
+        };
+
+        JobResult r = executor().run(job, Map.of(), "t");
+
+        assertThat(r.getExitCode()).isEqualTo(ExitCode.INFRASTRUCTURE_ERROR);
+        JsonNode json = mapper.readTree(reports.resolve("failing-t.json").toFile());
+        assertThat(json.at("/inputValidation/issues/0/code").asText()).isEqualTo("STUDY_FILTER_UNMATCHED");
+        assertThat(json.at("/metrics/checked").asInt()).isEqualTo(3);
+    }
+
+    @Test
     void a_plain_failure_still_reports_no_metrics() throws Exception {
         JobResult r = executor().run(failing(new InfrastructureException("S3 down")), Map.of(), "t");
 

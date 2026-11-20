@@ -90,7 +90,7 @@ pipeline {
         string(name: 'DBGAP_REQUEST_SPACING_SECONDS', defaultValue: '2',
                description: '--dbgap-request-spacing-seconds: least gap between dbGaP requests, after the previous one ends, 0-600 (0: none). Doubles, up to 60 s, while dbGaP answers overloaded (429, 502, 503, 504, a timeout), narrowing back as it answers.')
         string(name: 'DBGAP_BASE_URL', defaultValue: 'https://www.ncbi.nlm.nih.gov/gap/sstr/api/v1/study',
-               description: '--dbgap-base-url: the dbGaP SSTR study endpoint; {phs}.{v}/summary is appended.')
+               description: '--dbgap-base-url: the dbGaP SSTR study endpoint, an https URL; {phs}.{v}/summary is appended.')
         string(name: 'DBGAP_MAX_ATTEMPTS', defaultValue: '3',
                description: '--dbgap-max-attempts: requests per study, retries included, 1-20.')
         string(name: 'DBGAP_INITIAL_BACKOFF_SECONDS', defaultValue: '60',

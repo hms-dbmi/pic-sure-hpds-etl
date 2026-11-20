@@ -23,8 +23,8 @@ Orchestrated by [`/Jenkinsfile`](../Jenkinsfile) (Jenkins job `hpds-etl-pipeline
 - [Stage 8: Generate Per-Study AllConcepts](#stage-8-generate-per-study-allconcepts)
 - [Stage 9: Merge AllConcepts](#stage-9-merge-allconcepts)
 - [Stage 10: AllConcepts Manifest](#stage-10-allconcepts-manifest)
-- [Stage 11: QA Pipeline Counts](#stage-11-qa-pipeline-counts)
-- [Post: Back Up Participant DB](#post-back-up-participant-db)
+- [Stage 11: Back Up Participant DB](#stage-11-back-up-participant-db)
+- [Stage 12: QA Pipeline Counts](#stage-12-qa-pipeline-counts)
 - [End-of-run Report](#end-of-run-report)
 - [Timeouts](#timeouts)
 - [Merged-file Lifecycle (S3 Versions)](#merged-file-lifecycle-s3-versions)
@@ -81,10 +81,16 @@ Build ▸ Tests ▸ Resolve studies   probe every study's inputs (in parallel); 
           └───────────┬───────────┘
                       ▼
           ┌───────────────────────┐
+          │  Back up participant  │  pg_dump to S3, DB stays up; participant_db.tar overwritten
+          │  DB                   │  only on SUCCESS/UNSTABLE
+          └───────────┬───────────┘
+                      ▼
+          ┌───────────────────────┐
           │  QA pipeline counts   │  every ready study vs its dbGaP summary (findings: UNSTABLE)
           └───────────────────────┘
 
-post { always }:  participant-db-backup  (pg_dump to S3, DB stays up; participant_db.tar overwritten only on SUCCESS/UNSTABLE)
+post { always }:  participant-db-backup  (only when the build stopped before its stage)
+                  qa-pipeline-counts     (only when the run stopped because some studies failed)
                   pipeline-report        (downstream-artifacts/pipeline-report/, archived and uploaded to S3)
 ```
 
@@ -519,7 +525,7 @@ the migration's `split-allconcepts` writes to, and which other sources will writ
   was deleted when cleanup ran.
 - An invalid `STUDY_ID` (not `phs` + 6 digits) is rejected before anything runs (`BAD_STUDY_ID`).
 - Besides `rowsPerConsent`, the report's `participantsPerConsent` counts the distinct participants
-  written to each consent group's file (keyed `c1`, `c2`, ...), for the [QA](#stage-11-qa-pipeline-counts).
+  written to each consent group's file (keyed `c1`, `c2`, ...), for the [QA](#stage-12-qa-pipeline-counts).
 - The runner's `validate.sh` checks the report, that there is one file per consent group with
   rows, and that every listed file is really in S3. Its warnings (`validate-report.sh` exit 10)
   make the child build, and so this one, UNSTABLE.
@@ -679,12 +685,36 @@ versions stay resolvable.
 
 ---
 
-## Stage 11: QA Pipeline Counts
+## Stage 11: Back Up Participant DB
+
+**Job:** `participant-db-backup` ([`etl-runners/participant-db/Jenkinsfile.backup`](../etl-runners/participant-db/Jenkinsfile.backup)),
+skipped under `PREFLIGHT_ONLY`.
+
+Runs once the run is complete, just before QA, so QA's hours (waiting out a dbGaP outage) never
+delay it or cut it short. When the build stops earlier (a failure, an abort), `post { always }`
+takes it instead, whenever this build's start succeeded. It `pg_dump`s the database to S3 and
+verifies the upload; the database stays up. The dump becomes the latest clean backup
+(`participant_db.tar`) only if the build result so far is SUCCESS or UNSTABLE; a failed or
+aborted run is dumped to `participant_db_not_promoted.tar` instead and the live database is
+marked as holding a failed run, which the next start handles per `IF_LAST_RUN_FAILED`. If the
+backup fails, the build fails: re-run `participant-db-backup`. See
+[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+
+The backup is bounded by its own 4 h timeout (the backup job itself times out at 3 h); a backup
+that does not finish fails the build with the same instruction. In `post` it runs outside the
+[run's timeout](#timeouts), so a long run never squeezes it.
+
+---
+
+## Stage 12: QA Pipeline Counts
 
 **Job:** [`qa-pipeline-counts`](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines)
-(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, skipped under `PREFLIGHT_ONLY`. It
-first writes the [end-of-run report](#end-of-run-report), whose counts it reads (`post` writes it
-again with the final result). It only reads the database (it writes only cached dbGaP summaries).
+(`QA_PIPELINE_COUNTS_JOB`; blank skips it), the last stage, after the backup, skipped under
+`PREFLIGHT_ONLY`. A run stopped only because some studies failed (`CONTINUE_ON_STUDY_FAILURE`: an
+SSTR load or a per-study allConcepts) never reaches it, so it runs from `post`, after the backup;
+any other failure skips it. It first writes the [end-of-run report](#end-of-run-report), whose
+counts it reads (`post` writes it again with the final result). It only reads the database (it
+writes only cached dbGaP summaries).
 
 For **every study marked ready** in `MANAGED_INPUTS` -- excluded studies and those this run did not
 process included, as a regression check -- it compares each consent group's counts with that study
@@ -693,39 +723,31 @@ version's dbGaP summary: the participant DB for every study (distinct participan
 processed, its SSTR loads (`countsByConsentGroup`), the per-study allConcepts generator (`participantsPerConsent`) and the pipeline report's `pipeline_consent_counts.csv` (vs `subject_count`), collected from `downstream-artifacts/` by
 `etl-runners/qa-pipeline-counts/collect-run-counts.py`.
 
-Summaries are read from `{DATA_ROOT}/{study_id}/rawData/{study_id}_{version}_summary.json`, or else
-from a `{study_id}*study_summary.json` there for the study's version, when there; only the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced and retried,
-none started after 6 hours), and cached there at once. A study still without one is
-`UNVERIFIED` and is fetched by a later run.
+Consent 0 is compared like any other group (the SSTR load keeps it), except for the generator and
+the report's `participants_written`, which count consented participants only. A report count that
+repeats its job's wrong count is `SAME_AS_JOB`, not a second finding. See
+[JENKINS.md](JENKINS.md#qa-pipeline-counts-end-of-both-pipelines).
+
+Summaries are read from `{DATA_ROOT}/{study_id}/qa/{study_id}_{version}_summary.json` (where QA
+caches those it fetches), else the same name or a `{study_id}*study_summary.json` for the study's
+version under `{study_id}/rawData/` (where they are staged). With `QA_FETCH_MISSING_SUMMARIES`
+(unchecked by default) the rest are fetched from the dbGaP SSTR API, gently (one at a time, paced
+and retried, none started after 6 hours), and cached under `qa/` at once; unchecked, each is
+`SUMMARY_MISSING`. Seed the cache once with a run (or a standalone `qa-pipeline-counts`) with it
+checked, so `SUMMARY_MISSING` then marks only new studies.
 
 Any discrepancy, or a study without a summary, makes the build **UNSTABLE**; so does QA failing to
-run (never FAILED: the ETL itself succeeded). The readable `qa-pipeline-report.md` and its CSVs are
+run (never FAILED: the ETL itself succeeded). The counts go in the build description, e.g.
+`QA: 3 finding(s) (2 in this run), 41 unverified, 5 without a summary`, so a real mismatch stands
+out from routine warnings. The readable `qa-pipeline-report.md` and its CSVs are
 in `downstream-artifacts/qa-pipeline-counts/` and under
 `s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/qa-pipeline-counts/`.
 
 ---
 
-## Post: Back Up Participant DB
-
-**Job:** `participant-db-backup` ([`etl-runners/participant-db/Jenkinsfile.backup`](../etl-runners/participant-db/Jenkinsfile.backup))
-
-Runs in `post { always }` whenever this build's start succeeded. It `pg_dump`s the database to
-S3 and verifies the upload; the database stays up. The dump becomes the latest clean backup
-(`participant_db.tar`) only if the build result so far is SUCCESS or UNSTABLE; a failed or
-aborted run is dumped to `participant_db_not_promoted.tar` instead and the live database is
-marked as holding a failed run, which the next start handles per `IF_LAST_RUN_FAILED`. If the
-backup fails, the build fails: re-run `participant-db-backup`. See
-[`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
-
-The backup is bounded by its own 4 h `timeout` inside `post` (the backup job itself times out at
-3 h); a backup that does not finish fails the build with the same instruction. It runs outside the
-[run's timeout](#timeouts), so a long run never squeezes it.
-
----
-
 ## End-of-run Report
 
-Written in `post { always }` after the backup — whatever stage the build stopped at, pre-flight
+Written in `post { always }` after the backup and QA — whatever stage the build stopped at, pre-flight
 runs included — by [`etl-runners/pipeline-report/pipeline-report.py`](../etl-runners/pipeline-report/pipeline-report.py)
 (python3 stdlib). It reads only what the run collected under `downstream-artifacts/`:
 `pipeline-studies.tsv` (every study and its plan, from Resolve studies), `study-outcomes/*.tsv`
@@ -740,7 +762,7 @@ It writes `downstream-artifacts/pipeline-report/`, archived on the build and upl
 |------|---------|
 | `pipeline-report.md` | for people: study statuses, each stage's outcome, studies needing follow-up (with why and what to do), all studies |
 | `pipeline_study_outcomes.csv` | one row per study: `study_id, abv, status, plan, sstr_result, sstr_build_url, participants, participants_inserted, allconcepts_result, allconcepts_build_url, consent_groups, rows_processed, decoded_bytes, review_items, reasons` |
-| `pipeline_consent_counts.csv` | one row per loaded study and consent code: `study_id, abv, consent_code, participants_loaded` (the SSTR load's `countsByConsentGroup`), `participants_written` (the generator's `participantsPerConsent`); blank where the stage did not report it. A consent group with more written than loaded, or written but never loaded, is also a review item for the study (`CONSENT_WRITTEN_EXCEEDS_LOADED` / `CONSENT_WRITTEN_NOT_LOADED`): rows landed in the wrong group. What [QA](#stage-11-qa-pipeline-counts) checks as the final report |
+| `pipeline_consent_counts.csv` | one row per loaded study and consent code: `study_id, abv, consent_code, participants_loaded` (the SSTR load's `countsByConsentGroup`), `participants_written` (the generator's `participantsPerConsent`); blank where the stage did not report it. A consent group with more written than loaded, or written but never loaded, is also a review item for the study (`CONSENT_WRITTEN_EXCEEDS_LOADED` / `CONSENT_WRITTEN_NOT_LOADED`): rows landed in the wrong group. What [QA](#stage-12-qa-pipeline-counts) checks as the final report |
 | `pipeline-report.json` | all of the above plus every review item and `heldBackVcfGroups` (`reportVersion` 1) |
 
 Study status, most severe first: `FAILED` (a stage failed for it), `EXCLUDED` (missing inputs),
@@ -765,13 +787,14 @@ against expected outputs; `UPDATE=1` regenerates them after an intended change).
 |-------|-------|-----|
 | Every stage (the `ETL` parent stage) | 72 h | A backstop only: stuck children are caught by their own timeouts. A sweep of ~30 new studies boots two runners per study (SSTR load one at a time by default, then allConcepts), and the merge alone may take 4 h — 12 h did not fit. |
 | QA pipeline counts stage | 15 h | Inside the 72 h. Its dbGaP lookups stop after 6 h; the runner's own limit is 7 h, and `RETRY_ON_INFRA` may run it twice. Running out makes the build UNSTABLE, not FAILED. |
-| `post { always }` DB backup | 4 h | The backup job's own limit is 3 h. |
+| DB backup (its stage, or `post { always }`) | 4 h | The backup job's own limit is 3 h. |
 | `post { always }` report | 15 min | |
 | Each child job | its own `options { timeout }` and `JOB_TIMEOUT_SECONDS` | e.g. generator 4 h / size-scaled, merge 9 h (two 4 h attempts by default; a retry is capped to what is left) / `MERGE_ALLCONCEPTS_TIMEOUT_SECONDS` |
 
 The run's timeout is on a parent stage rather than in the pipeline's `options {}` on purpose: a
 pipeline-level `options { timeout }` also wraps `post {}` (Declarative runs post inside the
-pipeline's option wrappers), so when it fired it would cut short the DB backup that must follow.
+pipeline's option wrappers), so when it fired it would cut short the DB backup `post` takes when
+the build stops early.
 
 ---
 
@@ -864,7 +887,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `ALLCONCEPTS_MANIFEST_JOB` | `generate-allconcepts-manifest` | Manifest runner job |
 | `DB_START_JOB` | `participant-db-start` | Job that starts the participant database |
 | `DB_BACKUP_JOB` | `participant-db-backup` | Job that dumps it at the end of the run (it stays up) |
-| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-11-qa-pipeline-counts) run last; blank skips it |
+| `QA_PIPELINE_COUNTS_JOB` | `qa-pipeline-counts` | [QA](#stage-12-qa-pipeline-counts) run last; blank skips it |
 | `OVERWRITE_DB` | `false` | Replace the database before this run from `DB_RESTORE_FROM` (blank = the latest clean backup), saving a running one first (see [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md#start-rules)) |
 | `DB_RESTORE_FROM` | (blank) | What a new or replaced database is loaded from: blank = latest clean backup, `none`, a file under `backups/`, or an `s3://` URI |
 | `IF_LAST_RUN_FAILED` | `restore-clean` | If the previous run failed: `restore-clean` replaces its data from the latest clean backup; `continue` builds on it |

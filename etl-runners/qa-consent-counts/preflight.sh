@@ -58,8 +58,9 @@ if [[ -n "$LOAD_COUNTS" ]]; then
   check "load counts exist: $LOAD_COUNTS" exists "$LOAD_COUNTS"
 fi
 
-if [[ "$DBGAP" != http://* && "$DBGAP" != https://* ]]; then
-  fail "DBGAP_BASE_URL must be an http(s) URL, got: $DBGAP"
+if ! [[ "$DBGAP" =~ ^https:// || "$DBGAP" =~ ^http://(localhost|127\.0\.0\.1)(:|/|$) ]]; then
+  # https only (http just to this host, a test stub): the job quotes dbGaP's answers into its report.
+  fail "DBGAP_BASE_URL must be an https URL, got: $DBGAP"
 elif command -v curl >/dev/null 2>&1; then
   # Any HTTP answer (an unknown study is a 400) shows the API is up. This is the agent's network,
   # not the runner's: the runner's security group needs its own HTTPS egress to the API.

@@ -65,12 +65,12 @@ preflight_rc() {   # <label> <want> <managed inputs> <studies>
 }
 printf 'x\n' > "$TMP/managed.csv"
 preflight_rc "a managed inputs file is enough" 10 "$TMP/managed.csv" ""
-preflight_rc "a list of study versions is enough" 10 "" "phs000956.v6,PHS001412.v4.p2"
+preflight_rc "a list of study versions is enough" 10 "" "phs654321.v6,PHS123456.v4.p2"
 preflight_rc "neither fails" 1 "" ""
-preflight_rc "both fail" 1 "$TMP/managed.csv" "phs000956.v6"
+preflight_rc "both fail" 1 "$TMP/managed.csv" "phs654321.v6"
 preflight_rc "a missing managed inputs file fails" 1 "$TMP/absent.csv" ""
-preflight_rc "an entry that is not a study version fails" 1 "" "phs000956.v6,phs000957"
-grep -q 'not: phs000957' "$TMP/p.log" && pass "names the bad entry" || fail "bad entry not named"
+preflight_rc "an entry that is not a study version fails" 1 "" "phs654321.v6,phs654322"
+grep -q 'not: phs654322' "$TMP/p.log" && pass "names the bad entry" || fail "bad entry not named"
 
 echo
 if [ "$FAILED" -gt 0 ]; then

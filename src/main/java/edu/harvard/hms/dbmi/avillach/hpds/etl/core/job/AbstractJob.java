@@ -1,5 +1,6 @@
 package edu.harvard.hms.dbmi.avillach.hpds.etl.core.job;
 
+import edu.harvard.hms.dbmi.avillach.hpds.etl.core.exception.EtlException;
 import edu.harvard.hms.dbmi.avillach.hpds.etl.core.validation.ValidationReport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,7 +68,13 @@ public abstract class AbstractJob<O> implements Job {
         }
 
         log.info("Input validated for job '{}'; executing", name());
-        O output = execute(ctx);
+        O output;
+        try {
+            output = execute(ctx);
+        } catch (EtlException e) {
+            // Its report keeps the input validation's warnings, beside any partial result.
+            throw e.withInputValidation(input);
+        }
 
         ValidationReport outputReport = new ValidationReport("output");
         validateOutput(output, ctx, outputReport);

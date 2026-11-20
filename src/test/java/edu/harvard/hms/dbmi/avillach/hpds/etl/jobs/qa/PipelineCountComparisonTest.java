@@ -22,7 +22,7 @@ class PipelineCountComparisonTest {
     private static final Measure SPLIT = new Measure("split-allconcepts", Kind.SUBJECTS);
 
     private static StudyInput input(String version, Map<Measure, Map<String, Long>> counts) {
-        return new StudyInput("phs000001", "ONE", version, version, counts, Map.of());
+        return new StudyInput("phs000001", "ONE", version, version, counts, Map.of(), null);
     }
 
     private static DbgapStudySummary summary(DbgapStudySummary.ConsentGroup... groups) {

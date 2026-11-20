@@ -4,10 +4,11 @@ provider "aws" {
   allowed_account_ids = [var.aws_account_id]
 }
 
-# PERMANENT QA, the last step of both pipelines. Compares every ready study's counts per consent
+# PERMANENT QA, the last stage of both pipelines. Compares every ready study's counts per consent
 # group (participant DB, and this run's job and final reports) with its dbGaP study summary, read
-# from {data_root}/{study}/rawData/{study}_{version}_summary.json or fetched from the dbGaP SSTR API
-# and cached there. Writes only those summaries. The runner's security group must allow HTTPS (443)
+# from {data_root}/{study}/qa/{study}_{version}_summary.json (or the same name, or a
+# {study}*study_summary.json, under {study}/rawData/), or fetched from the dbGaP SSTR API and cached
+# under {study}/qa/. Writes only those summaries. The runner's security group must allow HTTPS (443)
 # egress to www.ncbi.nlm.nih.gov, besides the participant DB and S3.
 module "etl_runner" {
   source = "../../../terraform-modules/etl-runner"

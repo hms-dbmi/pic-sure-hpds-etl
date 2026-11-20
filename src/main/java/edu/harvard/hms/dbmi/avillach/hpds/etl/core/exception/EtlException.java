@@ -19,13 +19,16 @@ import java.util.Map;
  * <p>A job that fails part-way through but has already learned something worth reporting -- a
  * QA job that checked most studies before an external API gave out, say -- attaches it with
  * {@link #withPartialResult}. {@code JobExecutor} copies those metrics and that output validation
- * into the failed run's report, so the report explains the failure as fully as a success.
+ * into the failed run's report, so the report explains the failure as fully as a success. The
+ * job's input validation is attached too (by {@code AbstractJob}, for a failure while executing), so
+ * its warnings are not lost either.
  */
 public class EtlException extends RuntimeException {
 
     private final ExitCode exitCode;
     private final transient Map<String, Object> partialMetrics = new LinkedHashMap<>();
     private transient ValidationReport partialOutputValidation;
+    private transient ValidationReport inputValidation;
 
     public EtlException(ExitCode exitCode, String message) {
         super(message);
@@ -64,5 +67,23 @@ public class EtlException extends RuntimeException {
     /** The output validation attached with {@link #withPartialResult}, or null. */
     public ValidationReport partialOutputValidation() {
         return partialOutputValidation;
+    }
+
+    /**
+     * Attaches the job's input validation, which passed before the failure, for the failed run's
+     * report. The first one attached is kept.
+     *
+     * @return this exception, so it can be rethrown in the same statement
+     */
+    public EtlException withInputValidation(ValidationReport input) {
+        if (inputValidation == null) {
+            inputValidation = input;
+        }
+        return this;
+    }
+
+    /** The input validation attached with {@link #withInputValidation}, or null. */
+    public ValidationReport inputValidation() {
+        return inputValidation;
     }
 }

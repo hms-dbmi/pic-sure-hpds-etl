@@ -214,7 +214,9 @@ be silently ignored. Put its default in `variables.tf` instead.
 - `choice(name: 'ENV', choices: ['development'], ...)`, defaulting `ENV` to `development`.
 - No AWS profile or role parameter: the agent and the runner both act as their own role.
 - A job an orchestrator calls needs `copyArtifactPermission('*')` in its `options` block, or the
-  orchestrator's `copyArtifacts` of its reports fails.
+  orchestrator's `copyArtifacts` of its reports fails. `qa-pipeline-counts` names just the two
+  orchestrators instead (`'hpds-etl-pipeline,new-hpds-etl-participant-migration-pipeline'`, names
+  relative to the `hpds-etl` folder).
 - A DB-backed job calls the shared check at the top of `Provision, run and monitor`, so a
   missing database fails in seconds rather than after provisioning:
 
@@ -230,8 +232,9 @@ be silently ignored. Put its default in `variables.tf` instead.
 ### Orchestrator Stage
 
 A stage whose job uses the database must sit **after** `Start participant DB`. The database is
-long-lived: the orchestrator makes sure it is up there, backs it up (dumps it to S3) in
-`post { always }`, and never stops it. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+long-lived: the orchestrator makes sure it is up there, backs it up (dumps it to S3) in the
+`Back up participant DB` stage near the end (or `post { always }`, when the build stops earlier),
+and never stops it. A new stage that writes to the database goes before that stage. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 If the stage has no pre-flight mode of its own, skip it under `PREFLIGHT_ONLY`
 (`when { expression { !params.PREFLIGHT_ONLY } }`), since the database is not started then.
 
