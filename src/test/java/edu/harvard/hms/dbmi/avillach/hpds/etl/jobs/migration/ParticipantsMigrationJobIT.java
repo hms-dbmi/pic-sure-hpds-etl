@@ -188,20 +188,20 @@ class ParticipantsMigrationJobIT extends AbstractIntegrationTest {
      */
     @Test
     void sstr_consent_group_matching_no_patient_mapping_row_is_a_warning() throws IOException {
-        managedInputs("GRU,phs001412,Yes");
+        managedInputs("GRU,phs000904,Yes");
         String base = baseUri(Map.of(
-                "phs001412/rawData/phs001412.v1_telemetry_report.tsv", """
+                "phs000904/rawData/phs000904.v1_telemetry_report.tsv", """
                 SUBJECT_ID\tSAMPLE_ID\tconsent_code\tconsent_abbreviation\tdbgap_subject_id\tdbgap_sample_id
-                SUBJ1\tSAMP1\t1\tGRU\tphs001412.v1.p1.c1\tphs001412.v1.p1.s1
-                SUBJ2\tSAMP2\t2\tHMB\tphs001412.v1.p2.c1\tphs001412.v1.p2.s1
+                SUBJ1\tSAMP1\t1\tGRU\tphs000904.v1.p1.c1\tphs000904.v1.p1.s1
+                SUBJ2\tSAMP2\t2\tHMB\tphs000904.v1.p2.c1\tphs000904.v1.p2.s1
                 """,
-                "phs001412/legacy/data/GRU_PatientMapping.v2.csv",
-                "phs001412.v1.p1.c1,GRU,1001\n" + "NOT_IN_SSTR,GRU,1002\n"));
+                "phs000904/legacy/data/GRU_PatientMapping.v2.csv",
+                "phs000904.v1.p1.c1,GRU,1001\n" + "NOT_IN_SSTR,GRU,1002\n"));
 
         JobResult result = executor.run(job, Map.of("data-folder", base), "it-sstr-unmatched-consent");
 
         assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS_WITH_WARNINGS);
-        assertThat(countWhere("consents", "study_id = ? AND consent_code = '2'", "phs001412")).isEqualTo(1);
+        assertThat(countWhere("consents", "study_id = ? AND consent_code = '2'", "phs000904")).isEqualTo(1);
         assertThat(result.getOutputValidation().getIssues())
                 .filteredOn(i -> i.code().equals("SUBJECTS_WITHOUT_CONSENT"))
                 .singleElement()

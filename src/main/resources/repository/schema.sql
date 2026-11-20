@@ -40,7 +40,8 @@ CREATE INDEX IF NOT EXISTS ix_consents_study_id ON consents (study_id);
 -- the study whose load wrote it. One participant (one dbGaP subject) may be in several studies,
 -- and each study's genomic artifacts must list only its own samples, so lookups filter on
 -- study_id, never on the participant's consents. A samples table from before this column existed
--- is dropped and recreated empty by participant-db-start (etl-runners/participant-db/lib.sh).
+-- is migrated in place by participant-db-start (pdb_migrate_samples_study in
+-- etl-runners/participant-db/lib.sh).
 CREATE TABLE IF NOT EXISTS samples (
     hpds_id          BIGINT NOT NULL,
     study_id         TEXT NOT NULL,

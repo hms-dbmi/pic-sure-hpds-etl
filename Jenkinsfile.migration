@@ -80,7 +80,9 @@ pipeline {
         string(name: 'PARTICIPANTS_TIMEOUT_SECONDS', defaultValue: '43200',
                description: 'How long participants-migration waits for its runner before giving up (exit 124). Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'STUDY_FILTER', defaultValue: '',
-               description: 'Comma-separated study ids; blank runs every study that is ready and not yet marked Data Processed. Applies to the participants and split stages only -- the VCF stage covers every ready, unprocessed study and the global AllConcepts stage ALL ready studies from the DB, so a filtered rerun still ends with complete artifacts.')
+               description: 'Comma-separated study ids; blank runs every ready study (with INCLUDE_PROCESSED unchecked, every ready study not yet marked Data Processed). Applies to the participants and split stages only -- the VCF stage covers every selected study and the global AllConcepts, merge and manifest stages ALL ready studies, so a filtered rerun still ends with complete artifacts.')
+        booleanParam(name: 'INCLUDE_PROCESSED', defaultValue: true,
+               description: 'Migrate, split and index studies marked Data Processed too. The migration sheet marks the studies the legacy system already processed, which are exactly what the migration regenerates; without this it sees no work. Uncheck only to re-run over a sheet this pipeline has since marked processed: the participants, split and VCF stages then skip those studies, and the global AllConcepts, merge and manifest stages still cover every ready study, from their earlier artifacts.')
         string(name: 'PARTICIPANTS_MIGRATION_JOB', defaultValue: 'participants-migration',
                description: 'Jenkins job that runs etl-runners/participants-migration/Jenkinsfile')
         string(name: 'SPLIT_ALLCONCEPTS_JOB', defaultValue: 'split-allconcepts',
@@ -95,6 +97,8 @@ pipeline {
                description: 'Output location for vcfIndex.tsv and SampleIds.csv. Must be an s3:// URI.')
         string(name: 'MERGE_ALLCONCEPTS_JOB', defaultValue: 'merge-allconcepts',
                description: 'Jenkins job that runs the merge-allconcepts runner')
+        string(name: 'GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '10800',
+               description: 'How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside that job\'s own 4 h limit. Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'MERGE_ALLCONCEPTS_PARALLELISM', defaultValue: '8',
                description: 'merge-allconcepts --parallelism: consent folders merged at once, 1-16')
         string(name: 'MERGE_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '14400',
@@ -207,6 +211,10 @@ pipeline {
                         error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the participant " +
                               'database did not come up -- see that job\'s console.')
                     }
+                    def description = downstream.description ?: ''
+                    if (description.startsWith('Notice: ')) {
+                        unstable("${params.DB_START_JOB} #${downstream.number}: ${description.substring('Notice: '.length())}")
+                    }
                     // Only now does post { always } own the end-of-run backup. A failed start changed
                     // nothing worth saving.
                     env.DB_STARTED = 'true'
@@ -240,6 +248,7 @@ pipeline {
                             string(name: 'JOB_TIMEOUT_SECONDS', value: params.PARTICIPANTS_TIMEOUT_SECONDS ?: '43200'),
                             string(name: 'RESUME_FROM_RUN_ID', value: params.PARTICIPANTS_RESUME_FROM_RUN_ID ?: ''),
                             string(name: 'STUDY_FILTER',   value: params.STUDY_FILTER),
+                            booleanParam(name: 'INCLUDE_PROCESSED', value: params.INCLUDE_PROCESSED),
                             string(name: 'RUN_ID',         value: "${env.BUILD_TAG}-participants"),
                             string(name: 'ENV',            value: params.ENV),
                             booleanParam(name: 'SKIP_TESTS',     value: true),
@@ -303,6 +312,7 @@ pipeline {
                     def conceptParams = [
                         string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                        string(name: 'JOB_TIMEOUT_SECONDS', value: params.GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS?.trim() ?: '10800'),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
                     ]
@@ -344,8 +354,8 @@ pipeline {
 
                     def vcfParams = [
                         string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
-                        // Only studies not yet marked "Data Processed", like every per-study stage.
-                        booleanParam(name: 'INCLUDE_PROCESSED', value: false),
+                        // As every per-study stage: studies marked "Data Processed" only with INCLUDE_PROCESSED.
+                        booleanParam(name: 'INCLUDE_PROCESSED', value: params.INCLUDE_PROCESSED),
                         string(name: 'RUN_ID', value: "${env.BUILD_TAG}-vcf-indexes"),
                         string(name: 'ENV',    value: params.ENV),
                         booleanParam(name: 'SKIP_TESTS', value: true),
@@ -871,9 +881,11 @@ def runSplitAllConcepts() {
             ? cols[header.indexOf('Data is ready to process')].trim() : ''
         def processedRaw = cols.size() > header.indexOf('Data Processed') && header.indexOf('Data Processed') >= 0
             ? cols[header.indexOf('Data Processed')].trim() : ''
-        // As participants-migration: a study already marked "Data Processed" is not split again.
+        // As participants-migration: a study already marked "Data Processed" is split only with
+        // INCLUDE_PROCESSED.
+        boolean processed = parseYesNo(processedRaw, 'Data Processed', studyId)
         if (studyId && abv && parseYesNo(readyRaw, 'Data is ready to process', studyId)
-                && !parseYesNo(processedRaw, 'Data Processed', studyId)) {
+                && (params.INCLUDE_PROCESSED || !processed)) {
             studies << [studyId: studyId, abv: abv]
         }
     }
@@ -885,7 +897,7 @@ def runSplitAllConcepts() {
     }
 
     if (studies.isEmpty()) {
-        error('No studies ready and not yet processed found in managed inputs for Split AllConcepts.')
+        error('No ready studies' + (params.INCLUDE_PROCESSED ? '' : ' not yet processed') + ' found in managed inputs for Split AllConcepts.')
     }
 
     echo "Split AllConcepts: ${studies.size()} study/studies to process"

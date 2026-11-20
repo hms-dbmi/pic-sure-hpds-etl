@@ -543,7 +543,17 @@ def startParticipantDb() {
         error("${params.DB_START_JOB} #${downstream.number} ended ${downstream.result}${failureDetail(downstream)}: the participant " +
               'database did not come up -- see that job\'s console.')
     }
+    warnOnDbStartNotice(downstream)
     env.DB_STARTED = 'true'
+}
+
+// The start job's description holds "Notice: ..." when it came up with a warning (e.g. sample rows
+// the one-off samples migration could not attribute to a study): the run goes on, UNSTABLE.
+def warnOnDbStartNotice(downstream) {
+    def description = downstream.description ?: ''
+    if (description.startsWith('Notice: ')) {
+        unstable("${params.DB_START_JOB} #${downstream.number}: ${description.substring('Notice: '.length())}")
+    }
 }
 
 // Dumps the participant DB to S3 at the end of the run, if this build's start succeeded. The
@@ -582,11 +592,23 @@ def packageRunnerImage() {
 
 // The runner image this build packaged, or '' when it packaged none. A build restarted from a
 // later stage inherits the original build's RUNNER_IMAGE_TAR, but that build's post already
-// deleted the tarball: the image name carries the build tag, so an inherited one never matches,
-// and each downstream build packages its own.
+// deleted the tarball: the image name carries the build tag, so an inherited one never matches
+// (ensureRunnerImage then packages this build's own).
 def ownRunnerImage() {
     def own = "hpds-etl-runner-${runTag()}.tar.gz"
     return env.RUNNER_IMAGE_TAR == own ? own : ''
+}
+
+// Packages the runner image when this build has none of its own: a build restarted from a stage
+// after 'Package runner image'. Called at the start of each stage that hands it out, before any
+// fan-out, so the restarted build packages it once instead of every downstream build its own.
+def ensureRunnerImage() {
+    if (!params.PREFLIGHT_ONLY && !ownRunnerImage()) {
+        echo 'This build packaged no runner image (restarted from a later stage?): packaging it now.'
+        // The Build stage, skipped on a restart, is what leaves the JAR the image is built from.
+        sh 'test -f target/hpds-etl.jar || ./mvnw -B clean package -DskipTests'
+        packageRunnerImage()
+    }
 }
 
 // Deletes the shared runner image: the tarball in S3, the local one, and the image in this host's
@@ -640,10 +662,6 @@ def runTag() {
 // Pure helpers (no steps)
 // -----------------------------------------------------------------------------
 
-// Rows of a managed inputs CSV as [studyId, abv, ready, processed], skipping rows without a study
-// id. Throws IllegalArgumentException on a header missing any of `required` (naming what it found)
-// or a ready/processed value that is not Yes/No.
-@NonCPS
 // Whether a managed-inputs Data Type marks a genomic study: it includes G, as in P/G. The same rule
 // as ManagedInputRow.isGenomic.
 @NonCPS
@@ -651,6 +669,10 @@ static boolean isGenomic(String dataType) {
     return (dataType ?: '').split('/').any { it.trim().equalsIgnoreCase('G') }
 }
 
+// Rows of a managed inputs CSV as [studyId, abv, ready, processed], skipping rows without a study
+// id. Throws IllegalArgumentException on a header missing any of `required` (naming what it found)
+// or a ready/processed value that is not Yes/No.
+@NonCPS
 static List<Map> parseManagedInputs(String text, List<String> required) {
     List<String> header = null
     def rows = []

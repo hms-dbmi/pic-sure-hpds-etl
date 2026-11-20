@@ -241,6 +241,11 @@ stage builds the runner image once and passes it to every one of their builds as
 orchestrator deletes the image (S3 tarball, local tarball, and the host's podman image) in
 `post { always }`. Run standalone, those jobs still build their own, and delete it when they finish.
 
+A build restarted from a later stage skips this one, and the image it would inherit was deleted by
+the original build. Each stage that hands the image out first packages this build's own when it
+has none (`ensureRunnerImage`, building the JAR too if the workspace lacks it), so the restarted
+build packages it once rather than every downstream build its own.
+
 ---
 
 ## Stage 4: Start Participant DB
@@ -254,7 +259,9 @@ connections require TLS. It is never stopped between runs. A clean running datab
 `OVERWRITE_DB` replaces it from `DB_RESTORE_FROM` (blank = the latest clean backup), and after a
 failed run `IF_LAST_RUN_FAILED` decides between restoring the clean backup (default) and
 continuing on that run's data. A database that isn't up is created from the latest clean backup.
-Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
+A start that comes up with a warning (its build description starts `Notice:`, e.g. sample rows the
+one-off per-study samples migration could not attribute) marks the run **UNSTABLE** and the run
+goes on. Skipped under `PREFLIGHT_ONLY`. Details: [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
 ---
 
@@ -702,7 +709,7 @@ It writes `downstream-artifacts/pipeline-report/`, archived on the build and upl
 |------|---------|
 | `pipeline-report.md` | for people: study statuses, each stage's outcome, studies needing follow-up (with why and what to do), all studies |
 | `pipeline_study_outcomes.csv` | one row per study: `study_id, abv, status, plan, sstr_result, sstr_build_url, participants, participants_inserted, allconcepts_result, allconcepts_build_url, consent_groups, rows_processed, decoded_bytes, review_items, reasons` |
-| `pipeline_consent_counts.csv` | one row per loaded study and consent code: `study_id, abv, consent_code, participants_loaded` (the SSTR load's `countsByConsentGroup`), `participants_written` (the generator's `participantsPerConsent`); blank where the stage did not report it. |
+| `pipeline_consent_counts.csv` | one row per loaded study and consent code: `study_id, abv, consent_code, participants_loaded` (the SSTR load's `countsByConsentGroup`), `participants_written` (the generator's `participantsPerConsent`); blank where the stage did not report it. A consent group with more written than loaded, or written but never loaded, is also a review item for the study (`CONSENT_WRITTEN_EXCEEDS_LOADED` / `CONSENT_WRITTEN_NOT_LOADED`): rows landed in the wrong group. |
 | `pipeline-report.json` | all of the above plus every review item and `heldBackVcfGroups` (`reportVersion` 1) |
 
 Study status, most severe first: `FAILED` (a stage failed for it), `EXCLUDED` (missing inputs),
@@ -817,6 +824,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `SKIP_ANALYSIS` | `false` | Use the mapping's data types as-is instead of re-analysing |
 | `GENERATOR_TIMEOUT_BASE_SECONDS` | `1800` | Per-study allConcepts timeout: this plus the per-GiB allowance, clamped to 7200-12600 s |
 | `GENERATOR_TIMEOUT_SECONDS_PER_GB` | `600` | Seconds per GiB of the study's decoded data |
+| `GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS` | `10800` | How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside its own 4 h limit |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |
 | `MERGE_ALLCONCEPTS_TIMEOUT_SECONDS` | `14400` | How long the merge may run before it is failed as stuck (exit 124), at most 28800 |

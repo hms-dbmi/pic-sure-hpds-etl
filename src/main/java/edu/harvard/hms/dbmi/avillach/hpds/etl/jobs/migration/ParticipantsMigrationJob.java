@@ -247,7 +247,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                                 "s3://bucket/etl-runner/reports/participants-migration/<run-id>/"),
                         ParamSpec.optional("study-filter",
                                 "Comma-separated study ids to process; blank processes every ready study",
-                                "phs000200,phs000280")),
+                                "phs000200,phs000280"),
+                        ParamSpec.optional("include-processed",
+                                "When true, studies marked 'Data Processed' in managed inputs are migrated "
+                                        + "too. The migration pipeline sets this by default: its sheet marks the "
+                                        + "studies the legacy system processed, which are what is being migrated.",
+                                "false")),
                 List.of("participants/consents/samples upserted in RDS for every ready study; "
                         + "one {studyid}_hpds_id_mapping.csv written per processed study to the reports dir, plus "
                         + SOURCES_REPORT + ", " + ISSUES_REPORT + " and " + SUMMARY_REPORT));
@@ -255,6 +260,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
 
     @Override
     protected void validateInput(JobContext ctx, ValidationReport report) {
+        validateBooleanParam(ctx, report, "include-processed");
         ctx.get("batch-size").ifPresent(bs -> {
             try {
                 if (Integer.parseInt(bs) <= 0) {
@@ -290,6 +296,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         List<ManagedInputRow> managedInputs = managedInputsService.read();
 
         Set<String> studyFilter = parseStudyFilter(ctx.get("study-filter", ""));
+        boolean includeProcessed = ctx.getBoolean("include-processed", false);
         if (!studyFilter.isEmpty()) {
             log.info("Study filter active: only processing {}", studyFilter);
         }
@@ -298,8 +305,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         // listed twice is migrated once.
         Map<String, ManagedInputRow> studies = new LinkedHashMap<>();
         for (ManagedInputRow row : managedInputs) {
-            // Like the permanent pipeline's loads: a study already marked "Data Processed" is not run again.
-            if (!row.isReady() || row.isProcessed()
+            // Like the permanent pipeline's loads: a study already marked "Data Processed" is not run
+            // again, unless --include-processed.
+            if (!row.isReady() || (row.isProcessed() && !includeProcessed)
                     || (!studyFilter.isEmpty() && !studyFilter.contains(row.studyId()))) {
                 continue;
             }
@@ -658,8 +666,9 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
                     + "loaded from " + identities.file() + " (" + mapping.notInFile() + " not in the file, "
                     + mapping.noParticipant() + " with no participant id, " + mapping.notConsented()
                     + " consent 0); check that the file's subject ids match the legacy patient mapping";
+            List<String> unresolved = mapping.unresolvedHpdsIds();
             trace.issue(Severity.WARNING, NEEDS_DATA_REVIEW, identities.file(), reason + "; not migrated",
-                    mapping.unresolvedHpdsIds());
+                    unresolved.size(), unresolved.stream().limit(MAX_EXAMPLES).toList());
             log.warn("Study '{}' needs data review: {}", studyId, reason);
             return StudyResult.needsReview(studyId, row.abv(), trace.source, studyId + " needs data review: " + reason,
                     mapping.unresolvedHpdsIds(), trace.snapshot());
@@ -673,6 +682,19 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
     }
 
     /**
+     * The SSTR sub-job's parameters. {@code --genomic} only when the study's Data Type is set: a blank
+     * one is unknown, which the SSTR job treats as genomic (a missing sample id column warns).
+     */
+    static Map<String, String> sstrParams(ManagedInputRow row, String sstrPath, int batchSize) {
+        Map<String, String> params = new LinkedHashMap<>(Map.of("input", sstrPath, "study-id", row.studyId(),
+                "batch-size", String.valueOf(batchSize)));
+        if (row.dataType() != null && !row.dataType().isBlank()) {
+            params.put(SstrPopulateRdsParticipantsJob.PARAM_GENOMIC, String.valueOf(row.isGenomic()));
+        }
+        return params;
+    }
+
+    /**
      * Loads the study from its SSTR. Returns the subject identities to map against, or null when the
      * SSTR is malformed (the sub-job failed on its data, and rolled back) so the caller falls back.
      */
@@ -681,8 +703,7 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         String studyId = row.studyId();
         String sstrPath = files.sstrFile().toString();
         JobResult result = executor.run(sstrJob,
-                Map.of("input", sstrPath, "study-id", studyId, "batch-size", String.valueOf(batchSize),
-                        SstrPopulateRdsParticipantsJob.PARAM_GENOMIC, String.valueOf(row.isGenomic())),
+                sstrParams(row, sstrPath, batchSize),
                 ctx.runId() + "-" + studyId + "-sstr");
         if (!result.isSuccess()) {
             String message = describeFailure(result);
@@ -1408,8 +1429,12 @@ public class ParticipantsMigrationJob extends AbstractJob<ParticipantsMigrationJ
         }
 
         void issue(Severity severity, String code, String file, String message, List<String> examples) {
+            issue(severity, code, file, message, examples.isEmpty() ? 1 : examples.size(), examples);
+        }
+
+        /** An issue that affects {@code count} rows, of which {@code examples} are some (the first are kept). */
+        void issue(Severity severity, String code, String file, String message, long count, List<String> examples) {
             List<String> first = examples.stream().limit(MAX_EXAMPLES).toList();
-            long count = examples.isEmpty() ? 1 : examples.size();
             issues.add(new FileIssue(severity, code, file, count, message, first));
             LOG.atLevel(severity == Severity.ERROR ? org.slf4j.event.Level.ERROR
                             : severity == Severity.WARNING ? org.slf4j.event.Level.WARN : org.slf4j.event.Level.INFO)

@@ -10,6 +10,7 @@
 #                participant_db.tar                the clean restore point (successful runs)
 #                participant_db_not_promoted.tar   the last failed or aborted run
 #                participant_db_pre_overwrite.tar  the live DB, saved just before start replaced it
+#                participant_db_pre_samples_study.tar  the DB before its samples got study_id (once)
 #                live_state.json                   what the live DB holds: clean | dirty (a failed run,
 #                                                  or one still in progress) | replacing (a start was
 #                                                  replacing it and did not finish)
@@ -42,6 +43,14 @@ pdb_die() {
     local msg="$*"
     echo "${msg//$'\n'/ }" >> "${PDB_ERROR_FILE:-/dev/null}"
     exit 1
+}
+
+# A warning the start job puts in its build description (PDB_NOTICE_FILE, set by the Jenkinsfile),
+# which the orchestrator turns into UNSTABLE.
+pdb_notice() {
+    pdb_log "WARNING: $*"
+    local msg="$*"
+    echo "${msg//$'\n'/ }" >> "${PDB_NOTICE_FILE:-/dev/null}"
 }
 
 # Sets every per-environment name. Call first.
@@ -466,23 +475,61 @@ SQL
 # Brings a database restored from an older dump, or kept running from before a schema change, up
 # to schema.sql, by running schema.sql itself: every statement in it is CREATE ... IF NOT EXISTS, so
 # it adds only what is missing (a newer index, say). A samples table from before samples were
-# attributed to studies (no study_id) is dropped first, so schema.sql recreates it empty: which
-# study loaded its rows was never recorded, and every study load writes its samples again.
+# attributed to studies (no study_id) is first migrated in place; see pdb_migrate_samples_study.
 pdb_upgrade_schema() {
-    local shape drop=""
+    local shape
+    # Checked by value: without pipefail, a failed psql in $(... | tr) would not reach pdb_die.
     shape=$(PDB_PSQL_DB="$DB_NAME" pdb_psql -tAc "SELECT CASE
             WHEN to_regclass('\"$DB_SCHEMA\".samples') IS NULL THEN 'none'
             WHEN EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = '$DB_SCHEMA'
                          AND table_name = 'samples' AND column_name = 'study_id') THEN 'current'
-            ELSE 'old' END" </dev/null | tr -d '[:space:]') \
-        || pdb_die "could not read the shape of the samples table"
-    if [[ "$shape" == old ]]; then
-        pdb_log "The samples table predates per-study samples (no study_id): dropping it; schema.sql recreates it empty. Load every study again (participants-migration without RESUME_FROM_RUN_ID, or the SSTR loads) to refill it."
-        drop="DROP TABLE samples;"
-    fi
-    { echo "SET ROLE \"$DB_USERNAME\"; SET search_path TO \"$DB_SCHEMA\"; $drop"
+            ELSE 'old' END" </dev/null | tr -d '[:space:]')
+    [[ "$shape" =~ ^(none|current|old)$ ]] || pdb_die "could not read the shape of the samples table"
+    [[ "$shape" == old ]] && pdb_migrate_samples_study
+    { echo "SET ROLE \"$DB_USERNAME\"; SET search_path TO \"$DB_SCHEMA\";"
       cat "$PDB_DIR/../../src/main/resources/repository/schema.sql"; } \
         | PDB_PSQL_DB="$DB_NAME" pdb_psql || pdb_die "could not bring the $DB_SCHEMA schema up to schema.sql"
+}
+
+# Gives a samples table from before samples were attributed to studies its study_id, in one
+# transaction. Which study loaded a row was never recorded, so it is inferred: a participant
+# consented in exactly one study gets that study. Rows of a participant in no study, or in several
+# (whose samples each of those studies was handed), cannot be attributed and are deleted; the
+# loads of those studies write them again. The whole database is saved first, to
+# participant_db_pre_samples_study.tar, and a deletion is reported as a notice (PDB_NOTICE_FILE:
+# the start job's description, which marks the pipeline UNSTABLE).
+pdb_migrate_samples_study() {
+    pdb_log "The samples table predates per-study samples (no study_id): saving the database, then migrating it in place"
+    pdb_dump_to_s3 participant_db_pre_samples_study
+    local out deleted
+    out=$({ echo "SET ROLE \"$DB_USERNAME\"; SET search_path TO \"$DB_SCHEMA\";"; pdb_samples_study_sql; } \
+            | PDB_PSQL_DB="$DB_NAME" pdb_psql -tA) \
+        || pdb_die "could not migrate the samples table to per-study samples; nothing was changed (it is one transaction), and the database is saved in $BACKUP_URI/participant_db_pre_samples_study.tar"
+    deleted=$(sed -n 's/^deleted=\([0-9]*\)$/\1/p' <<<"$out" | tail -1)
+    [[ "$deleted" =~ ^[0-9]+$ ]] || pdb_die "the samples migration did not report how many rows it deleted (got: $out)"
+    if (( deleted > 0 )); then
+        pdb_notice "samples migrated to per-study samples: $deleted sample row(s) of participants in no study or in several were deleted; load those studies again to restore them (the database before is $BACKUP_URI/participant_db_pre_samples_study.tar)"
+    else
+        pdb_log "samples migrated to per-study samples: every row was attributed to its study"
+    fi
+}
+
+# The samples migration, one transaction; prints deleted=<rows it could not attribute>.
+pdb_samples_study_sql() {
+    cat <<'SQL'
+BEGIN;
+ALTER TABLE samples ADD COLUMN study_id TEXT;
+UPDATE samples s SET study_id = one.study_id
+  FROM (SELECT hpds_id, min(study_id) AS study_id FROM consents
+        GROUP BY hpds_id HAVING count(DISTINCT study_id) = 1) one
+ WHERE one.hpds_id = s.hpds_id;
+WITH gone AS (DELETE FROM samples WHERE study_id IS NULL RETURNING 1)
+SELECT 'deleted=' || count(*) FROM gone;
+ALTER TABLE samples ALTER COLUMN study_id SET NOT NULL;
+ALTER TABLE samples DROP CONSTRAINT IF EXISTS uq_samples;
+ALTER TABLE samples ADD CONSTRAINT uq_samples_study UNIQUE (hpds_id, study_id, source_sample_id, sample_source);
+COMMIT;
+SQL
 }
 
 # --------------------------------------------------------------------------- credentials

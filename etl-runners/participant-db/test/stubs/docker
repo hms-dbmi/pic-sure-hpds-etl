@@ -13,6 +13,7 @@
 #   setup_rc       exit status of the one-off config setup container (run --rm)
 #   conn_error     the app role's TCP login fails with "Connection refused"
 #   pg_dump_rc, pg_restore_rc, psql_rc, start_ok, no_toc   failure switches
+#   samples_deleted   rows the samples migration reports deleting (default 0)
 S="$STUB_STATE"
 echo "docker $*" >> "$S/docker.log"
 f() { [[ -f "$S/$1" ]] && cat "$S/$1" || echo "$2"; }
@@ -80,6 +81,7 @@ case "$prog" in
     else
       input=$(cat)
       echo "$input" >> "$S/psql.log"
+      [[ "$input" == *"ADD COLUMN study_id"* && "$(f psql_rc 0)" == 0 ]] && echo "deleted=$(f samples_deleted 0)"
       pw=$(sed -n "s/.*PASSWORD '\([0-9a-f]*\)'.*/\1/p" <<<"$input" | tail -1)
       [[ -n "$pw" ]] && echo "$pw" > "$S/app_password"
       exit "$(f psql_rc 0)"

@@ -148,14 +148,60 @@ start_upgrades_the_schema_of_a_kept_db() {
     refute grep -q "DROP TABLE samples" "$STUB_STATE/psql.log"
 }
 
-start_drops_and_recreates_a_samples_table_without_study_id() {
+start_migrates_a_samples_table_without_study_id_in_place() {
     given_running_db; given_live_state clean
+    echo old > "$STUB_STATE/samples_shape"
+    export PDB_NOTICE_FILE="$T/notice.txt"
+    run_start
+    expect_rc 0
+    # Saved first, then migrated in one transaction; never dropped.
+    check uploaded participant_db_pre_samples_study.tar
+    check grep -q "ADD COLUMN study_id" "$STUB_STATE/psql.log"
+    check grep -q "^COMMIT;" "$STUB_STATE/psql.log"
+    refute grep -q "DROP TABLE samples" "$STUB_STATE/psql.log"
+    check grep -q "CREATE TABLE IF NOT EXISTS samples" "$STUB_STATE/psql.log"
+    expect_out "every row was attributed to its study"
+    refute [ -s "$T/notice.txt" ]
+    unset PDB_NOTICE_FILE
+}
+
+start_reports_samples_the_migration_could_not_attribute() {
+    given_running_db; given_live_state clean
+    echo old > "$STUB_STATE/samples_shape"; echo 42 > "$STUB_STATE/samples_deleted"
+    export PDB_NOTICE_FILE="$T/notice.txt"
+    run_start
+    expect_rc 0
+    expect_out "WARNING: samples migrated to per-study samples: 42 sample row(s)"
+    check grep -q "42 sample row(s) of participants in no study or in several were deleted" "$T/notice.txt"
+    unset PDB_NOTICE_FILE
+}
+
+start_migrates_the_samples_of_an_old_dump_it_restores() {
+    given_backup participant_db.tar
     echo old > "$STUB_STATE/samples_shape"
     run_start
     expect_rc 0
-    expect_out "The samples table predates per-study samples (no study_id): dropping it"
-    check grep -q "DROP TABLE samples;" "$STUB_STATE/psql.log"
-    check grep -q "CREATE TABLE IF NOT EXISTS samples" "$STUB_STATE/psql.log"
+    check restored_from participant_db.tar
+    check uploaded participant_db_pre_samples_study.tar
+    check grep -q "ADD COLUMN study_id" "$STUB_STATE/psql.log"
+    check [ "$(live_state)" == clean ]
+}
+
+start_fails_and_keeps_the_save_when_the_samples_migration_fails() {
+    given_running_db; given_live_state clean
+    echo old > "$STUB_STATE/samples_shape"; echo 3 > "$STUB_STATE/psql_rc"
+    run_start
+    expect_rc 1
+    expect_out "could not migrate the samples table to per-study samples; nothing was changed"
+    check uploaded participant_db_pre_samples_study.tar
+}
+
+start_fails_when_the_samples_shape_cannot_be_read() {
+    given_running_db; given_live_state clean
+    echo "" > "$STUB_STATE/samples_shape"
+    run_start
+    expect_rc 1
+    expect_out "could not read the shape of the samples table"
 }
 
 start_fails_when_the_schema_upgrade_fails() {

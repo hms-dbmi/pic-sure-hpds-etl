@@ -93,9 +93,12 @@ The global AllConcepts and VCF index stages read the tables populated by
 `participants-migration`. The participant database exists only for the run; see
 [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md).
 
-The per-study stages (participants, split, VCF indexes) run only studies marked **ready** that
-are **not yet marked "Data Processed"** in managed inputs, like the permanent pipeline's loads. The
-global AllConcepts, merge and manifest stages cover every ready study.
+The per-study stages (participants, split, VCF indexes) run every study marked **ready** in managed
+inputs, those marked **"Data Processed"** included: the migration sheet marks the studies the legacy
+system already processed, which are what the migration regenerates (`INCLUDE_PROCESSED`, default
+checked). Uncheck it only to re-run over a sheet this pipeline has since marked processed: the
+per-study stages then skip those studies, like the permanent pipeline's loads. The global
+AllConcepts, merge and manifest stages cover every ready study either way.
 
 `STUDY_FILTER` limits the participants and split stages to the listed studies; the global
 AllConcepts stage always covers all ready studies from the database, so a filtered rerun still
@@ -162,8 +165,10 @@ jobs skip tests. It also runs `make -C etl-runners/participant-db test`,
 is up, and saves its connection details on the Jenkins server for the runners. A clean running
 database is kept. `OVERWRITE_DB` replaces it from `DB_RESTORE_FROM` (blank = the latest clean
 backup), and after a failed run `IF_LAST_RUN_FAILED` decides between restoring the clean backup
-and continuing. See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial seed
-dump of the legacy RDS database must be placed.
+and continuing. A start that comes up with a warning (`Notice:` in its build description, e.g.
+sample rows the one-off per-study samples migration could not attribute) marks the run UNSTABLE.
+See [`PARTICIPANT_DB.md`](PARTICIPANT_DB.md), including where the initial seed dump of the legacy
+RDS database must be placed.
 
 ---
 
@@ -171,7 +176,7 @@ dump of the legacy RDS database must be placed.
 
 **Job:** `participants-migration`
 **Class:** [`ParticipantsMigrationJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/ParticipantsMigrationJob.java)
-**Runs:** once, processing every ready study not yet marked "Data Processed" (or `STUDY_FILTER`) internally
+**Runs:** once, processing every ready study (only those not yet marked "Data Processed" with `INCLUDE_PROCESSED` unchecked; or `STUDY_FILTER`) internally
 
 ### Input
 
@@ -329,7 +334,7 @@ artifacts.
 
 **Job:** `split-allconcepts`
 **Class:** [`SplitAllConceptsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/migration/SplitAllConceptsJob.java)
-**Runs:** once per ready study not yet marked "Data Processed". The stage is planned, then run in two lanes in parallel, largest
+**Runs:** once per ready study (with `INCLUDE_PROCESSED` unchecked, not yet marked "Data Processed"). The stage is planned, then run in two lanes in parallel, largest
 studies first, then consolidated into one report. Every step is a script under
 [`etl-runners/split-allconcepts/`](../etl-runners/split-allconcepts/) with its own tests
 (`make -C etl-runners/split-allconcepts test`, also run in the Tests stage).
@@ -457,7 +462,7 @@ Read legacy allConcepts CSV (streaming)
         ▼
 For each row:
   ├─ Drop it if its concept path does not start and end with the same µ or \ delimiter
-  ├─ Drop it unless its concept path's first node is the study id (µ{study_id}µ…)
+  ├─ Drop it unless every accession in its concept path's first node is the study id (µ{study_id}µ…)
   ├─ Replace the legacy HPDS id with the new hpds_id (via mapping)
   └─ Look up the patient's consent group
         │
@@ -489,11 +494,14 @@ earlier runs sits under `split_allconcepts/{study_id}/c{code}/` or
   paths. Checked first, so these rows are never counted as other studies' (below). `validate.sh`
   soft-fails "no malformed concept paths", the split report totals them, and the migration report
   lists the study for review (`SPLIT_MALFORMED_CONCEPT_PATHS`, `PARTIAL_DATA`)
-- Rows whose concept path's first node does not include the study id are dropped, with a
+- Rows whose concept path's first node is not the study's are dropped, with a
   `FOREIGN_CONCEPTS` warning. Some legacy allConcepts files carry other studies' concepts for the
   participants they share. The first node is the text up to the path's second delimiter. It
-  belongs to the study when it contains the study id (case-sensitive) not followed by another
-  digit: `phs000123`, `phs000123.v1.p1` and `phs000123_v2` are kept, `phs0001234` is not. The job's metrics have
+  belongs to the study when it names at least one accession (`phs` and digits, any case) and every
+  accession it names is the study id: `phs000123`, `PHS000123.v1.p1` and `phs000123_v2` are kept;
+  `phs0001234`, and `phs000123 (parent phs000280)`, are not. A first node with no accession is
+  dropped too: `\_…\` globals have their own allConcepts, and harmonized data sets are handled
+  separately. The job's metrics have
   `foreignConceptRows` and `foreignFirstNodes` (rows per first node, the 50 largest, the rest under
   `(other)`); the warning also carries up to 10 of the dropped paths. These rows are not counted as
   unmapped or without consent. The study's `validate.sh` soft-fails "no concepts from other
@@ -529,8 +537,8 @@ reused here to generate the global AllConcepts from the newly migrated data. Wri
 
 The same job as the permanent pipeline (see
 [`PERMANENT_PIPELINE.md`](PERMANENT_PIPELINE.md#stage-6-create-vcf-indexes)), run with
-`INCLUDE_PROCESSED=false`: like the other per-study stages, it covers only ready studies not yet
-marked "Data Processed". Writes
+the pipeline's `INCLUDE_PROCESSED`: like the other per-study stages, it covers every ready study,
+or only those not yet marked "Data Processed" when that is unchecked. Writes
 `{studyId}.c{code}_vcfIndex.tsv` and `{studyId}.c{code}_SampleIds.csv` to
 `VCF_INDEXES_OUTPUT`.
 
@@ -651,7 +659,8 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `MANAGED_INPUTS` | `…/__migration__/managed_inputs.csv` | Study list CSV |
 | `DATA_ROOT` | `…/BAM_testing` | Root of the per-study folders (see [S3 Layout](#s3-layout)); passed to `participants-migration` as `DATA_FOLDER`, used for the split input, mapping uploads, and split output (must be `s3://`) |
 | `BATCH_SIZE` | `1000` | Rows per batch insert |
-| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready, unprocessed |
+| `STUDY_FILTER` | (blank) | Comma-separated study ids for the participants and split stages; blank = all ready (unprocessed only with `INCLUDE_PROCESSED` unchecked) |
+| `INCLUDE_PROCESSED` | `true` | The participants, split and VCF stages also run studies marked "Data Processed" (the legacy system's mark). Unchecked, they skip them; global AllConcepts, merge and manifest cover every ready study either way |
 | `PARTICIPANTS_PARALLELISM` | `4` | Studies migrated at once (1-8). Each wants about a vCPU on the participants runner, whose size is that job's `INSTANCE_TYPE` |
 | `PARTICIPANTS_RESUME_FROM_RUN_ID` | (blank) | Run id of an earlier participants-migration run over the same `DATA_ROOT` (e.g. `<build-tag>-participants` of one that timed out); studies it migrated are copied, not loaded again |
 | `PARTICIPANTS_TIMEOUT_SECONDS` | `43200` | How long participants-migration waits for its runner. Passed explicitly: a downstream job gets a parameter left out of the build call from its previous build, not its current Jenkinsfile |
@@ -661,6 +670,7 @@ Data paths below are under `s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl
 | `ALL_CONCEPTS_OUTPUT` | `…/__migration__/global_allconcepts/` | Output for global AllConcepts (must be `s3://`) |
 | `VCF_INDEXES_JOB` | `create-vcf-indexes` | VCF index runner job |
 | `VCF_INDEXES_OUTPUT` | `…/__migration__/vcf_indexes/` | Output for VCF indexes (must be `s3://`) |
+| `GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS` | `10800` | How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside its own 4 h limit |
 | `MERGE_ALLCONCEPTS_JOB` | `merge-allconcepts` | Merge runner job |
 | `MERGE_ALLCONCEPTS_INPUT` | (blank) | Prefix to merge and write the manifest at; blank = `DATA_ROOT` |
 | `MERGE_ALLCONCEPTS_PARALLELISM` | `8` | Consent folders merged at once, 1-16 |

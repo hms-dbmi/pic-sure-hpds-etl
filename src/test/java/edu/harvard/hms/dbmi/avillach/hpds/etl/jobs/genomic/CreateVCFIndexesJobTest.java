@@ -420,7 +420,7 @@ class CreateVCFIndexesJobTest {
     void an_nwd_id_loaded_under_both_sample_sources_is_indexed_once() {
         long id1 = 1L;
         long id2 = 2L;
-        String studyId = "phs000223";
+        String studyId = "phs000901";
 
         when(managedInputsService.read()).thenReturn(List.of(genomicStudy("TST", studyId)));
 
@@ -443,13 +443,13 @@ class CreateVCFIndexesJobTest {
         ArgumentCaptor<String> uriCaptor = ArgumentCaptor.forClass(String.class);
         verify(ioResolver, org.mockito.Mockito.atLeast(1)).writeOutput(uriCaptor.capture(), contentCaptor.capture());
 
-        int vcfIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000223.c1_vcfIndex.tsv");
+        int vcfIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000901.c1_vcfIndex.tsv");
         String[] fields = new String(contentCaptor.getAllValues().get(vcfIdx), StandardCharsets.UTF_8)
                 .split("\n")[2].split("\t", -1);
         assertThat(fields[4]).isEqualTo("NWD900001,NWD900002");
         assertThat(fields[5]).isEqualTo("1,2");
 
-        int csvIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000223.c1_SampleIds.csv");
+        int csvIdx = uriCaptor.getAllValues().indexOf(outputPath + "phs000901.c1_SampleIds.csv");
         assertThat(new String(contentCaptor.getAllValues().get(csvIdx), StandardCharsets.UTF_8))
                 .isEqualTo("1,TST,NWD900001\n2,TST,NWD900002\n");
     }

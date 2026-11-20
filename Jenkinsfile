@@ -107,6 +107,8 @@ pipeline {
                description: 'Size-scaled per-study allConcepts timeout (exit 124 when exceeded): this plus GENERATOR_TIMEOUT_SECONDS_PER_GB per GiB of the study\'s decoded data, never less than 7200 (2 h) nor more than 12600 (3.5 h, inside the generator job\'s own 4 h limit).')
         string(name: 'GENERATOR_TIMEOUT_SECONDS_PER_GB', defaultValue: '600',
                description: 'Seconds allowed per GiB of decoded data (default 10 minutes). Raise it if large studies time out while still making progress.')
+        string(name: 'GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '10800',
+               description: 'How long generate-global-all-concepts may run before it is failed as stuck (exit 124), inside that job\'s own 4 h limit. Passed explicitly: a downstream job left out of the build call gets the default from its previous build, not from its current Jenkinsfile.')
         string(name: 'MERGE_ALLCONCEPTS_PARALLELISM', defaultValue: '8',
                description: 'merge-allconcepts --parallelism: consent folders merged at once, 1-16')
         string(name: 'MERGE_ALLCONCEPTS_TIMEOUT_SECONDS', defaultValue: '14400',
@@ -222,6 +224,7 @@ pipeline {
                     when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             orch().runPerStudyStage(
                                 title: 'SSTR load',
                                 key: 'sstr',
@@ -255,11 +258,13 @@ pipeline {
                     when { expression { !params.PREFLIGHT_ONLY } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             echo 'Generating global_AllConcepts.csv from populated database...'
                             orch().runDownstream(params.ALL_CONCEPTS_JOB, [
                                 string(name: 'OUTPUT', value: params.ALL_CONCEPTS_OUTPUT),
                                 string(name: 'MANAGED_INPUTS', value: orch().laterStageManagedInputs()),
                                 string(name: 'RUN_ID', value: "${env.BUILD_TAG}-all-concepts"),
+                                string(name: 'JOB_TIMEOUT_SECONDS', value: params.GLOBAL_ALLCONCEPTS_TIMEOUT_SECONDS.trim()),
                                 string(name: 'PREBUILT_IMAGE_TAR', value: orch().ownRunnerImage()),
                                 string(name: 'ENV', value: params.ENV),
                                 booleanParam(name: 'SKIP_TESTS', value: true),
@@ -272,6 +277,7 @@ pipeline {
                     when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             echo 'Creating VCF indexes from genomic data...'
                             orch().runDownstream(params.VCF_INDEXES_JOB, [
                                 string(name: 'OUTPUT', value: params.VCF_INDEXES_OUTPUT),
@@ -290,6 +296,7 @@ pipeline {
                     when { expression { !UNPROCESSED_STUDIES.isEmpty() } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             orch().runPerStudyStage(
                                 title: 'Per-study allConcepts',
                                 key: 'per-study-all-concepts',
@@ -326,6 +333,7 @@ pipeline {
                     when { expression { !params.PREFLIGHT_ONLY } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             echo 'Merging per-consent allConcepts files where needed...'
                             // A STUDY_ID reload loads that study whatever its ready flag, so merge
                             // exactly it; a sweep merges every ready (and not excluded) study. (The
@@ -355,6 +363,7 @@ pipeline {
                     when { expression { !params.PREFLIGHT_ONLY } }
                     steps {
                         script {
+                            orch().ensureRunnerImage()
                             orch().runDownstream(params.ALLCONCEPTS_MANIFEST_JOB, [
                                 string(name: 'INPUT', value: params.DATA_ROOT.trim()),
                                 string(name: 'GLOBAL_ALLCONCEPTS', value: params.ALL_CONCEPTS_OUTPUT.trim()),

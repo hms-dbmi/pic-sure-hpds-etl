@@ -183,10 +183,19 @@ and leaves a kept database's state as it was.
 Every start, whether it kept or replaced the database, then brings the schema up to `schema.sql` by
 running it (`pdb_upgrade_schema`): every statement in it is `CREATE ... IF NOT EXISTS`, so it adds
 only what is missing, such as `ix_consents_study_id`. A `samples` table from before samples were
-attributed to studies (no `study_id` column) is **dropped and recreated empty** first -- which study
-loaded its rows was never recorded -- and the start says so. Load every study again afterwards
-(`participants-migration` without `RESUME_FROM_RUN_ID`, which copies a study instead of loading it,
-or the SSTR loads) to refill it.
+attributed to studies (no `study_id` column) is **migrated in place** first (`pdb_migrate_samples_study`),
+once per environment:
+
+1. The whole database is saved to `participant_db_pre_samples_study.tar`.
+2. In one transaction, `study_id` is added and filled in from `consents`: which study loaded a row
+   was never recorded, so a participant consented in exactly one study gets that study. Rows of a
+   participant in no study, or in several (whose samples each of those studies was handed), cannot
+   be attributed and are **deleted**; the key then becomes `(hpds_id, study_id, source_sample_id,
+   sample_source)`. A failure rolls the whole migration back and fails the start.
+3. When rows were deleted, the start's build description says how many (`Notice: ...`), and the
+   orchestrator that started it marks its build **UNSTABLE**. Load the affected studies again
+   (`participants-migration` without `RESUME_FROM_RUN_ID`, which copies a study instead of loading
+   it, or the SSTR loads) to restore their samples.
 
 `live_state.json` missing means "no recorded state" (a kept database is then recorded clean). Any
 other S3 error reading it, or a record with no known state, stops the start: guessing could erase a
@@ -201,6 +210,7 @@ s3://bdc-etl-data-d0d6191/avillach-73-bdcatalyst-etl/participant-db/<ENV>/backup
 ├─ participant_db.tar                 the latest clean backup: what a start restores by default
 ├─ participant_db_not_promoted.tar    the most recent failed or aborted run's dump
 ├─ participant_db_pre_overwrite.tar   the live database, saved just before a start replaced it
+├─ participant_db_pre_samples_study.tar  the database before its samples got study_id (once)
 └─ live_state.json                    {"state": "clean"|"dirty"|"replacing", reason, at, build}
                                       (+ source, next while replacing: what the retry restores)
 ```

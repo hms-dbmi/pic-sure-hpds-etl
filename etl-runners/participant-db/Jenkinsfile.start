@@ -67,12 +67,13 @@ pipeline {
                 script {
                     currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.ENV}" + (params.OVERWRITE ? ' (overwrite)' : '')
                 }
-                sh 'rm -f pdb-error.txt'
+                sh 'rm -f pdb-error.txt pdb-notice.txt'
                 withEnv(["OVERWRITE=${params.OVERWRITE}",
                          "RESTORE_FROM=${params.RESTORE_FROM?.trim() ?: ''}",
                          "IF_LAST_RUN_FAILED=${params.IF_LAST_RUN_FAILED}",
                          "RUN_ID=${params.RUN_ID?.trim() ?: ''}",
-                         "PDB_ERROR_FILE=${env.WORKSPACE}/pdb-error.txt"]) {
+                         "PDB_ERROR_FILE=${env.WORKSPACE}/pdb-error.txt",
+                         "PDB_NOTICE_FILE=${env.WORKSPACE}/pdb-notice.txt"]) {
                     sh 'etl-runners/participant-db/start.sh "$ENV"'
                 }
             }
@@ -87,6 +88,14 @@ pipeline {
 
     post {
         success {
+            script {
+                // A warning start.sh raised (pdb_notice in lib.sh), e.g. sample rows the samples
+                // migration could not attribute. The orchestrators mark their build UNSTABLE on it.
+                def notices = fileExists('pdb-notice.txt') ? readFile('pdb-notice.txt').trim().readLines().findAll { it.trim() } : []
+                if (notices) {
+                    currentBuild.description = 'Notice: ' + notices.join('; ')
+                }
+            }
             echo "Participant database is up in '${env.ENV}'. It stays up; participant-db-backup saves it at the end of each pipeline run."
         }
         failure {
@@ -103,7 +112,7 @@ pipeline {
         }
         cleanup {
             // Never read by a later build that fails before its own rm.
-            sh 'rm -f pdb-error.txt'
+            sh 'rm -f pdb-error.txt pdb-notice.txt'
         }
     }
 }

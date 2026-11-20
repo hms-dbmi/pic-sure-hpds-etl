@@ -36,7 +36,8 @@ Writes, under <out-dir>:
         study_id,abv,consent_code,participants_loaded,participants_written
         loaded into the participant DB (the SSTR load's countsByConsentGroup) and wrote to that
         consent group's allConcepts file (the generator's participantsPerConsent); blank where the
-        stage did not report it.
+        stage did not report it. A group with more written than loaded, or written but not loaded,
+        is also a review item (CONSENT_WRITTEN_EXCEEDS_LOADED / CONSENT_WRITTEN_NOT_LOADED).
 
 Study status (most severe wins):
   FAILED                  a stage failed for it (the child's reason is in `reasons`)
@@ -249,6 +250,22 @@ def main(argv):
                 field = "loaded" if key == "sstr" else "written"
                 for code, n in per_consent.items():
                     consent_counts.setdefault(sid, OrderedDict()).setdefault(consent_code(code), {})[field] = n
+
+    # More participants written to a consent group's allConcepts file than were loaded into it, or a
+    # group written that was never loaded, means rows landed in the wrong group: a review item.
+    for sid, by_code in consent_counts.items():
+        if not any(c.get("loaded") is not None for c in by_code.values()):
+            continue  # no load counts for the study to compare with
+        for code, c in sorted(by_code.items(), key=lambda kv: consent_sort_key(kv[0])):
+            loaded, written = as_int(c.get("loaded")), as_int(c.get("written"))
+            if written is None or written == 0:
+                continue
+            if loaded is None or loaded == 0:
+                review(sid, "all-concepts-data-generator", "WARNING", "CONSENT_WRITTEN_NOT_LOADED",
+                       f"consent {code}: {written} participant(s) written to its allConcepts file, none loaded")
+            elif written > loaded:
+                review(sid, "all-concepts-data-generator", "WARNING", "CONSENT_WRITTEN_EXCEEDS_LOADED",
+                       f"consent {code}: {written} participant(s) written to its allConcepts file, {loaded} loaded")
 
     # Run-wide stages: their summary, and any ERROR/WARNING attributed to a study in this run.
     stages = []
