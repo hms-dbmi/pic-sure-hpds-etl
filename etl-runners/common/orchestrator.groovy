@@ -635,11 +635,12 @@ def writePipelineReport() {
 // QA pipeline counts
 // -----------------------------------------------------------------------------
 
-// The last step of the run, in post { always } after the final report and the DB backup: every study
+// The pipeline's last stage: every study
 // marked ready in MANAGED_INPUTS -- excluded ones and those this run did not process included, as a
 // regression check -- compared with its dbGaP summary (cached under DATA_ROOT; one missing there is
 // fetched and cached when QA_FETCH_MISSING_SUMMARIES, else the study fails QA), against the participant DB and this run's per-consent counts (qaRunCounts). Read-only but
-// for the cached summaries, so it never affects the backup. Skipped for a pre-flight run, when the DB
+// for the cached summaries. It writes the pipeline report first, for this run's counts; post writes it
+// again with the final result. Skipped for a pre-flight run, when the DB
 // never started, or when the run failed (its counts would be partial; run qa-pipeline-counts on its
 // own after a re-run). Findings, and QA failing to run, make the build UNSTABLE, never FAILED: the
 // ETL itself already succeeded. Its reports land in downstream-artifacts/qa-pipeline-counts/ and
@@ -659,6 +660,7 @@ def runQaPipelineCounts(String job, String pipeline) {
     }
     def reportPrefix = "s3://${params.DATA_ROOT.trim().substring('s3://'.length()).split('/')[0]}" +
                        "/etl-runner/reports/${pipeline}-pipeline/${runTag()}"
+    writePipelineReport()
     def downstream = build(job: job, wait: true, propagate: false, parameters: [
         string(name: 'MANAGED_INPUTS', value: params.MANAGED_INPUTS.trim()),
         string(name: 'DATA_ROOT', value: params.DATA_ROOT.trim()),

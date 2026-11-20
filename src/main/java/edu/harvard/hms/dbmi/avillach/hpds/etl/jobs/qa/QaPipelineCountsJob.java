@@ -56,7 +56,8 @@ import java.util.stream.Stream;
  * consent group's counts with the study version's dbGaP summary:
  * <ul>
  *   <li>the participant DB, for every study: distinct participants against {@code subject_count},
- *       and the study's own dbGaP samples against {@code sample_count};</li>
+ *       and, for a genomic (Data Type with {@code G}, as in {@code P/G}) study, its own dbGaP samples
+ *       against {@code sample_count};</li>
  *   <li>for the studies the run processed, every per-consent count its job reports and final report
  *       give ({@code --run-counts}, collected by the orchestrator), against {@code subject_count}.</li>
  * </ul>
@@ -223,6 +224,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
     protected Output execute(JobContext ctx) {
         List<ManagedInputRow> studies = select(managedInputsService.read(), studyFilter(ctx));
         List<String> studyIds = studies.stream().map(ManagedInputRow::studyId).toList();
+        // Only a genomic (P/G) study's samples are compared: others are not expected to have any.
+        List<String> genomicIds = studies.stream().filter(ManagedInputRow::isGenomic).map(ManagedInputRow::studyId).toList();
         String runCountsUri = Strings.trimToNull(ctx.get("run-counts", ""));
         SummaryCache cache = new SummaryCache(io, mapper, ctx.require("data-root").trim());
         boolean cacheSummaries = ctx.getBoolean("cache-summaries", true);
@@ -244,7 +247,8 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             CompletableFuture<List<ConsentRepository.ConsentGroupCount>> participantsFuture =
                     CompletableFuture.supplyAsync(() -> consents.countParticipantsByConsent(studyIds), pool);
             CompletableFuture<List<SampleRepository.ConsentGroupSamples>> samplesFuture =
-                    CompletableFuture.supplyAsync(() -> samples.countSamplesByConsent(studyIds,
+                    CompletableFuture.supplyAsync(() -> genomicIds.isEmpty() ? List.of()
+                            : samples.countSamplesByConsent(genomicIds,
                             SstrPopulateRdsParticipantsJob.SOURCE), pool);
             CompletableFuture<Map<String, Map<Measure, Map<String, Long>>>> runFuture =
                     CompletableFuture.supplyAsync(() -> runCountsUri == null ? Map.of() : readRunCounts(runCountsUri), pool);
@@ -305,8 +309,14 @@ public class QaPipelineCountsJob extends AbstractJob<QaPipelineCountsJob.Output>
             String sid = s.studyId();
             Map<Measure, Map<String, Long>> counts = new LinkedHashMap<>();
             counts.put(PipelineCountComparison.DB_PARTICIPANTS, dbParticipants.getOrDefault(sid, Map.of()));
-            counts.put(PipelineCountComparison.DB_SAMPLES, dbSamples.getOrDefault(sid, Map.of()));
-            counts.putAll(runCounts.getOrDefault(sid, Map.of()));
+            if (s.isGenomic()) {
+                counts.put(PipelineCountComparison.DB_SAMPLES, dbSamples.getOrDefault(sid, Map.of()));
+            }
+            runCounts.getOrDefault(sid, Map.of()).forEach((measure, byCode) -> {
+                if (s.isGenomic() || measure.kind() != Kind.SAMPLES) {
+                    counts.put(measure, byCode);
+                }
+            });
             StudyInput in = new StudyInput(sid, s.abv(), ConsentCountComparison.normalizeVersion(s.version()),
                     s.version(), counts, dbAbbreviations.getOrDefault(sid, Map.of()));
             results.add(PipelineCountComparison.compare(in, outcome(cached.get(sid), lookups.get(sid), fetchMissing)));

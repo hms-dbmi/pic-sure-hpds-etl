@@ -82,8 +82,9 @@ orchestrators (see [below](#qa-pipeline-counts-end-of-both-pipelines)), and can 
 
 **Job:** `qa-pipeline-counts` ([`etl-runners/qa-pipeline-counts/`](../etl-runners/qa-pipeline-counts/))
 **Class:** [`QaPipelineCountsJob`](../src/main/java/edu/harvard/hms/dbmi/avillach/hpds/etl/jobs/qa/QaPipelineCountsJob.java)
-**Runs:** last in both orchestrators' `post { always }`, after the final report and the participant
-DB backup, when the run succeeded (or is UNSTABLE) and was not a pre-flight; also on its own.
+**Runs:** as the last stage of both orchestrators, when the run has succeeded so far (or is
+UNSTABLE) and is not a pre-flight; also on its own. The orchestrator writes its final report first,
+for the run's counts, and again in `post` with the final result.
 `QA_PIPELINE_COUNTS_JOB` (blank skips it) names the job in both orchestrators.
 
 For **every study marked ready** in `MANAGED_INPUTS` -- the original file, so excluded studies and
@@ -93,7 +94,7 @@ group's counts with that study version's dbGaP summary:
 | Measure | Covers | Compared with |
 |---|---|---|
 | `db:participants` | every study | `subject_count` |
-| `db:samples` (the study's own `DBGap` samples) | every study | `sample_count` |
+| `db:samples` (the study's own `DBGap` samples) | genomic studies only (`Data Type` with `G`, as in `P/G`) | `sample_count` |
 | `participants-migration`, `split-allconcepts`, `migration-report:loaded`, `migration-report:split` | migration: the studies the run processed | `subject_count` |
 | `sstr-load`, `all-concepts-data-generator`, `pipeline-report:loaded`, `pipeline-report:written` | permanent: the studies the run processed | `subject_count` |
 

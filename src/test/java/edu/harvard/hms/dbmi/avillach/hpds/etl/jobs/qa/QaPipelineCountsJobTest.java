@@ -33,9 +33,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -82,9 +85,14 @@ class QaPipelineCountsJobTest {
                 });
     }
 
+    /** A genomic (P/G) study, so its samples are compared too. */
     private static ManagedInputRow study(String abv, String studyId, String version, boolean ready) {
-        return new ManagedInputRow(abv, studyId, version, "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", ready, false);
+        return study(abv, studyId, version, ready, "P/G");
+    }
+
+    private static ManagedInputRow study(String abv, String studyId, String version, boolean ready, String dataType) {
+        return new ManagedInputRow(abv, studyId, version, "", "", "", "", "", "", "", dataType, "", "", "", "", "", "",
+                "", "", "", "", "", "", ready, false);
     }
 
     private void managedInputs(ManagedInputRow... rows) {
@@ -387,6 +395,25 @@ class QaPipelineCountsJobTest {
         assertThat(result.getMetrics()).containsEntry("discrepanciesByMeasure", Map.of("db:samples", 1L));
         assertThat(file(PipelineCountsReport.DISCREPANCIES_FILE)).contains(
                 "phs000001,v1,false,1,G1,db:samples,sample_count,8,16,COUNT_MISMATCH,db:samples 16 vs dbGaP 8 (+8)");
+    }
+
+    @Test
+    void a_non_genomic_studys_samples_are_not_compared() throws IOException {
+        managedInputs(study("ONE", "phs000001", "v1", true, "P"));
+        cached("phs000001", "v1", studyJson("phs000001", 1, 1, 10, 8));
+        dbParticipants("phs000001", "1", 10);
+        dbSamples("phs000001", "1", 16);
+        Path counts = tempDir.resolve("run_counts.csv");
+        Files.writeString(counts, "study_id,consent_code,source,participants,kind\n"
+                + "phs000001,1,sstr-load,10,subjects\nphs000001,1,vcf-index,3,samples\n");
+
+        JobResult result = run(Map.of("run-counts", counts.toString()));
+
+        assertThat(result.getExitCode()).isEqualTo(ExitCode.SUCCESS);
+        assertThat(result.getMetrics()).containsEntry("countsCompared", 2L).containsEntry("discrepancies", 0L);
+        assertThat(String.join("\n", file(PipelineCountsReport.COUNTS_FILE)))
+                .doesNotContain("db:samples").doesNotContain("vcf-index");
+        verify(samples, never()).countSamplesByConsent(anyCollection(), any());
     }
 
     @Test

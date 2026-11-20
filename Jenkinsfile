@@ -39,10 +39,11 @@
 //
 // End of every run: downstream-artifacts/pipeline-report/ (etl-runners/pipeline-report/), archived
 // and uploaded to s3://<DATA_ROOT bucket>/etl-runner/reports/permanent-pipeline/<build-tag>/.
-// Then, when the run succeeded, QA pipeline counts (etl-runners/qa-pipeline-counts/) compares every
-// ready study's counts per consent group -- the DB, and this run's job and final reports -- with its
-// dbGaP summary; findings make the build UNSTABLE. Its report lands in
-// downstream-artifacts/qa-pipeline-counts/ and beside the pipeline report in S3.
+// The last stage, QA pipeline counts (etl-runners/qa-pipeline-counts/), compares every ready
+// study's counts per consent group -- the DB, and this run's job and final reports -- with its
+// dbGaP summary; findings make the build UNSTABLE. It writes the pipeline report first, to read its
+// counts (post writes it again, final). Its report lands in downstream-artifacts/qa-pipeline-counts/
+// and beside the pipeline report in S3.
 //
 // Exit codes the stages gate on (see ExitCode.java):
 //   0 success | 1 unknown | 2 validation | 3 data | 4 infrastructure | 5 config
@@ -126,7 +127,7 @@ pipeline {
         string(name: 'DB_BACKUP_JOB', defaultValue: 'participant-db-backup',
                description: 'Jenkins job that runs etl-runners/participant-db/Jenkinsfile.backup (end of every run)')
         string(name: 'QA_PIPELINE_COUNTS_JOB', defaultValue: 'qa-pipeline-counts',
-               description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile at the end of the run (after the report and the DB backup): every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov when QA_FETCH_MISSING_SUMMARIES is checked. Blank skips it.')
+               description: 'Jenkins job that runs etl-runners/qa-pipeline-counts/Jenkinsfile as the last stage: every ready study\'s counts per consent group vs its dbGaP summary. Its runner needs HTTPS egress to www.ncbi.nlm.nih.gov when QA_FETCH_MISSING_SUMMARIES is checked. Blank skips it.')
         booleanParam(name: 'QA_FETCH_MISSING_SUMMARIES', defaultValue: false,
                description: 'QA pipeline counts: fetch each summary missing under DATA_ROOT from dbGaP\'s API (and cache it). Unchecked, a study with no summary file fails QA (SUMMARY_MISSING) and dbGaP is not asked.')
         booleanParam(name: 'OVERWRITE_DB', defaultValue: false,
@@ -356,7 +357,7 @@ pipeline {
                 }
 
                 stage('AllConcepts manifest') {
-                    // Last stage: verifies the global AllConcepts file (ALL_CONCEPTS_OUTPUT) and
+                    // Verifies the global AllConcepts file (ALL_CONCEPTS_OUTPUT) and
                     // every ready consent group's MERGED file, and publishes the versioned
                     // {DATA_ROOT}/allConcepts_manifest.csv for production ingestion. Writes nothing
                     // (and fails the build) if any of them is missing or stale, so ingestion never
@@ -374,6 +375,26 @@ pipeline {
                                 booleanParam(name: 'SKIP_TESTS', value: true),
                             ], 'downstream-artifacts/allconcepts-manifest',
                                ': the manifest was NOT updated. Its report lists every missing or stale MERGED file.')
+                        }
+                    }
+                }
+
+                stage('QA pipeline counts') {
+                    // Last stage: every ready study's counts per consent group -- the DB, and this run's
+                    // job and final reports -- against its dbGaP summary. Only reads the DB. Findings,
+                    // and QA failing to run, make the build UNSTABLE, never FAILED: the ETL succeeded.
+                    when { expression { !params.PREFLIGHT_ONLY && params.QA_PIPELINE_COUNTS_JOB?.trim() } }
+                    steps {
+                        script {
+                            // Bounded: its dbGaP lookups stop after 6 hours; the runner's own timeout is
+                            // 7 h, and RETRY_ON_INFRA may run it twice.
+                            try {
+                                timeout(time: 15, unit: 'HOURS') {
+                                    orch().runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent')
+                                }
+                            } catch (err) {
+                                unstable("QA pipeline counts did not finish (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own.")
+                            }
                         }
                     }
                 }
@@ -400,18 +421,6 @@ pipeline {
                     }
                 } catch (err) {
                     echo "WARNING: the pipeline report was not written (${err})."
-                }
-                // Last: it reads the final report, and only reads the DB, so it never affects the backup.
-                // Bounded: its dbGaP lookups stop after 6 hours; the runner's own timeout is 7 h, and
-                // RETRY_ON_INFRA may run it twice.
-                if (params.QA_PIPELINE_COUNTS_JOB?.trim()) {
-                    try {
-                        timeout(time: 15, unit: 'HOURS') {
-                            orch().runQaPipelineCounts(params.QA_PIPELINE_COUNTS_JOB.trim(), 'permanent')
-                        }
-                    } catch (err) {
-                        unstable("QA pipeline counts did not finish (${err}); run ${params.QA_PIPELINE_COUNTS_JOB} on its own.")
-                    }
                 }
                 orch().removeRunnerImage()
             }
